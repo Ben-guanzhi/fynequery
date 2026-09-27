@@ -1,0 +1,91 @@
+package main
+
+import (
+	"database/sql"
+	"regexp"
+	"strings"
+)
+
+// columns lists column metadata for a table; the per-engine queries and scans
+// live on the dialect (dialect.go).
+func (c *Client) columns(id, database, schema, table string) ([]ColumnInfo, error) {
+	conn, err := c.openConn(id)
+	if err != nil {
+		return nil, err
+	}
+	if schema == "" {
+		schema = resolveSchema(conn.Config.Type, database, schema)
+	}
+	d, err := dialectFor(conn.Config.Type)
+	if err != nil {
+		return nil, err
+	}
+	return d.columns(c, conn, database, schema, table)
+}
+
+// tableIndexes reads one table's index list via the dialect.
+func (c *Client) tableIndexes(connID, database, schema, table string) ([]IndexInfo, error) {
+	conn, err := c.openConn(connID)
+	if err != nil {
+		return nil, err
+	}
+	if schema == "" {
+		schema = resolveSchema(conn.Config.Type, database, schema)
+	}
+	d, err := dialectFor(conn.Config.Type)
+	if err != nil {
+		return nil, err
+	}
+	return d.indexes(c, conn, database, schema, table)
+}
+
+// scanStrings runs a single-string-column query and collects results.
+func scanStrings(db *sql.DB, query string) ([]string, error) {
+	return collectRows(db, query, nil, scanString)
+}
+
+// allows implements DatabaseFilter matching.
+func (f DatabaseFilter) allows(name string) bool {
+	if len(f.Include) == 0 && len(f.Exclude) == 0 {
+		return true
+	}
+	for _, p := range f.Exclude {
+		if matchMask(p, name) {
+			return false
+		}
+	}
+	if len(f.Include) == 0 {
+		return true
+	}
+	for _, p := range f.Include {
+		if matchMask(p, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchMask matches a SQL-LIKE style mask against a name.
+func matchMask(pattern, name string) bool {
+	if pattern == "" {
+		return false
+	}
+	var sb strings.Builder
+	sb.WriteString(`(?i)\A`)
+	for _, r := range pattern {
+		switch r {
+		case '%', '*':
+			sb.WriteString(`.*`)
+		case '_':
+			sb.WriteString(`.`)
+		default:
+			sb.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	sb.WriteString(`\z`)
+	re, err := regexp.Compile(sb.String())
+	if err != nil {
+		return false
+	}
+	return re.MatchString(name)
+}

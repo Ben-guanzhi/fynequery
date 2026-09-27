@@ -1,0 +1,30 @@
+version: '3'
+
+vars:
+  APP_NAME: "fynequery"
+
+tasks:
+  default:
+    desc: Build the Fyne database client
+    cmds:
+      - task: build
+
+  build:
+    desc: Build the executable
+    cmds:
+      - go build -o {{.APP_NAME}}.exe .
+
+  run:
+    desc: Build and run
+    cmds:
+      - go run .
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  tidy:
+    desc: Tidy module dependencies
+    cmds:
+      - go mod tidy
