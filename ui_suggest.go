@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -54,6 +55,7 @@ type suggestEntry struct {
 	sugSel       int
 	onSugChanged func() // re-renders the candidate bar; wired by the client
 	onLines      func() // re-syncs the line-number gutter; wired by the client
+	onRun        func() // Ctrl/Cmd+Enter; wired by the client
 }
 
 // newSuggestEntry builds a multi-line SQL editor with completion support.
@@ -128,6 +130,22 @@ func (s *suggestEntry) TypedKey(k *fyne.KeyEvent) {
 		}
 	}
 	s.Entry.TypedKey(k)
+}
+
+// TypedShortcut implements fyne.Shortcutable. The glfw driver routes
+// shortcuts to the FOCUSED widget when it is Shortcutable (an Entry always
+// is) and never consults the canvas's registered shortcuts in that case, so
+// Ctrl/Cmd+Enter must be intercepted here: an editor keystroke that runs the
+// query instead of falling through to Entry's word-editing shortcuts.
+func (s *suggestEntry) TypedShortcut(shortcut fyne.Shortcut) {
+	if cs, ok := shortcut.(*desktop.CustomShortcut); ok &&
+		(cs.KeyName == fyne.KeyReturn || cs.KeyName == fyne.KeyEnter) &&
+		(cs.Modifier == fyne.KeyModifierControl || cs.Modifier == fyne.KeyModifierSuper) &&
+		s.onRun != nil {
+		s.onRun()
+		return
+	}
+	s.Entry.TypedShortcut(shortcut)
 }
 
 // setTextSilently replaces the editor text without firing the completion

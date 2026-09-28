@@ -200,6 +200,17 @@ func (c *Client) buildUI() fyne.CanvasObject {
 	cmdN := &desktop.CustomShortcut{KeyName: fyne.KeyN, Modifier: fyne.KeyModifierSuper}
 	c.win.Canvas().AddShortcut(ctrlN, func(fyne.Shortcut) { c.addQueryTab() })
 	c.win.Canvas().AddShortcut(cmdN, func(fyne.Shortcut) { c.addQueryTab() })
+	// Ctrl+Enter / Cmd+Enter runs the editor text. The main Enter is
+	// fyne.KeyReturn and the numpad Enter is fyne.KeyEnter, so both are
+	// registered. When the editor has focus the shortcut reaches it directly
+	// (see (*suggestEntry).TypedShortcut); these canvas registrations cover
+	// every other focus target.
+	for _, key := range []fyne.KeyName{fyne.KeyReturn, fyne.KeyEnter} {
+		ctrlEnter := &desktop.CustomShortcut{KeyName: key, Modifier: fyne.KeyModifierControl}
+		cmdEnter := &desktop.CustomShortcut{KeyName: key, Modifier: fyne.KeyModifierSuper}
+		c.win.Canvas().AddShortcut(ctrlEnter, func(fyne.Shortcut) { c.runCurrent() })
+		c.win.Canvas().AddShortcut(cmdEnter, func(fyne.Shortcut) { c.runCurrent() })
+	}
 
 	query := c.buildQueryView()
 	split := container.NewHSplit(sidebar, query)
