@@ -11,6 +11,8 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // This file assembles the query page: the toolbar, query tabs, the editor
@@ -255,12 +257,12 @@ func (c *Client) dbSelRefresh() {
 	if c.dbSel == nil {
 		return
 	}
-	if c.currentID == "" || !c.connectionStatus(c.currentID) {
+	if c.currentID == "" || !c.store.ConnectionStatus(c.currentID) {
 		c.dbSel.Disable()
 		c.dbSel.SetOptions(nil)
 		return
 	}
-	dbs, err := c.databases(c.currentID)
+	dbs, err := c.store.Databases(c.currentID)
 	if err != nil {
 		c.dbSel.Enable()
 		c.setStatus("数据库列表加载失败：" + err.Error())
@@ -286,7 +288,7 @@ func (c *Client) resolveDB() string {
 	if c.currentDB != "" {
 		return c.currentDB
 	}
-	if cfg, ok := c.liveConfig(c.currentID); ok {
+	if cfg, ok := c.store.LiveConfig(c.currentID); ok {
 		return cfg.Database
 	}
 	return ""
@@ -302,7 +304,7 @@ func (c *Client) runCurrent() {
 		dialog.ShowInformation("未连接", "请先在左侧选择一个连接并点击「连接」。", c.win)
 		return
 	}
-	if !c.connectionStatus(c.currentID) {
+	if !c.store.ConnectionStatus(c.currentID) {
 		dialog.ShowInformation("未连接", "该连接尚未建立，请先连接。", c.win)
 		return
 	}
@@ -310,17 +312,17 @@ func (c *Client) runCurrent() {
 	if strings.TrimSpace(q) == "" {
 		return
 	}
-	stmts := splitStatements(q)
+	stmts := db.SplitStatements(q)
 	if len(stmts) == 0 {
 		c.setStatus("没有可执行的语句（只有注释或空白）")
 		return
 	}
-	conn, err := c.openConn(c.currentID)
+	conn, err := c.store.OpenConn(c.currentID)
 	if err != nil {
 		c.setStatus("错误：" + err.Error())
 		return
 	}
-	db := c.resolveDB()
+	dbName := c.resolveDB()
 	limit := c.limitValue()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -331,16 +333,16 @@ func (c *Client) runCurrent() {
 	c.setStatus("执行中 ...（点「取消」可中断）")
 
 	// The whole query + history-record runs off the UI thread.
-	work := func() (QueryResult, string) {
+	work := func() (db.QueryResult, string) {
 		if len(stmts) == 1 {
-			res := c.execute(ctx, conn, db, stmts[0], limit)
-			c.recordStatement(stmts[0], res)
+			res := c.store.Execute(ctx, conn, dbName, stmts[0], limit)
+			c.store.RecordStatement(c.currentID, c.currentDB, stmts[0], res)
 			return res, stmts[0]
 		}
-		last, lastStmt, _ := c.runScript(ctx, conn, db, stmts, limit)
+		last, lastStmt, _ := c.store.RunScript(ctx, conn, dbName, stmts, limit)
 		return last, lastStmt
 	}
-	finish := func(res QueryResult, lastStmt string) {
+	finish := func(res db.QueryResult, lastStmt string) {
 		c.mu.Lock()
 		c.cancelFn = nil
 		c.mu.Unlock()

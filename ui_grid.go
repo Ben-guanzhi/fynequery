@@ -11,6 +11,8 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // This file is the result-grid module: the widget, its cell states (base rows
@@ -52,13 +54,13 @@ func (c *Client) exportGrid() {
 		var werr error
 		switch f.URI().Extension() {
 		case ".json":
-			werr = writeJSON(f, c.gridHeader, c.gridRows)
+			werr = db.WriteJSON(f, c.gridHeader, c.gridRows)
 		case ".sql":
 			werr = c.writeInsertScript(f)
 		case ".xlsx":
 			werr = c.writeWorkbookFile(f)
 		default:
-			werr = writeCSV(f, c.gridHeader, c.gridRows)
+			werr = db.WriteCSV(f, c.gridHeader, c.gridRows)
 		}
 		if werr != nil {
 			c.setStatus("导出失败：" + werr.Error())
@@ -77,17 +79,17 @@ func (c *Client) writeInsertScript(f fyne.URIWriteCloser) error {
 	if c.sourceRef.Table == "" {
 		return fmt.Errorf("INSERT 导出需要单表的 SELECT * 查询")
 	}
-	conn, err := c.openConn(c.currentID)
+	conn, err := c.store.OpenConn(c.currentID)
 	if err != nil {
 		return err
 	}
 	typ := conn.Config.Type
-	schema := defaultSchema(typ, c.sourceRef.Schema)
-	name, err := tableName(typ, c.sourceRef.Database, schema, c.sourceRef.Table)
+	schema := db.DefaultSchema(typ, c.sourceRef.Schema)
+	name, err := db.TableName(typ, c.sourceRef.Database, schema, c.sourceRef.Table)
 	if err != nil {
 		return err
 	}
-	cols, err := c.columns(c.currentID, c.sourceRef.Database, schema, c.sourceRef.Table)
+	cols, err := c.store.Columns(c.currentID, c.sourceRef.Database, schema, c.sourceRef.Table)
 	if err != nil {
 		return err
 	}
@@ -95,7 +97,7 @@ func (c *Client) writeInsertScript(f fyne.URIWriteCloser) error {
 	for _, col := range cols {
 		types[strings.ToLower(col.Name)] = col.Type
 	}
-	script, err := insertScript(typ, name, c.sourceRef.Table, c.gridCols, types, c.lastRows)
+	script, err := db.InsertScript(typ, name, c.sourceRef.Table, c.gridCols, types, c.lastRows)
 	if err != nil {
 		return err
 	}
@@ -248,8 +250,8 @@ func displayWidth(s string) int {
 	return w
 }
 
-// renderResult turns a QueryResult into the grid + status line.
-func (c *Client) renderResult(res QueryResult) {
+// renderResult turns a db.QueryResult into the grid + status line.
+func (c *Client) renderResult(res db.QueryResult) {
 	if res.Error != "" {
 		c.setStatus("错误：" + res.Error)
 		return
@@ -276,7 +278,7 @@ func (c *Client) renderResult(res QueryResult) {
 	for _, r := range res.Rows {
 		row := make([]string, len(res.Columns))
 		for i := range r {
-			row[i] = valueString(r[i])
+			row[i] = db.ValueString(r[i])
 		}
 		rows = append(rows, row)
 	}

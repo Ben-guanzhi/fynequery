@@ -15,20 +15,20 @@ import (
 // the grid only implies. Both lists come from the dialect's catalog readers.
 func (c *Client) showStructureDialog(nd *nodeData) {
 	id := c.selectedOrLive()
-	if _, err := c.openConn(id); err != nil {
+	if _, err := c.store.OpenConn(id); err != nil {
 		dialog.ShowError(err, c.win)
 		return
 	}
 	c.setStatus("加载 " + nd.name + " 结构 ...")
 
-	cols, err := c.columns(id, nd.db, nd.schema, nd.name)
+	cols, err := c.store.Columns(id, nd.db, nd.schema, nd.name)
 	if err != nil {
 		dialog.ShowError(err, c.win)
 		return
 	}
 	// A table without indexes is normal; a catalog that refuses to answer is
 	// reported but must not cost the user the column list.
-	indexes, err := c.tableIndexes(id, nd.db, nd.schema, nd.name)
+	indexes, err := c.store.TableIndexes(id, nd.db, nd.schema, nd.name)
 	if err != nil {
 		indexes = nil
 		c.setStatus("索引读取失败：" + err.Error())
@@ -80,7 +80,7 @@ func (c *Client) showStructureDialog(nd *nodeData) {
 
 // buildDDLTab renders the table's reconstructed DDL with a copy button.
 func (c *Client) buildDDLTab(connID string, nd *nodeData) fyne.CanvasObject {
-	ddl, err := c.tableDDL(connID, nd.db, nd.schema, nd.name)
+	ddl, err := c.store.TableDDL(connID, nd.db, nd.schema, nd.name)
 	if err != nil {
 		ddl = "-- 无法生成建表语句：" + err.Error()
 	}

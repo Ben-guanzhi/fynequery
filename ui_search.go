@@ -10,6 +10,8 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // showSearchDialog opens the quick-open box: type a fragment, press Enter,
@@ -26,7 +28,7 @@ func (c *Client) showSearchDialog() {
 	// One live connection: the column would repeat the same name everywhere.
 	showConn := false
 	c.mu.Lock()
-	showConn = len(c.live) > 1
+	showConn = c.store.LiveCount() > 1
 	c.mu.Unlock()
 
 	var d *dialog.CustomDialog
@@ -53,7 +55,7 @@ func (c *Client) showSearchDialog() {
 	}
 
 	runSearch := func() {
-		hits, err := c.searchObjects(entry.Text, 0)
+		hits, err := c.store.SearchObjects(entry.Text, 0)
 		if err != nil {
 			c.searchResults = nil
 			hint.SetText("搜索失败：" + err.Error())
@@ -65,7 +67,7 @@ func (c *Client) showSearchDialog() {
 			hint.SetText("没有匹配的对象")
 		} else {
 			extra := ""
-			if len(hits) >= searchDefaultLimit {
+			if len(hits) >= db.SearchDefaultLimit {
 				extra = "（已达上限，输入更长的片段可缩小范围）"
 			}
 			hint.SetText(fmt.Sprintf("找到 %d 个对象%s", len(hits), extra))
@@ -87,14 +89,14 @@ func (c *Client) showSearchDialog() {
 }
 
 // searchResultText renders one hit: where it lives and what it is.
-func (c *Client) searchResultText(m ObjectMatch, showConn bool) string {
+func (c *Client) searchResultText(m db.ObjectMatch, showConn bool) string {
 	name := m.Table
 	if m.Schema != "" {
 		name = m.Schema + "." + m.Table
 	}
 	text := fmt.Sprintf("%s · %s [%s]", m.Database, name, m.Type)
 	if showConn {
-		if cfg, ok := c.findConnection(m.ConnID); ok {
+		if cfg, ok := c.store.FindConnection(m.ConnID); ok {
 			text = cfg.Name + " · " + text
 		}
 	}
@@ -105,7 +107,7 @@ func (c *Client) searchResultText(m ObjectMatch, showConn bool) string {
 // expands the navigator down to the table, selects it and fills the editor.
 // Catalog quirks degrade gracefully: if the node cannot be found the editor
 // still gets a composed SELECT.
-func (c *Client) openObjectMatch(m ObjectMatch) {
+func (c *Client) openObjectMatch(m db.ObjectMatch) {
 	c.currentID = m.ConnID
 	c.currentDB = m.Database
 	c.refreshSchema()

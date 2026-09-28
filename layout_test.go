@@ -5,6 +5,8 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
+
+	"tablepro-fyne/internal/db"
 )
 
 // TestSidebarTreeFillsHeight renders the real main window on the test canvas
@@ -17,12 +19,12 @@ func TestSidebarTreeFillsHeight(t *testing.T) {
 	c := &Client{
 		app:        a,
 		win:        w,
-		live:       make(map[string]*Conn),
+		store:      db.NewStore(),
 		treeNodes:  make(map[string]*nodeData),
 		expanded:   make(map[string]bool),
 		sugTables:  make(map[string][]string),
 		sugLoading: make(map[string]bool),
-		fkCache:    make(map[string][]ForeignKeyInfo),
+		fkCache:    make(map[string][]db.ForeignKeyInfo),
 		edits:      newGridEditState(),
 		sortCol:    -1,
 	}
@@ -48,12 +50,12 @@ func TestEditorReceivesTypedText(t *testing.T) {
 	c := &Client{
 		app:        a,
 		win:        w,
-		live:       make(map[string]*Conn),
+		store:      db.NewStore(),
 		treeNodes:  make(map[string]*nodeData),
 		expanded:   make(map[string]bool),
 		sugTables:  make(map[string][]string),
 		sugLoading: make(map[string]bool),
-		fkCache:    make(map[string][]ForeignKeyInfo),
+		fkCache:    make(map[string][]db.ForeignKeyInfo),
 		edits:      newGridEditState(),
 		sortCol:    -1,
 	}

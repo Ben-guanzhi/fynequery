@@ -8,25 +8,23 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // Client holds application state and the widgets that must be refreshed live.
+// All connection, catalog and persistence state lives behind the db.Store
+// barrier; Client owns only what the UI thread shows or edits.
 type Client struct {
-	app fyne.App
-	win fyne.Window
+	app   fyne.App
+	win   fyne.Window
+	store *db.Store
 
 	mu        sync.Mutex
-	saved     []ConnConfig
-	live      map[string]*Conn
 	currentID string
-	connFile  string
-	idSeq     int
 	selIdx    int // currently selected connection list index, -1 if none
 
-	// query history
-	history     []HistoryEntry
-	historySeq  int64
-	historyFile string
+	// query history panel
 	historyList *widget.List
 
 	// current target database for the query editor
@@ -62,7 +60,7 @@ type Client struct {
 	gridCols     []string
 	gridColTypes []string
 	lastRows     [][]interface{}
-	sourceRef    TableRef
+	sourceRef    db.TableRef
 	edits        *gridEditState
 	sortCol      int
 	sortAsc      bool
@@ -86,10 +84,10 @@ type Client struct {
 	sugLoading map[string]bool
 
 	// per-table foreign-key memo for the cell editor's value picker
-	fkCache map[string][]ForeignKeyInfo
+	fkCache map[string][]db.ForeignKeyInfo
 
 	// quick-open box results
-	searchResults []ObjectMatch
+	searchResults []db.ObjectMatch
 
 	// query tabs: independent editors sharing one result grid; c.queryEntry
 	// always aliases the active tab's editor
@@ -100,7 +98,7 @@ type Client struct {
 	// history panel: filter text and the filtered newest-first view the list
 	// renders (rebuilt on every change)
 	histFilter      string
-	historyView     []HistoryEntry
+	historyView     []db.HistoryEntry
 	histFilterEntry *widget.Entry
 
 	// persisted ui state (theme, window geometry, splits, active tab)
@@ -152,21 +150,15 @@ func newClient(a fyne.App, w fyne.Window) *Client {
 	c := &Client{
 		app:        a,
 		win:        w,
-		live:       make(map[string]*Conn),
+		store:      db.NewStore(),
 		treeNodes:  make(map[string]*nodeData),
 		expanded:   make(map[string]bool),
 		sugTables:  make(map[string][]string),
 		sugLoading: make(map[string]bool),
-		fkCache:    make(map[string][]ForeignKeyInfo),
+		fkCache:    make(map[string][]db.ForeignKeyInfo),
 		edits:      newGridEditState(),
 		sortCol:    -1,
 	}
-	c.connFile = connFilePath()
-	c.loadConnections()
-	c.historyFile = historyFilePath()
-	c.loadHistory()
-	// Seed the ID sequence past any existing "c<n>" ids; see nextConnSeq.
-	c.idSeq = nextConnSeq(c.saved)
 	c.asyncRun = true
 	c.dispatch = fyne.Do
 	return c
@@ -174,15 +166,10 @@ func newClient(a fyne.App, w fyne.Window) *Client {
 
 // closeAll closes every live database pool before quitting.
 func (c *Client) closeAll() {
+	c.store.CloseAll()
 	c.mu.Lock()
-	ids := make([]string, 0, len(c.live))
-	for id := range c.live {
-		ids = append(ids, id)
-	}
+	c.currentID = ""
 	c.mu.Unlock()
-	for _, id := range ids {
-		c.disconnect(id)
-	}
 }
 
 // buildUI assembles the TablePro-style layout: one sidebar with the

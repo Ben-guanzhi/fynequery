@@ -10,6 +10,8 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // buildHistoryPanel assembles the sidebar bottom: recent statements with a
@@ -91,7 +93,7 @@ func (c *Client) buildHistoryPanel() fyne.CanvasObject {
 			if !ok {
 				return
 			}
-			c.clearHistory()
+			c.store.ClearHistory()
 			c.refreshHistory()
 			c.setStatus("历史已清空")
 		}, c.win)
@@ -109,10 +111,11 @@ func (c *Client) buildHistoryPanel() fyne.CanvasObject {
 // rebuildHistoryView recomputes the filtered newest-first view the history
 // list renders. Called whenever the log or the filter changes.
 func (c *Client) rebuildHistoryView() {
+	entries := c.store.History()
 	c.mu.Lock()
-	view := make([]HistoryEntry, 0, len(c.history))
-	for i := len(c.history) - 1; i >= 0; i-- {
-		e := c.history[i]
+	view := make([]db.HistoryEntry, 0, len(entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
 		if c.histFilter == "" ||
 			strings.Contains(strings.ToLower(e.SQL), c.histFilter) ||
 			strings.Contains(strings.ToLower(e.Table), c.histFilter) ||

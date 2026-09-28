@@ -6,6 +6,8 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // TestSchemaRowsModel drives the flat-row navigator: the root row is shown
@@ -13,7 +15,7 @@ import (
 // table row fills the SQL editor.
 func TestSchemaRowsModel(t *testing.T) {
 	test.NewApp()
-	c := &Client{live: make(map[string]*Conn), treeNodes: make(map[string]*nodeData)}
+	c := &Client{store: db.NewStore(), treeNodes: make(map[string]*nodeData)}
 	c.buildSchemaView()
 
 	c.refreshSchema() // nothing connected

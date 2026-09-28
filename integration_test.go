@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
-	"os"
+	"database/sql"
 	"path/filepath"
 	"testing"
 
 	"fyne.io/fyne/v2/test"
+
+	"tablepro-fyne/internal/db"
 )
 
 // TestEndToEndSQLite drives the full core pipeline against a real SQLite file:
@@ -16,31 +18,32 @@ func TestEndToEndSQLite(t *testing.T) {
 	dir := t.TempDir()
 	dbFile := filepath.Join(dir, "sample.db")
 
-	db, err := createConnection(ConnConfig{Type: dbTypeSQLite, Database: dbFile})
+	sdb, err := sql.Open("sqlite3", dbFile)
 	if err != nil {
-		t.Fatalf("createConnection: %v", err)
+		t.Fatalf("open: %v", err)
 	}
 	// Seed a table and some rows directly.
-	if _, err := db.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, active INTEGER)`); err != nil {
+	if _, err := sdb.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, active INTEGER)`); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO users (name, active) VALUES ('alice', 1), ('bob', 0)`); err != nil {
+	if _, err := sdb.Exec(`INSERT INTO users (name, active) VALUES ('alice', 1), ('bob', 0)`); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	db.Close()
+	sdb.Close()
 
-	c := &Client{live: make(map[string]*Conn), saved: []ConnConfig{
-		{ID: "c0", Type: dbTypeSQLite, Database: dbFile},
-	}}
-
-	cfg := c.saved[0]
+	c := &Client{store: db.NewStore()}
+	cfg := db.ConnConfig{ID: "c0", Type: db.DbTypeSQLite, Database: dbFile}
 	if err := c.connect(cfg); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(func() { c.disconnect(cfg.ID) })
+	conn, err := c.store.OpenConn(cfg.ID)
+	if err != nil {
+		t.Fatalf("openConn: %v", err)
+	}
 
 	// Execute a SELECT.
-	res := c.execute(context.Background(), c.live[cfg.ID], "", "SELECT id, name, active FROM users ORDER BY id", 100)
+	res := c.store.Execute(context.Background(), conn, "", "SELECT id, name, active FROM users ORDER BY id", 100)
 	if res.Error != "" {
 		t.Fatalf("execute: %s", res.Error)
 	}
@@ -55,13 +58,13 @@ func TestEndToEndSQLite(t *testing.T) {
 	}
 
 	// Row limit wrapper applies to plain SELECTs.
-	limited := c.execute(context.Background(), c.live[cfg.ID], "", "SELECT * FROM users", 1)
+	limited := c.store.Execute(context.Background(), conn, "", "SELECT * FROM users", 1)
 	if limited.RowCount != 1 {
 		t.Fatalf("row limit: expected 1 row, got %d", limited.RowCount)
 	}
 
 	// Non-SELECT command reports affected rows.
-	ins := c.execute(context.Background(), c.live[cfg.ID], "", "INSERT INTO users (name, active) VALUES ('carol', 1)", 0)
+	ins := c.store.Execute(context.Background(), conn, "", "INSERT INTO users (name, active) VALUES ('carol', 1)", 0)
 	if ins.Error != "" {
 		t.Fatalf("insert exec: %s", ins.Error)
 	}
@@ -70,7 +73,7 @@ func TestEndToEndSQLite(t *testing.T) {
 	}
 
 	// Schema browsing.
-	dbs, err := c.databases(cfg.ID)
+	dbs, err := c.store.Databases(cfg.ID)
 	if err != nil || len(dbs) != 1 {
 		t.Fatalf("databases: %v (len=%d)", err, len(dbs))
 	}
@@ -78,7 +81,7 @@ func TestEndToEndSQLite(t *testing.T) {
 		t.Fatalf("expected database %q, got %q", dbFile, dbs[0])
 	}
 
-	tables, err := c.tables(cfg.ID, dbFile, "")
+	tables, err := c.store.Tables(cfg.ID, dbFile, "")
 	if err != nil {
 		t.Fatalf("tables: %v", err)
 	}
@@ -86,7 +89,7 @@ func TestEndToEndSQLite(t *testing.T) {
 		t.Fatalf("expected users table, got %+v", tables)
 	}
 
-	cols, err := c.columns(cfg.ID, dbFile, "", "users")
+	cols, err := c.store.Columns(cfg.ID, dbFile, "", "users")
 	if err != nil {
 		t.Fatalf("columns: %v", err)
 	}
@@ -104,28 +107,6 @@ func TestEndToEndSQLite(t *testing.T) {
 	}
 }
 
-// TestConnectionsFileRoundTrip verifies the DPAPI-less code path persists and
-// reloads connections without losing the password (plaintext on non-Windows;
-// sealed on Windows).
-func TestConnectionsFileRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "connections.json")
-	c := &Client{live: make(map[string]*Conn), connFile: file}
-	c.saved = []ConnConfig{{ID: "c0", Name: "t", Type: dbTypeSQLite, Database: ":memory:", Password: "pw"}}
-	c.persist()
-
-	// Re-load into a fresh client (same file, unsealed at load).
-	c2 := &Client{live: make(map[string]*Conn), connFile: file}
-	c2.loadConnections()
-	if len(c2.saved) != 1 {
-		t.Fatalf("expected 1 connection after reload, got %d", len(c2.saved))
-	}
-	if c2.saved[0].Password != "pw" {
-		t.Fatalf("password not preserved, got %q", c2.saved[0].Password)
-	}
-	_ = os.Remove(file)
-}
-
 // TestQueryCancel proves the cancellation plumbing: an already-cancelled
 // context makes execute report a cancellation error, which is what the
 // cancel button produces for a long-running query.
@@ -136,31 +117,30 @@ func TestQueryCancel(t *testing.T) {
 	dir := t.TempDir()
 	dbFile := filepath.Join(dir, "t.db")
 
-	db, err := createConnection(ConnConfig{Type: dbTypeSQLite, Database: dbFile})
+	sdb, err := sql.Open("sqlite3", dbFile)
 	if err != nil {
-		t.Fatalf("createConnection: %v", err)
+		t.Fatalf("open: %v", err)
 	}
-	if _, err := db.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`); err != nil {
+	if _, err := sdb.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO users (name) VALUES ('a')`); err != nil {
+	if _, err := sdb.Exec(`INSERT INTO users (name) VALUES ('a')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	db.Close()
-	c.historyFile = filepath.Join(dir, "h.json")
+	sdb.Close()
 
-	if err := c.connect(ConnConfig{ID: "c0", Name: "t", Type: dbTypeSQLite, Database: dbFile}); err != nil {
+	if err := c.connect(db.ConnConfig{ID: "c0", Name: "t", Type: db.DbTypeSQLite, Database: dbFile}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(func() { c.disconnect("c0") })
 
-	conn, err := c.openConn("c0")
+	conn, err := c.store.OpenConn("c0")
 	if err != nil {
 		t.Fatalf("openConn: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	res := c.execute(ctx, conn, "", "SELECT name FROM users", 0)
+	res := c.store.Execute(ctx, conn, "", "SELECT name FROM users", 0)
 	if res.Error == "" {
 		t.Fatal("expected a cancellation error, got none")
 	}

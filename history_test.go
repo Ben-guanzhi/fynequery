@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2/test"
+
+	"tablepro-fyne/internal/db"
 )
 
 // TestRebuildHistoryView checks the history panel's filtered view: newest
@@ -13,11 +15,11 @@ func TestRebuildHistoryView(t *testing.T) {
 	a := test.NewApp()
 	w := a.NewWindow("")
 	c := newTestClient(a, w)
-	c.history = []HistoryEntry{
+	c.store.ReplaceHistory([]db.HistoryEntry{
 		{ID: 1, SQL: "SELECT * FROM users"},
 		{ID: 2, SQL: "UPDATE orders SET a = 1", Table: "orders"},
 		{ID: 3, SQL: "INSERT INTO users (name) VALUES ('x')"},
-	}
+	})
 
 	c.histFilter = ""
 	c.rebuildHistoryView()
@@ -40,7 +42,9 @@ func TestRebuildHistoryView(t *testing.T) {
 
 	// The database field is searched as well.
 	c.histFilter = "zs"
-	c.history[1].Database = "zs"
+	entries := c.store.History()
+	entries[1].Database = "zs"
+	c.store.ReplaceHistory(entries)
 	c.rebuildHistoryView()
 	if len(c.historyView) != 1 || c.historyView[0].ID != 2 {
 		t.Fatalf("db-filtered view = %+v, want id 2", c.historyView)

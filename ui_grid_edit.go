@@ -10,6 +10,8 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // Grid edit state. The queue holds raw strings; "" means NULL (the edit
@@ -87,40 +89,40 @@ func sortedUpdateRows(m map[int]map[string]string) []int {
 // collectChanges turns the queue into RowChanges in queue order: updates by
 // row, deletes by row, then the new rows. Column order follows the result, so
 // the rendered statements stay stable.
-func (c *Client) collectChanges() []RowChange {
+func (c *Client) collectChanges() []db.RowChange {
 	g := c.edits
 	if g == nil {
 		return nil
 	}
-	var out []RowChange
+	var out []db.RowChange
 	for _, i := range sortedUpdateRows(g.updates) {
 		if g.deletes[i] {
 			continue // the delete wins; editing a deleted row queues nothing new
 		}
-		out = append(out, RowChange{Original: c.lastRows[i], Edits: c.editsOf(g.updates[i])})
+		out = append(out, db.RowChange{Original: c.lastRows[i], Edits: c.editsOf(g.updates[i])})
 	}
 	for _, i := range sortedInts(g.deletes) {
-		out = append(out, RowChange{Kind: rowDelete, Original: c.lastRows[i]})
+		out = append(out, db.RowChange{Kind: db.RowDelete, Original: c.lastRows[i]})
 	}
 	for _, row := range g.inserts {
-		out = append(out, RowChange{Kind: rowInsert, Edits: c.editsOf(row)})
+		out = append(out, db.RowChange{Kind: db.RowInsert, Edits: c.editsOf(row)})
 	}
 	return out
 }
 
 // editsOf renders one cell map as CellEdits in result-column order. An empty
 // queued value means NULL.
-func (c *Client) editsOf(cells map[string]string) []CellEdit {
-	edits := make([]CellEdit, 0, len(cells))
+func (c *Client) editsOf(cells map[string]string) []db.CellEdit {
+	edits := make([]db.CellEdit, 0, len(cells))
 	for _, col := range c.gridCols {
 		v, ok := cells[col]
 		if !ok {
 			continue
 		}
 		if v == "" {
-			edits = append(edits, CellEdit{Column: col, Value: nil})
+			edits = append(edits, db.CellEdit{Column: col, Value: nil})
 		} else {
-			edits = append(edits, CellEdit{Column: col, Value: v})
+			edits = append(edits, db.CellEdit{Column: col, Value: v})
 		}
 	}
 	return edits
@@ -181,13 +183,13 @@ func (c *Client) gridCellState(row, col int) (string, int) {
 // setEditContext records the raw result and whether its rows are editable
 // (SELECT * of one table), resetting any unsaved queue. Called after every
 // executed statement.
-func (c *Client) setEditContext(query string, res QueryResult) {
+func (c *Client) setEditContext(query string, res db.QueryResult) {
 	c.edits = newGridEditState()
 	c.lastRows = nil
-	c.sourceRef = TableRef{}
+	c.sourceRef = db.TableRef{}
 	if res.Error == "" {
 		c.lastRows = res.Rows
-		c.sourceRef = c.querySource(c.currentID, query, c.resolveDB())
+		c.sourceRef = c.store.QuerySource(c.currentID, query, c.resolveDB())
 	}
 	c.updateEditButtons()
 }
@@ -200,12 +202,12 @@ func (c *Client) gridEditable() bool {
 // editableTableName renders the object the current result reads from, which is
 // where a filtered re-query has to point.
 func (c *Client) editableTableName() (string, error) {
-	conn, err := c.openConn(c.currentID)
+	conn, err := c.store.OpenConn(c.currentID)
 	if err != nil {
 		return "", err
 	}
 	typ := conn.Config.Type
-	return tableName(typ, c.sourceRef.Database, defaultSchema(typ, c.sourceRef.Schema), c.sourceRef.Table)
+	return db.TableName(typ, c.sourceRef.Database, db.DefaultSchema(typ, c.sourceRef.Schema), c.sourceRef.Table)
 }
 
 // ---- actions ----
@@ -358,7 +360,7 @@ func (c *Client) discardChanges() {
 // saveChanges previews the rendered statements and, on confirmation, applies
 // them in one transaction, then re-runs the query to show the stored state.
 func (c *Client) saveChanges() {
-	set := ChangeSet{
+	set := db.ChangeSet{
 		ConnID:   c.currentID,
 		Database: c.resolveDB(),
 		Schema:   c.sourceRef.Schema,
@@ -366,7 +368,7 @@ func (c *Client) saveChanges() {
 		Columns:  c.gridCols,
 		Changes:  c.collectChanges(),
 	}
-	statements, err := c.buildChanges(set)
+	statements, err := c.store.BuildChanges(set)
 	if err != nil {
 		dialog.ShowError(err, c.win)
 		return
@@ -380,7 +382,7 @@ func (c *Client) saveChanges() {
 
 	var d *dialog.CustomDialog
 	apply := func() {
-		applied, err := c.applyChanges(set)
+		applied, err := c.store.ApplyChanges(set)
 		if err != nil {
 			dialog.ShowError(err, c.win)
 			return

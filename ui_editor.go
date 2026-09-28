@@ -446,9 +446,9 @@ func (c *Client) suggestionPool() []string {
 	pool = append(pool, c.gridCols...)
 
 	if c.currentID != "" {
-		if _, err := c.openConn(c.currentID); err == nil {
-			db := c.resolveDB()
-			key := c.currentID + "\x00" + db
+		if _, err := c.store.OpenConn(c.currentID); err == nil {
+			dbName := c.resolveDB()
+			key := c.currentID + "\x00" + dbName
 			c.mu.Lock()
 			tables, ok := c.sugTables[key]
 			loading := c.sugLoading[key]
@@ -457,7 +457,7 @@ func (c *Client) suggestionPool() []string {
 			}
 			c.mu.Unlock()
 			if !ok && !loading {
-				go c.loadSuggestTables(c.currentID, db, key)
+				go c.loadSuggestTables(c.currentID, dbName, key)
 			}
 			pool = append(pool, tables...)
 		}
@@ -471,7 +471,7 @@ func (c *Client) suggestionPool() []string {
 // keystroke retries instead of leaving completion empty for the session.
 func (c *Client) loadSuggestTables(connID, db, key string) {
 	var tables []string
-	infos, err := c.tables(connID, db, "")
+	infos, err := c.store.Tables(connID, db, "")
 	if err == nil {
 		for _, ti := range infos {
 			tables = append(tables, ti.Name)

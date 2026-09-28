@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -8,18 +9,20 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 func newTestClient(a fyne.App, w fyne.Window) *Client {
 	return &Client{
 		app:        a,
 		win:        w,
-		live:       make(map[string]*Conn),
+		store:      db.NewStore(),
 		treeNodes:  make(map[string]*nodeData),
 		expanded:   make(map[string]bool),
 		sugTables:  make(map[string][]string),
 		sugLoading: make(map[string]bool),
-		fkCache:    make(map[string][]ForeignKeyInfo),
+		fkCache:    make(map[string][]db.ForeignKeyInfo),
 		edits:      newGridEditState(),
 		sortCol:    -1,
 		// Test mode: no background goroutines, run inline for determinism.
@@ -105,20 +108,19 @@ func TestTabDirtyFlow(t *testing.T) {
 	dir := t.TempDir()
 	dbFile := filepath.Join(dir, "t.db")
 
-	db, err := createConnection(ConnConfig{Type: dbTypeSQLite, Database: dbFile})
+	sdb, err := sql.Open("sqlite3", dbFile)
 	if err != nil {
-		t.Fatalf("createConnection: %v", err)
+		t.Fatalf("open: %v", err)
 	}
-	if _, err := db.Exec(`CREATE TABLE users (name TEXT)`); err != nil {
+	if _, err := sdb.Exec(`CREATE TABLE users (name TEXT)`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO users (name) VALUES ('alice')`); err != nil {
+	if _, err := sdb.Exec(`INSERT INTO users (name) VALUES ('alice')`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	db.Close()
-	c.historyFile = filepath.Join(dir, "history.json")
+	sdb.Close()
 
-	if err := c.connect(ConnConfig{ID: "c0", Name: "t", Type: dbTypeSQLite, Database: dbFile}); err != nil {
+	if err := c.connect(db.ConnConfig{ID: "c0", Name: "t", Type: db.DbTypeSQLite, Database: dbFile}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(func() { c.disconnect("c0") })

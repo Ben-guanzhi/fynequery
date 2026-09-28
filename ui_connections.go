@@ -8,34 +8,36 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // engineType maps the user-facing name to the internal identifier.
 func engineType(name string) string {
 	switch name {
 	case "MySQL":
-		return dbTypeMySQL
+		return db.DbTypeMySQL
 	case "PostgreSQL":
-		return dbTypePostgres
+		return db.DbTypePostgres
 	case "SQLite":
-		return dbTypeSQLite
+		return db.DbTypeSQLite
 	case "SQL Server":
-		return dbTypeSQLServer
+		return db.DbTypeSQLServer
 	case "Oracle":
-		return dbTypeOracle
+		return db.DbTypeOracle
 	}
-	return dbTypeMySQL
+	return db.DbTypeMySQL
 }
 
 func engineName(typ string) string {
 	switch typ {
-	case dbTypePostgres:
+	case db.DbTypePostgres:
 		return "PostgreSQL"
-	case dbTypeSQLite:
+	case db.DbTypeSQLite:
 		return "SQLite"
-	case dbTypeSQLServer:
+	case db.DbTypeSQLServer:
 		return "SQL Server"
-	case dbTypeOracle:
+	case db.DbTypeOracle:
 		return "Oracle"
 	}
 	return "MySQL"
@@ -68,7 +70,7 @@ func (c *Client) buildConnectionsPanel() fyne.CanvasObject {
 		dialog.ShowConfirm("删除连接",
 			fmt.Sprintf("确定删除连接「%s」吗？", cfg.Name),
 			func(ok bool) {
-				if err := c.deleteConnection(cfg.ID); err == nil {
+				if err := c.store.DeleteConnection(cfg.ID); err == nil {
 					c.refreshConnections()
 					c.refreshSchema()
 				}
@@ -82,7 +84,7 @@ func (c *Client) buildConnectionsPanel() fyne.CanvasObject {
 
 // onConnPicked syncs the selection state with the dropdown's chosen name.
 func (c *Client) onConnPicked() {
-	for i, cfg := range c.saved {
+	for i, cfg := range c.store.Saved() {
 		if connOptionLabel(cfg) == c.connSel.Selected {
 			c.selIdx = i
 			c.currentID = cfg.ID
@@ -94,17 +96,18 @@ func (c *Client) onConnPicked() {
 }
 
 // connOptionLabel is how a connection appears in the picker.
-func connOptionLabel(cfg ConnConfig) string {
+func connOptionLabel(cfg db.ConnConfig) string {
 	return fmt.Sprintf("%s  (%s)", cfg.Name, engineName(cfg.Type))
 }
 
 // selectedConn returns the currently highlighted saved connection.
-func (c *Client) selectedConn() (ConnConfig, bool) {
+func (c *Client) selectedConn() (db.ConnConfig, bool) {
+	saved := c.store.Saved()
 	idx := c.selIdx
-	if idx < 0 || idx >= len(c.saved) {
-		return ConnConfig{}, false
+	if idx < 0 || idx >= len(saved) {
+		return db.ConnConfig{}, false
 	}
-	return c.saved[idx], true
+	return saved[idx], true
 }
 
 // refreshConnections repopulates the picker, keeping the current selection.
@@ -112,9 +115,10 @@ func (c *Client) refreshConnections() {
 	if c.connSel == nil {
 		return
 	}
-	names := make([]string, len(c.saved))
+	saved := c.store.Saved()
+	names := make([]string, len(saved))
 	selected := ""
-	for i, cfg := range c.saved {
+	for i, cfg := range saved {
 		names[i] = connOptionLabel(cfg)
 		if i == c.selIdx {
 			selected = names[i]
@@ -132,7 +136,7 @@ func (c *Client) toggleSelectedConnection() {
 	if !ok {
 		return
 	}
-	if c.connectionStatus(cfg.ID) {
+	if c.store.ConnectionStatus(cfg.ID) {
 		c.onDisconnect(cfg.ID)
 		return
 	}
@@ -145,7 +149,7 @@ func (c *Client) updateConnectButton() {
 		return
 	}
 	cfg, ok := c.selectedConn()
-	if ok && c.connectionStatus(cfg.ID) {
+	if ok && c.store.ConnectionStatus(cfg.ID) {
 		c.connectBtn.SetText("断开")
 		c.connectBtn.Icon = theme.CancelIcon()
 	} else {
@@ -157,14 +161,14 @@ func (c *Client) updateConnectButton() {
 
 // testAndReport tests a saved connection and reports the outcome. The ping
 // runs off the UI thread so the window stays live while it waits on the server.
-func (c *Client) testAndReport(cfg ConnConfig) {
+func (c *Client) testAndReport(cfg db.ConnConfig) {
 	c.setStatus("正在测试 " + cfg.Name + " ...")
 	var testErr error
 	c.runAsync(
 		func() {
-			db, err := testConnection(cfg)
+			connDB, err := db.TestConnection(cfg)
 			if err == nil {
-				db.Close()
+				connDB.Close()
 			}
 			testErr = err
 		},
@@ -183,7 +187,7 @@ func (c *Client) testAndReport(cfg ConnConfig) {
 // onConnect opens the connection and refreshes the schema. The handshake
 // (and, on failure, the timeout) runs off the UI thread; everything that
 // touches a widget runs back on the main goroutine.
-func (c *Client) onConnect(cfg ConnConfig) {
+func (c *Client) onConnect(cfg db.ConnConfig) {
 	c.setStatus("正在连接到 " + cfg.Name + " ...")
 	var connErr error
 	c.runAsync(
@@ -209,7 +213,7 @@ func (c *Client) onConnect(cfg ConnConfig) {
 
 func (c *Client) onDisconnect(id string) {
 	name := id
-	if cfg, ok := c.findConnection(id); ok {
+	if cfg, ok := c.store.FindConnection(id); ok {
 		name = cfg.Name
 	}
 	c.disconnect(id)

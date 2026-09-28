@@ -38,25 +38,8 @@
 fynequery/
 ├── go.mod                  # 独立 Go 模块（避免与根 Wails 模块冲突）
 ├── main.go                 # 程序入口：创建窗口并运行
-├── core.go                 # 数据类型与常量
-├── store.go                # 连接持久化（加载/保存/增删改）
-├── store_connect.go        # 打开/测试连接、按库缓存连接池、DSN 构造
-├── query.go                # 查询执行（SELECT/命令）、多语句脚本、标识符引用
-├── dialect.go              # 引擎方言操作表：各引擎目录 SQL 集中于此
-├── changes.go              # 网格编辑引擎：UPDATE/INSERT/DELETE 生成与事务提交
-├── exportsql.go            # 导出 INSERT 脚本
-├── exportxlsx.go           # Excel 导出（excelize）
-├── filters.go              # 列过滤条件 → WHERE 渲染
-├── tableactions.go         # 表操作（DROP/TRUNCATE/RENAME）
-├── fk.go                   # 外键目录读取与引用表候选值
-├── search.go               # 跨库对象搜索（快速打开）
-├── ddl.go                  # 从目录行重构 CREATE TABLE
-├── script.go               # 多语句脚本切分器
-├── settings.go             # 界面状态持久化（主题/窗口/分割位/标签）与 exe 目录
-├── browse.go               # 结构浏览：数据库/模式/表
-├── browse_columns.go       # 列元数据、过滤掩码
-├── secrets_windows.go      # Windows DPAPI 密码加密（build:windows）
-├── secrets_other.go        # 非 Windows 平台明文存储（build:!windows）
+├── clientstore.go          # Client→Store 薄包装：连接生命周期、外键缓存、XLSX 落盘
+├── settings.go             # 界面状态持久化（主题/窗口/分割位/标签）
 ├── ui.go                   # Client 状态与主布局（侧栏+主区装配）
 ├── ui_connections.go       # 连接面板（下拉/连接/管理）
 ├── ui_connections_dialog.go# 连接新建/编辑对话框（SQLite 文件选择器）
@@ -67,8 +50,34 @@ fynequery/
 ├── ui_filter.go            # 过滤条件对话框
 ├── ui_search.go            # 快速打开对话框
 ├── ui_structure.go         # 表结构查看器
-└── ui_schema.go            # 结构浏览行列表
+├── ui_schema.go            # 结构浏览行列表
+└── internal/db/            # 数据层（抽象屏障：编译器强制，不含任何 fyne 依赖）
+    ├── db.go               # Store 内核：连接表/连接池/语句历史的唯一持有者
+    ├── core.go             # 数据类型与常量（ConnConfig/QueryResult/…）
+    ├── store.go            # 连接持久化（加载/保存/增删改）
+    ├── store_connect.go    # 打开/测试连接、按库缓存连接池、DSN 构造
+    ├── query.go            # 查询执行（SELECT/命令）、多语句脚本、标识符引用
+    ├── dialect.go          # 引擎方言操作表：各引擎目录 SQL 集中于此
+    ├── browse.go           # 结构浏览：数据库/模式/表（方言表的 apply-generic）
+    ├── browse_columns.go   # 列元数据、索引聚合
+    ├── changes.go          # 网格编辑引擎：UPDATE/INSERT/DELETE 生成与事务提交
+    ├── exportsql.go        # 导出 INSERT 脚本
+    ├── export.go           # CSV/JSON 导出
+    ├── exportxlsx.go       # Excel 工作簿渲染（excelize，纯字节输出）
+    ├── filters.go          # 列过滤条件 → WHERE 渲染
+    ├── tableactions.go     # 表操作（DROP/TRUNCATE/RENAME）
+    ├── fk.go               # 外键目录读取与引用表候选值
+    ├── search.go           # 跨库对象搜索（快速打开）
+    ├── ddl.go              # 从目录行重构 CREATE TABLE
+    ├── script.go           # 多语句脚本切分器
+    ├── history.go          # 语句历史（记录/截断/持久化）
+    ├── secrets_windows.go  # Windows DPAPI 密码加密（build:windows）
+    └── secrets_other.go    # 非 Windows 平台明文存储（build:!windows）
 ```
+
+分层规则：`internal/db` 只依赖标准库与驱动，UI 通过 `db.Store` 的导出方法访问
+数据；界面控件、会话选择（当前连接/当前库）与各类缓存留在 `main`。新增引擎
+只需在 `dialect.go` 的方言表中加一行。
 
 ## 构建与运行
 

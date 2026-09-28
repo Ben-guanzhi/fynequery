@@ -11,6 +11,8 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // schemaIndent is the per-depth padding of navigator rows.
@@ -250,11 +252,11 @@ func (c *Client) showTableNodeMenu(uid string, pos fyne.Position) {
 	items := []*fyne.MenuItem{
 		fyne.NewMenuItem("查看结构", func() { c.showStructureDialog(nd) }),
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("删除 (DROP)", func() { c.confirmNodeAction(nd, actionDrop, "") }),
+		fyne.NewMenuItem("删除 (DROP)", func() { c.confirmNodeAction(nd, db.ActionDrop, "") }),
 	}
 	if nd.typ != "view" {
 		items = append(items, fyne.NewMenuItem("清空 (TRUNCATE)", func() {
-			c.confirmNodeAction(nd, actionTruncate, "")
+			c.confirmNodeAction(nd, db.ActionTruncate, "")
 		}))
 	}
 	items = append(items, fyne.NewMenuItem("重命名 (RENAME)", func() { c.renameNodeDialog(nd) }))
@@ -264,18 +266,18 @@ func (c *Client) showTableNodeMenu(uid string, pos fyne.Position) {
 // confirmNodeAction renders the statement first, asks, then runs it.
 func (c *Client) confirmNodeAction(nd *nodeData, action, newName string) {
 	id := c.selectedOrLive()
-	conn, err := c.openConn(id)
+	conn, err := c.store.OpenConn(id)
 	if err != nil {
 		dialog.ShowError(err, c.win)
 		return
 	}
-	stmt, err := tableActionStatement(objectNames{
-		dbType:     conn.Config.Type,
-		objectType: nd.typ,
-		database:   nd.db,
-		schema:     defaultSchema(conn.Config.Type, nd.schema),
-		table:      nd.name,
-		newName:    newName,
+	stmt, err := db.TableActionStatement(db.ObjectNames{
+		DbType:     conn.Config.Type,
+		ObjectType: nd.typ,
+		Database:   nd.db,
+		Schema:     db.DefaultSchema(conn.Config.Type, nd.schema),
+		Table:      nd.name,
+		NewName:    newName,
 	}, action)
 	if err != nil {
 		dialog.ShowError(err, c.win)
@@ -285,7 +287,7 @@ func (c *Client) confirmNodeAction(nd *nodeData, action, newName string) {
 		if !ok {
 			return
 		}
-		run, err := c.runTableAction(id, nd.db, nd.schema, nd.name, action, newName)
+		run, err := c.store.RunTableAction(id, nd.db, nd.schema, nd.name, action, newName)
 		if err != nil {
 			dialog.ShowError(err, c.win)
 			return
@@ -303,7 +305,7 @@ func (c *Client) renameNodeDialog(nd *nodeData) {
 	form := widget.NewForm(widget.NewFormItem("重命名 "+nd.name, entry))
 	form.OnSubmit = func() {
 		d.Hide()
-		c.confirmNodeAction(nd, actionRename, entry.Text)
+		c.confirmNodeAction(nd, db.ActionRename, entry.Text)
 	}
 	form.SubmitText = "下一步"
 	d = dialog.NewCustom("重命名", "取消", form, c.win)
@@ -405,7 +407,7 @@ func (c *Client) selectedOrLive() string {
 
 // selectSQL builds a preview SELECT for a table node.
 func (c *Client) selectSQL(n *nodeData) string {
-	conn, err := c.openConn(c.currentID)
+	conn, err := c.store.OpenConn(c.currentID)
 	if err != nil {
 		return "SELECT * FROM " + plainIdent(n.name)
 	}
@@ -413,18 +415,18 @@ func (c *Client) selectSQL(n *nodeData) string {
 
 	schema := n.schema
 	if schema == "" {
-		schema = resolveSchema(typ, n.db, schema)
+		schema = db.ResolveSchema(typ, n.db, schema)
 	}
 	var parts []string
 	switch typ {
-	case dbTypeMySQL:
+	case db.DbTypeMySQL:
 		parts = []string{n.db, n.name}
-	case dbTypePostgres, dbTypeSQLServer:
+	case db.DbTypePostgres, db.DbTypeSQLServer:
 		parts = []string{schema, n.name}
 	default:
 		parts = []string{n.name}
 	}
-	q, e := qualifiedName(typ, parts...)
+	q, e := db.QualifiedName(typ, parts...)
 	if e != nil {
 		return "SELECT * FROM " + plainIdent(n.name)
 	}
@@ -449,7 +451,7 @@ func (c *Client) refreshSchema() {
 	c.selectedNode = ""
 
 	id := c.selectedOrLive()
-	if id == "" || !c.connectionStatus(id) {
+	if id == "" || !c.store.ConnectionStatus(id) {
 		c.mu.Lock()
 		c.treeNodes[treeRootUID].label = "未连接"
 		c.mu.Unlock()
@@ -458,7 +460,7 @@ func (c *Client) refreshSchema() {
 	}
 
 	c.setStatus("加载数据库 ...")
-	dbs, err := c.databases(id)
+	dbs, err := c.store.Databases(id)
 	if err != nil {
 		c.mu.Lock()
 		c.treeNodes[treeRootUID].label = "加载失败：" + err.Error()
@@ -469,9 +471,9 @@ func (c *Client) refreshSchema() {
 
 	c.mu.Lock()
 	root := c.treeNodes[treeRootUID]
-	for _, db := range dbs {
-		dbUID := "db:" + db
-		c.treeNodes[dbUID] = &nodeData{kind: "db", label: db, db: db, uid: dbUID}
+	for _, dbName := range dbs {
+		dbUID := "db:" + dbName
+		c.treeNodes[dbUID] = &nodeData{kind: "db", label: dbName, db: dbName, uid: dbUID}
 		root.children = append(root.children, dbUID)
 	}
 	root.label = fmt.Sprintf("数据库 (%d)", len(dbs))
@@ -479,7 +481,7 @@ func (c *Client) refreshSchema() {
 
 	// Open the connection's own database right away, all the way down to its
 	// tables — the reference navigator shows them the moment you connect.
-	if cfg, ok := c.liveConfig(id); ok && cfg.Database != "" {
+	if cfg, ok := c.store.LiveConfig(id); ok && cfg.Database != "" {
 		if uid := "db:" + cfg.Database; c.treeNodes[uid] != nil {
 			c.expanded[uid] = true
 			dbNode := c.treeNodes[uid]
@@ -514,15 +516,15 @@ func (c *Client) loadChildren(nd *nodeData) {
 		nd.loading = false
 		return
 	}
-	fetch := func() (schemas []string, tables []TableInfo, err error) {
+	fetch := func() (schemas []string, tables []db.TableInfo, err error) {
 		switch nd.kind {
 		case "db":
-			schemas, err = c.schemas(id, nd.db)
+			schemas, err = c.store.Schemas(id, nd.db)
 			if err == nil && len(schemas) == 0 {
-				tables, err = c.tables(id, nd.db, "")
+				tables, err = c.store.Tables(id, nd.db, "")
 			}
 		case "schema":
-			tables, err = c.tables(id, nd.db, nd.schema)
+			tables, err = c.store.Tables(id, nd.db, nd.schema)
 		}
 		return
 	}
@@ -539,7 +541,7 @@ func (c *Client) loadChildren(nd *nodeData) {
 
 // applyChildren attaches fetched children to a node and re-renders the
 // navigator. UI-thread only.
-func (c *Client) applyChildren(nd *nodeData, schemas []string, tables []TableInfo, err error) {
+func (c *Client) applyChildren(nd *nodeData, schemas []string, tables []db.TableInfo, err error) {
 	nd.loading = false
 	switch {
 	case err != nil:
@@ -575,7 +577,7 @@ func (c *Client) attachSchemas(nd *nodeData, schemas []string) {
 
 // attachTables turns fetched table rows into child nodes; a result with no
 // rows gets a diagnostic node instead of a silent blank expansion.
-func (c *Client) attachTables(nd *nodeData, tables []TableInfo) {
+func (c *Client) attachTables(nd *nodeData, tables []db.TableInfo) {
 	if len(tables) == 0 {
 		uid := nd.uid + "|empty"
 		c.mu.Lock()

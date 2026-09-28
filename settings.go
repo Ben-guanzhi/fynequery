@@ -3,29 +3,12 @@ package main
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/theme"
+
+	"tablepro-fyne/internal/db"
 )
-
-// exeDirPath is the directory of the running executable; the app keeps all
-// of its state files (connections, history, ui layout) beside the binary.
-func exeDirPath() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	return filepath.Dir(exe)
-}
-
-func stateFilePath(name string) string {
-	dir := exeDirPath()
-	if dir == "" {
-		return name
-	}
-	return filepath.Join(dir, name)
-}
 
 // uiSettings is the persisted window/layout state: what a user expects a
 // desktop client to remember between runs. It lives next to the executable
@@ -41,7 +24,7 @@ type uiSettings struct {
 }
 
 func uiSettingsPath() string {
-	return stateFilePath("ui.json")
+	return db.StateFilePath("ui.json")
 }
 
 func loadUISettings(path string) uiSettings {

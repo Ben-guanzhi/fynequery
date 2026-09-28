@@ -7,19 +7,21 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // filterOpLabel pairs the bar's Chinese labels with the engine's operators.
 var filterOpLabel = []struct{ label, op string }{
-	{"等于", filterEq},
-	{"不等于", filterNe},
-	{"大于", filterGT},
-	{"大于等于", filterGTE},
-	{"小于", filterLT},
-	{"小于等于", filterLTE},
-	{"包含", filterContains},
-	{"为 NULL", filterIsNull},
-	{"不为 NULL", filterNotNull},
+	{"等于", db.FilterEq},
+	{"不等于", db.FilterNe},
+	{"大于", db.FilterGT},
+	{"大于等于", db.FilterGTE},
+	{"小于", db.FilterLT},
+	{"小于等于", db.FilterLTE},
+	{"包含", db.FilterContains},
+	{"为 NULL", db.FilterIsNull},
+	{"不为 NULL", db.FilterNotNull},
 }
 
 // filterCondRow is one condition line of the filter dialog.
@@ -36,7 +38,7 @@ func (r *filterCondRow) opCode() string {
 			return l.op
 		}
 	}
-	return filterEq
+	return db.FilterEq
 }
 
 // showFilterDialog builds WHERE conditions column-by-column and re-queries the
@@ -84,18 +86,18 @@ func (c *Client) showFilterDialog() {
 
 	var d *dialog.CustomDialog
 	apply := func() {
-		var filters []TableFilter
+		var filters []db.TableFilter
 		for _, r := range conds {
 			if r.column.Selected == "" {
 				continue
 			}
-			filters = append(filters, TableFilter{
+			filters = append(filters, db.TableFilter{
 				Column: r.column.Selected,
 				Op:     r.opCode(),
 				Value:  r.value.Text,
 			})
 		}
-		where, err := c.tableWhere(c.currentID, c.sourceRef.Database, c.sourceRef.Schema, c.sourceRef.Table, filters)
+		where, err := c.store.TableWhere(c.currentID, c.sourceRef.Database, c.sourceRef.Schema, c.sourceRef.Table, filters)
 		if err != nil {
 			dialog.ShowError(err, c.win)
 			return

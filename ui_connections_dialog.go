@@ -10,10 +10,12 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // showConnDialog displays the create/edit form. edit == nil means "create new".
-func (c *Client) showConnDialog(edit *ConnConfig) {
+func (c *Client) showConnDialog(edit *db.ConnConfig) {
 	nameE := widget.NewEntry()
 	typeSel := widget.NewSelect([]string{"MySQL", "PostgreSQL", "SQLite", "SQL Server", "Oracle"}, nil)
 	hostE := widget.NewEntry()
@@ -60,7 +62,7 @@ func (c *Client) showConnDialog(edit *ConnConfig) {
 	// Friendly default ports per engine when creating a new connection.
 	typeSel.OnChanged = func(t string) {
 		if pickBtn != nil {
-			if engineType(t) == dbTypeSQLite {
+			if engineType(t) == db.DbTypeSQLite {
 				pickBtn.Show()
 			} else {
 				pickBtn.Hide()
@@ -70,15 +72,15 @@ func (c *Client) showConnDialog(edit *ConnConfig) {
 			return
 		}
 		switch engineType(t) {
-		case dbTypeMySQL:
+		case db.DbTypeMySQL:
 			portE.SetText("3306")
-		case dbTypePostgres:
+		case db.DbTypePostgres:
 			portE.SetText("5432")
-		case dbTypeSQLite:
+		case db.DbTypeSQLite:
 			portE.SetText("")
-		case dbTypeSQLServer:
+		case db.DbTypeSQLServer:
 			portE.SetText("1433")
-		case dbTypeOracle:
+		case db.DbTypeOracle:
 			portE.SetText("1521")
 		}
 	}
@@ -106,12 +108,12 @@ func (c *Client) showConnDialog(edit *ConnConfig) {
 		cfg.Options = map[string]string{}
 		if edit != nil {
 			cfg.ID = edit.ID
-			if err := c.updateConnection(cfg); err != nil {
+			if err := c.store.UpdateConnection(cfg); err != nil {
 				dialog.ShowError(err, c.win)
 				return
 			}
 		} else {
-			c.addConnection(cfg)
+			c.store.AddConnection(cfg)
 		}
 		c.refreshConnections()
 		if d != nil {
@@ -138,13 +140,13 @@ func (c *Client) showConnDialog(edit *ConnConfig) {
 	d.Show()
 }
 
-// configFromFields reads the form controls into a ConnConfig.
+// configFromFields reads the form controls into a db.ConnConfig.
 func (c *Client) configFromFields(nameE *widget.Entry, typeSel *widget.Select, hostE *widget.Entry,
 	portE *widget.Entry, userE *widget.Entry, passE *widget.Entry, dbE *widget.Entry,
-	sslSel *widget.Select) ConnConfig {
+	sslSel *widget.Select) db.ConnConfig {
 
 	port, _ := strconv.Atoi(portE.Text)
-	cfg := ConnConfig{
+	cfg := db.ConnConfig{
 		Name:     nameE.Text,
 		Type:     engineType(typeSel.Selected),
 		Host:     hostE.Text,
