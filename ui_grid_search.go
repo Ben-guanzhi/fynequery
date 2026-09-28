@@ -98,16 +98,16 @@ func (e *searchEntry) setTextSilently(text string) {
 // onGridSearchChanged re-scans the result for the term and spotlights the
 // first hit.
 func (c *Client) onGridSearchChanged(term string) {
-	c.searchTerm = term
-	c.searchHits = nil
-	c.searchHitSet = nil
-	c.searchCur = 0
+	c.find.term = term
+	c.find.hits = nil
+	c.find.hitSet = nil
+	c.find.cur = 0
 
 	needle := strings.ToLower(term)
 	if needle != "" {
 		c.scanSearchHits(needle)
 		c.buildHitSet()
-		if len(c.searchHits) > 0 {
+		if len(c.find.hits) > 0 {
 			c.showSearchHit(0)
 		}
 	}
@@ -119,14 +119,14 @@ func (c *Client) onGridSearchChanged(term string) {
 // too, and the lowercase pass is what makes the match case-insensitive.
 func (c *Client) scanSearchHits(needle string) {
 	rows, cols := c.gridDims()
-	if rows > len(c.gridRows) {
-		rows = len(c.gridRows) // queued inserts read past the base result
+	if rows > len(c.grid.rows) {
+		rows = len(c.grid.rows) // queued inserts read past the base result
 	}
 	for r := 0; r < rows; r++ {
 		for col := 0; col < cols; col++ {
 			text, _ := c.gridCellState(r, col)
 			if strings.Contains(strings.ToLower(text), needle) {
-				c.searchHits = append(c.searchHits, searchHitKey{r, col})
+				c.find.hits = append(c.find.hits, searchHitKey{r, col})
 			}
 		}
 	}
@@ -134,13 +134,13 @@ func (c *Client) scanSearchHits(needle string) {
 
 // buildHitSet indexes the collected hits for the per-cell highlight test.
 func (c *Client) buildHitSet() {
-	c.searchHitSet = nil
-	if len(c.searchHits) == 0 {
+	c.find.hitSet = nil
+	if len(c.find.hits) == 0 {
 		return
 	}
-	c.searchHitSet = make(map[searchHitKey]bool, len(c.searchHits))
-	for _, h := range c.searchHits {
-		c.searchHitSet[h] = true
+	c.find.hitSet = make(map[searchHitKey]bool, len(c.find.hits))
+	for _, h := range c.find.hits {
+		c.find.hitSet[h] = true
 	}
 }
 
@@ -149,69 +149,69 @@ func (c *Client) buildHitSet() {
 // at the cells they were collected for. It always refreshes the grid, so a
 // caller about to Refresh can call this instead.
 func (c *Client) rescanGridSearch() {
-	if c.searchTerm != "" {
-		c.searchHits = nil
-		c.scanSearchHits(strings.ToLower(c.searchTerm))
+	if c.find.term != "" {
+		c.find.hits = nil
+		c.scanSearchHits(strings.ToLower(c.find.term))
 		c.buildHitSet()
-		c.searchCur = max(0, min(c.searchCur, len(c.searchHits)-1))
+		c.find.cur = max(0, min(c.find.cur, len(c.find.hits)-1))
 	}
 	c.updateSearchDisplay()
 }
 
 // stepSearch moves the spotlight one hit forward or backward, wrapping.
 func (c *Client) stepSearch(delta int) {
-	if len(c.searchHits) == 0 {
+	if len(c.find.hits) == 0 {
 		return
 	}
-	c.showSearchHit((c.searchCur + delta + len(c.searchHits)) % len(c.searchHits))
+	c.showSearchHit((c.find.cur + delta + len(c.find.hits)) % len(c.find.hits))
 	c.updateSearchDisplay()
 }
 
 // showSearchHit selects hit k. Table.Select scrolls it into view and fires
 // OnSelected, which fills the cell viewer, so no extra refresh is needed.
 func (c *Client) showSearchHit(k int) {
-	c.searchCur = k
-	h := c.searchHits[k]
-	if c.resultGrid != nil {
-		c.resultGrid.Select(widget.TableCellID{Row: h[0], Col: h[1]})
+	c.find.cur = k
+	h := c.find.hits[k]
+	if c.grid.table != nil {
+		c.grid.table.Select(widget.TableCellID{Row: h[0], Col: h[1]})
 	}
 }
 
 // updateSearchDisplay refreshes the hit counter and the grid highlights.
 func (c *Client) updateSearchDisplay() {
-	if c.searchHitsLabel != nil {
-		if c.searchTerm == "" {
-			c.searchHitsLabel.SetText("")
-		} else if len(c.searchHits) == 0 {
-			c.searchHitsLabel.SetText("0/0")
+	if c.find.label != nil {
+		if c.find.term == "" {
+			c.find.label.SetText("")
+		} else if len(c.find.hits) == 0 {
+			c.find.label.SetText("0/0")
 		} else {
-			c.searchHitsLabel.SetText(fmt.Sprintf("%d/%d", c.searchCur+1, len(c.searchHits)))
+			c.find.label.SetText(fmt.Sprintf("%d/%d", c.find.cur+1, len(c.find.hits)))
 		}
 	}
-	if c.resultGrid != nil {
-		c.resultGrid.Refresh()
+	if c.grid.table != nil {
+		c.grid.table.Refresh()
 	}
 }
 
 // clearGridSearch drops the search box and its state: a new result invalidates
 // every previous hit.
 func (c *Client) clearGridSearch() {
-	c.searchTerm = ""
-	c.searchHits = nil
-	c.searchHitSet = nil
-	c.searchCur = 0
-	if c.gridSearchEntry != nil {
-		c.gridSearchEntry.setTextSilently("")
+	c.find.term = ""
+	c.find.hits = nil
+	c.find.hitSet = nil
+	c.find.cur = 0
+	if c.find.entry != nil {
+		c.find.entry.setTextSilently("")
 	}
-	if c.searchHitsLabel != nil {
-		c.searchHitsLabel.SetText("")
+	if c.find.label != nil {
+		c.find.label.SetText("")
 	}
 }
 
 // isSearchHit reports whether the cell matches the active search.
 func (c *Client) isSearchHit(row, col int) bool {
-	if c.searchTerm == "" || c.searchHitSet == nil {
+	if c.find.term == "" || c.find.hitSet == nil {
 		return false
 	}
-	return c.searchHitSet[searchHitKey{row, col}]
+	return c.find.hitSet[searchHitKey{row, col}]
 }

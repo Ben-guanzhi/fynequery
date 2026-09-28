@@ -40,11 +40,11 @@ func TestShortcutsClaimedByEveryEntry(t *testing.T) {
 		name string
 		sc   fyne.Shortcutable
 	}{
-		{"SQL editor", c.queryEntry},
-		{"result search", c.gridSearchEntry},
-		{"cell viewer", c.cellView},
-		{"tree filter", c.filterEntry},
-		{"history filter", c.histFilterEntry},
+		{"SQL editor", c.tabs.entry},
+		{"result search", c.find.entry},
+		{"cell viewer", c.grid.view},
+		{"tree filter", c.tree.filterEntry},
+		{"history filter", c.hist.filterEntry},
 	}
 	keys := []fyne.KeyName{fyne.KeyP, fyne.KeyN, fyne.KeyReturn, fyne.KeyEnter, fyne.KeyO, fyne.KeyS}
 	mods := []fyne.KeyModifier{fyne.KeyModifierControl, fyne.KeyModifierSuper}
@@ -62,11 +62,11 @@ func TestShortcutsClaimedByEveryEntry(t *testing.T) {
 	}
 
 	// Ctrl+Enter must not leak into the editor as a newline.
-	c.queryEntry.setTextSilently("SELECT 1")
+	c.tabs.entry.setTextSilently("SELECT 1")
 	*fired = nil
-	c.queryEntry.TypedShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyReturn, Modifier: fyne.KeyModifierControl})
-	if c.queryEntry.Text != "SELECT 1" {
-		t.Fatalf("editor text after Ctrl+Enter = %q, want unchanged", c.queryEntry.Text)
+	c.tabs.entry.TypedShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyReturn, Modifier: fyne.KeyModifierControl})
+	if c.tabs.entry.Text != "SELECT 1" {
+		t.Fatalf("editor text after Ctrl+Enter = %q, want unchanged", c.tabs.entry.Text)
 	}
 }
 
@@ -74,10 +74,10 @@ func TestShortcutsClaimedByEveryEntry(t *testing.T) {
 // not own keep their normal text-editing behaviour.
 func TestShortcutsFallThroughToEntry(t *testing.T) {
 	c, fired := newKeyClient(t)
-	c.queryEntry.setTextSilently("SELECT 1")
+	c.tabs.entry.setTextSilently("SELECT 1")
 
 	// A different modifier set is a different combo: Ctrl+Shift+S saves nothing.
-	c.queryEntry.TypedShortcut(&desktop.CustomShortcut{
+	c.tabs.entry.TypedShortcut(&desktop.CustomShortcut{
 		KeyName:  fyne.KeyS,
 		Modifier: fyne.KeyModifierControl | fyne.KeyModifierShift,
 	})
@@ -91,8 +91,8 @@ func TestShortcutsFallThroughToEntry(t *testing.T) {
 	}
 
 	// Entry's own shortcuts still work: select-all marks the whole text.
-	c.queryEntry.TypedShortcut(&fyne.ShortcutSelectAll{})
-	if got := c.queryEntry.SelectedText(); got != "SELECT 1" {
+	c.tabs.entry.TypedShortcut(&fyne.ShortcutSelectAll{})
+	if got := c.tabs.entry.SelectedText(); got != "SELECT 1" {
 		t.Fatalf("select-all left %q, want the full text", got)
 	}
 }

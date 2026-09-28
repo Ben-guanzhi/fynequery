@@ -16,7 +16,7 @@ import (
 
 // showTableNodeMenu pops the drop/truncate/rename menu for one table row.
 func (c *Client) showTableNodeMenu(uid string, pos fyne.Position) {
-	nd, ok := c.treeNodes[uid]
+	nd, ok := c.tree.nodes[uid]
 	if !ok {
 		return
 	}
@@ -39,7 +39,7 @@ func (c *Client) showTableNodeMenu(uid string, pos fyne.Position) {
 // the name and the columns are the user's to decide - so it opens an editor
 // tab holding the engine's starter CREATE TABLE.
 func (c *Client) showBranchNodeMenu(uid string, pos fyne.Position) {
-	nd, ok := c.treeNodes[uid]
+	nd, ok := c.tree.nodes[uid]
 	if !ok {
 		return
 	}

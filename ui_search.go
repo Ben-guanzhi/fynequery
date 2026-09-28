@@ -113,11 +113,11 @@ func (c *Client) openObjectMatch(m db.ObjectMatch) {
 	c.refreshSchema()
 
 	tableUID := ""
-	if _, ok := c.treeNodes["db:"+m.Database]; ok {
+	if _, ok := c.tree.nodes["db:"+m.Database]; ok {
 		c.toggleSchemaNode("db:" + m.Database)
-		dbNode := c.treeNodes["db:"+m.Database]
+		dbNode := c.tree.nodes["db:"+m.Database]
 		for _, child := range dbNode.children {
-			childNode := c.treeNodes[child]
+			childNode := c.tree.nodes[child]
 			if childNode == nil {
 				continue
 			}
@@ -127,7 +127,7 @@ func (c *Client) openObjectMatch(m db.ObjectMatch) {
 				}
 				c.toggleSchemaNode(child)
 				for _, t := range childNode.children {
-					if tNode := c.treeNodes[t]; tNode != nil && tNode.name == m.Table {
+					if tNode := c.tree.nodes[t]; tNode != nil && tNode.name == m.Table {
 						tableUID = t
 						break
 					}
@@ -147,7 +147,7 @@ func (c *Client) openObjectMatch(m db.ObjectMatch) {
 	}
 	// The tree could not surface the node (load failure, renamed catalog);
 	// still give the editor a working statement.
-	c.queryEntry.setTextSilently(c.selectSQL(&nodeData{db: m.Database, schema: m.Schema, name: m.Table}))
+	c.tabs.entry.setTextSilently(c.selectSQL(&nodeData{db: m.Database, schema: m.Schema, name: m.Table}))
 	c.dbSelRefresh()
 	c.setStatus("已在编辑器打开 " + m.Table)
 }

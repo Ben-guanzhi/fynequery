@@ -15,119 +15,15 @@ import (
 )
 
 // showConnDialog displays the create/edit form. edit == nil means "create new".
+// The controls and their interplay live in connFields; this function only wires
+// them to the store and to the dialog frame.
 func (c *Client) showConnDialog(edit *db.ConnConfig) {
-	nameE := widget.NewEntry()
-	typeSel := widget.NewSelect([]string{"MySQL", "PostgreSQL", "SQLite", "SQL Server", "Oracle"}, nil)
-	hostE := widget.NewEntry()
-	portE := widget.NewEntry()
-	userE := widget.NewEntry()
-	passE := widget.NewPasswordEntry()
-	dbE := widget.NewEntry()
-	pickBtn := widget.NewButtonWithIcon("", theme.FolderOpenIcon(), func() {
-		fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
-			if err != nil || r == nil {
-				return
-			}
-			defer r.Close()
-			p := r.URI().Path()
-			// Windows file URIs carry a leading slash before the drive letter.
-			if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
-				p = p[1:]
-			}
-			dbE.SetText(p)
-		}, c.win)
-		fd.Resize(fyne.NewSize(600, 480))
-		fd.Show()
-	})
-	pickBtn.Importance = widget.LowImportance
-	dbRow := container.NewBorder(nil, nil, nil, pickBtn, dbE)
-	// The 加密 list is engine-specific: each driver parses a different
-	// vocabulary, and offering a mode the driver ignores is how a connection
-	// ends up unencrypted while the form says otherwise.
-	sslSel := widget.NewSelect(nil, nil)
-
-	// applyEngineSSL repopulates the dropdown for the selected engine and
-	// carries the current choice over, so switching the type cannot rewrite a
-	// stored mode behind the user's back.
-	sslStored := ""
-	applyEngineSSL := func(carry string) {
-		choices := sslChoicesFor(engineType(typeSel.Selected))
-		sslSel.SetOptions(sslOptionLabels(choices, carry))
-		if label := sslChoiceLabel(choices, carry); label != "" {
-			sslSel.SetSelected(label)
-			return
-		}
-		sslStored = carry
-	}
-	sslSel.OnChanged = func(label string) {
-		sslStored = sslValueFor(sslChoicesFor(engineType(typeSel.Selected)), label)
-	}
-
-	if edit != nil {
-		nameE.SetText(edit.Name)
-		typeSel.SetSelected(engineName(edit.Type))
-		hostE.SetText(edit.Host)
-		if edit.Port > 0 {
-			portE.SetText(strconv.Itoa(edit.Port))
-		}
-		userE.SetText(edit.Username)
-		passE.SetText(edit.Password)
-		dbE.SetText(edit.Database)
-		applyEngineSSL(edit.SSLMode)
-	} else {
-		typeSel.SetSelected("MySQL")
-		portE.SetText("3306")
-		applyEngineSSL("")
-	}
-
-	// Friendly default ports per engine when creating a new connection.
-	typeSel.OnChanged = func(t string) {
-		if pickBtn != nil {
-			if engineType(t) == db.DbTypeSQLite {
-				pickBtn.Show()
-			} else {
-				pickBtn.Hide()
-			}
-		}
-		// Each engine asks for its own encryption vocabulary.
-		applyEngineSSL(sslStored)
-		if edit != nil {
-			return
-		}
-		switch engineType(t) {
-		case db.DbTypeMySQL:
-			portE.SetText("3306")
-		case db.DbTypePostgres:
-			portE.SetText("5432")
-		case db.DbTypeSQLite:
-			portE.SetText("")
-		case db.DbTypeSQLServer:
-			portE.SetText("1433")
-		case db.DbTypeOracle:
-			portE.SetText("1521")
-		}
-	}
-	if typeSel.Selected == "SQLite" {
-		pickBtn.Show()
-	} else {
-		pickBtn.Hide()
-	}
-
-	form := widget.NewForm(
-		widget.NewFormItem("名称", nameE),
-		widget.NewFormItem("类型", typeSel),
-		widget.NewFormItem("主机", hostE),
-		widget.NewFormItem("端口", portE),
-		widget.NewFormItem("用户名", userE),
-		widget.NewFormItem("密码", passE),
-		widget.NewFormItem("数据库", dbRow),
-		widget.NewFormItem("加密", sslSel),
-	)
+	f := c.newConnFields(edit)
 
 	var d *dialog.CustomDialog
 
 	save := func() {
-		cfg := c.configFromFields(nameE, typeSel, hostE, portE, userE, passE, dbE, sslSel)
+		cfg := f.config()
 		cfg.Options = map[string]string{}
 		if edit != nil {
 			cfg.ID = edit.ID
@@ -145,8 +41,7 @@ func (c *Client) showConnDialog(edit *db.ConnConfig) {
 	}
 
 	test := func() {
-		cfg := c.configFromFields(nameE, typeSel, hostE, portE, userE, passE, dbE, sslSel)
-		c.testAndReport(cfg)
+		c.testAndReport(f.config())
 	}
 
 	saveBtn := widget.NewButtonWithIcon("保存", theme.ConfirmIcon(), save)
@@ -167,10 +62,171 @@ func (c *Client) showConnDialog(edit *db.ConnConfig) {
 	if edit != nil {
 		title = "编辑连接"
 	}
-	content := container.NewBorder(nil, bottom, nil, nil, form)
+	content := container.NewBorder(nil, bottom, nil, nil, f.form())
 	d = dialog.NewCustom(title, "取消", content, c.win)
 	d.Resize(fyne.NewSize(460, 440))
 	d.Show()
+}
+
+// connFields bundles the create/edit form's controls. It is passed around by
+// pointer because the engine-switch and 加密 closures mutate sslStored, so the
+// dialog and the widgets must share one instance.
+type connFields struct {
+	nameE, hostE, portE, userE, passE, dbE *widget.Entry
+	typeSel, sslSel                        *widget.Select
+	// filePicker opens an existing database file; it only shows for SQLite.
+	filePicker *widget.Button
+	// sslStored is the mode string the 加密 dropdown currently stands for.
+	sslStored string
+}
+
+// newConnFields builds the controls, seeded from edit when editing an existing
+// connection and from friendly defaults when creating one.
+func (c *Client) newConnFields(edit *db.ConnConfig) *connFields {
+	f := &connFields{
+		nameE:   widget.NewEntry(),
+		hostE:   widget.NewEntry(),
+		portE:   widget.NewEntry(),
+		userE:   widget.NewEntry(),
+		passE:   widget.NewPasswordEntry(),
+		dbE:     widget.NewEntry(),
+		typeSel: widget.NewSelect([]string{"MySQL", "PostgreSQL", "SQLite", "SQL Server", "Oracle"}, nil),
+		// The 加密 list is engine-specific: each driver parses a different
+		// vocabulary, and offering a mode the driver ignores is how a connection
+		// ends up unencrypted while the form says otherwise.
+		sslSel: widget.NewSelect(nil, nil),
+	}
+	f.filePicker = widget.NewButtonWithIcon("", theme.FolderOpenIcon(), func() {
+		c.pickDatabaseFile(f.dbE)
+	})
+	f.filePicker.Importance = widget.LowImportance
+
+	f.sslSel.OnChanged = func(label string) {
+		f.sslStored = sslValueFor(sslChoicesFor(engineType(f.typeSel.Selected)), label)
+	}
+
+	if edit != nil {
+		f.nameE.SetText(edit.Name)
+		f.typeSel.SetSelected(engineName(edit.Type))
+		f.hostE.SetText(edit.Host)
+		if edit.Port > 0 {
+			f.portE.SetText(strconv.Itoa(edit.Port))
+		}
+		f.userE.SetText(edit.Username)
+		f.passE.SetText(edit.Password)
+		f.dbE.SetText(edit.Database)
+		f.applyEngineSSL(edit.SSLMode)
+	} else {
+		f.typeSel.SetSelected("MySQL")
+		f.portE.SetText(defaultPortFor(db.DbTypeMySQL))
+		f.applyEngineSSL("")
+	}
+
+	// Friendly default ports per engine when creating a new connection.
+	f.typeSel.OnChanged = func(t string) {
+		f.updatePicker()
+		// Each engine asks for its own encryption vocabulary.
+		f.applyEngineSSL(f.sslStored)
+		if edit != nil {
+			return
+		}
+		f.portE.SetText(defaultPortFor(engineType(t)))
+	}
+	f.updatePicker()
+	return f
+}
+
+// form is the create/edit form body.
+func (f *connFields) form() *widget.Form {
+	dbRow := container.NewBorder(nil, nil, nil, f.filePicker, f.dbE)
+	return widget.NewForm(
+		widget.NewFormItem("名称", f.nameE),
+		widget.NewFormItem("类型", f.typeSel),
+		widget.NewFormItem("主机", f.hostE),
+		widget.NewFormItem("端口", f.portE),
+		widget.NewFormItem("用户名", f.userE),
+		widget.NewFormItem("密码", f.passE),
+		widget.NewFormItem("数据库", dbRow),
+		widget.NewFormItem("加密", f.sslSel),
+	)
+}
+
+// applyEngineSSL repopulates the 加密 dropdown for the selected engine and
+// carries the current choice over, so switching the type cannot rewrite a
+// stored mode behind the user's back.
+func (f *connFields) applyEngineSSL(carry string) {
+	choices := sslChoicesFor(engineType(f.typeSel.Selected))
+	f.sslSel.SetOptions(sslOptionLabels(choices, carry))
+	if label := sslChoiceLabel(choices, carry); label != "" {
+		f.sslSel.SetSelected(label)
+		return
+	}
+	f.sslStored = carry
+}
+
+// updatePicker shows the file picker only while the engine reads a file.
+func (f *connFields) updatePicker() {
+	if engineType(f.typeSel.Selected) == db.DbTypeSQLite {
+		f.filePicker.Show()
+		return
+	}
+	f.filePicker.Hide()
+}
+
+// config reads the form controls into a db.ConnConfig.
+func (f *connFields) config() db.ConnConfig {
+	port, _ := strconv.Atoi(f.portE.Text)
+	engine := engineType(f.typeSel.Selected)
+	cfg := db.ConnConfig{
+		Name:     f.nameE.Text,
+		Type:     engine,
+		Host:     f.hostE.Text,
+		Port:     port,
+		Username: f.userE.Text,
+		Password: f.passE.Text,
+		Database: f.dbE.Text,
+		// The dropdown shows labels; the connection stores the mode string
+		// each engine's driver expects.
+		SSLMode: sslValueFor(sslChoicesFor(engine), f.sslSel.Selected),
+	}
+	if cfg.Name == "" {
+		cfg.Name = fmt.Sprintf("%s@%s", cfg.Username, cfg.Host)
+	}
+	return cfg
+}
+
+// defaultPortFor answers the port an engine listens on by default. SQLite has
+// no port, so it gets "" and the field clears.
+func defaultPortFor(engine string) string {
+	switch engine {
+	case db.DbTypeMySQL:
+		return "3306"
+	case db.DbTypePostgres:
+		return "5432"
+	case db.DbTypeSQLServer:
+		return "1433"
+	case db.DbTypeOracle:
+		return "1521"
+	}
+	return ""
+}
+
+// pickDatabaseFile opens a file chooser and writes the chosen path into entry.
+func (c *Client) pickDatabaseFile(entry *widget.Entry) {
+	fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
+		if err != nil || r == nil {
+			return
+		}
+		defer r.Close()
+		p := r.URI().Path()
+		// Windows file URIs carry a leading slash before the drive letter.
+		if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+			p = p[1:]
+		}
+		entry.SetText(p)
+	}, c.win)
+	fd.Resize(fyne.NewSize(600, 480))
+	fd.Show()
 }
 
 // secretStorageNote words what SecretsSealed answers: sealed platforms store the
@@ -181,30 +237,6 @@ func secretStorageNote(sealed bool) string {
 		return ""
 	}
 	return "注意：本机没有可用的系统密钥库，保存后密码以明文写在连接文件中（仅靠文件权限 0600 保护）。"
-}
-
-// configFromFields reads the form controls into a db.ConnConfig.
-func (c *Client) configFromFields(nameE *widget.Entry, typeSel *widget.Select, hostE *widget.Entry,
-	portE *widget.Entry, userE *widget.Entry, passE *widget.Entry, dbE *widget.Entry,
-	sslSel *widget.Select) db.ConnConfig {
-
-	port, _ := strconv.Atoi(portE.Text)
-	cfg := db.ConnConfig{
-		Name:     nameE.Text,
-		Type:     engineType(typeSel.Selected),
-		Host:     hostE.Text,
-		Port:     port,
-		Username: userE.Text,
-		Password: passE.Text,
-		Database: dbE.Text,
-		// The dropdown shows labels; the connection stores the mode string
-		// each engine's driver expects.
-		SSLMode: sslValueFor(sslChoicesFor(engineType(typeSel.Selected)), sslSel.Selected),
-	}
-	if cfg.Name == "" {
-		cfg.Name = fmt.Sprintf("%s@%s", cfg.Username, cfg.Host)
-	}
-	return cfg
 }
 
 // sslChoice is one entry of the 加密 dropdown: the label the user reads and the

@@ -22,12 +22,12 @@ import (
 // copySelectedRow copies the selected row to the clipboard as tab-separated
 // values, ready to paste into a spreadsheet.
 func (c *Client) copySelectedRow() {
-	if !c.hasCell {
+	if !c.grid.hasCell {
 		return
 	}
-	values := make([]string, 0, len(c.gridHeader))
-	for col := range c.gridHeader {
-		text, _ := c.gridCellState(c.selectedCell.Row, col)
+	values := make([]string, 0, len(c.grid.header))
+	for col := range c.grid.header {
+		text, _ := c.gridCellState(c.grid.cell.Row, col)
 		values = append(values, text)
 	}
 	fyne.CurrentApp().Clipboard().SetContent(strings.Join(values, "\t"))
@@ -38,7 +38,7 @@ func (c *Client) copySelectedRow() {
 // chosen file name ends in .json. Selection is written as displayed, so a
 // sorted grid exports in sorted order.
 func (c *Client) exportGrid() {
-	if len(c.gridHeader) == 0 {
+	if len(c.grid.header) == 0 {
 		c.setStatus("没有可导出的结果")
 		return
 	}
@@ -54,19 +54,19 @@ func (c *Client) exportGrid() {
 		var werr error
 		switch f.URI().Extension() {
 		case ".json":
-			werr = db.WriteJSON(f, c.gridHeader, c.gridRows)
+			werr = db.WriteJSON(f, c.grid.header, c.grid.rows)
 		case ".sql":
 			werr = c.writeInsertScript(f)
 		case ".xlsx":
 			werr = c.writeWorkbookFile(f)
 		default:
-			werr = db.WriteCSV(f, c.gridHeader, c.gridRows)
+			werr = db.WriteCSV(f, c.grid.header, c.grid.rows)
 		}
 		if werr != nil {
 			c.setStatus("导出失败：" + werr.Error())
 			return
 		}
-		c.setStatus(fmt.Sprintf("已导出 %d 行到 %s", len(c.gridRows), f.URI().Name()))
+		c.setStatus(fmt.Sprintf("已导出 %d 行到 %s", len(c.grid.rows), f.URI().Name()))
 	}, c.win)
 	d.SetFileName("result.csv")
 	d.Show()
@@ -76,7 +76,7 @@ func (c *Client) exportGrid() {
 // the table the query read from. Only a single-table SELECT * can be turned
 // back into INSERTs; anything else is refused with a reason.
 func (c *Client) writeInsertScript(f fyne.URIWriteCloser) error {
-	if c.sourceRef.Table == "" {
+	if c.grid.src.Table == "" {
 		return fmt.Errorf("INSERT 导出需要单表的 SELECT * 查询")
 	}
 	conn, err := c.store.OpenConn(c.currentID)
@@ -84,12 +84,12 @@ func (c *Client) writeInsertScript(f fyne.URIWriteCloser) error {
 		return err
 	}
 	typ := conn.Config.Type
-	schema := db.DefaultSchema(typ, c.sourceRef.Schema)
-	name, err := db.TableName(typ, c.sourceRef.Database, schema, c.sourceRef.Table)
+	schema := db.DefaultSchema(typ, c.grid.src.Schema)
+	name, err := db.TableName(typ, c.grid.src.Database, schema, c.grid.src.Table)
 	if err != nil {
 		return err
 	}
-	cols, err := c.store.Columns(c.currentID, c.sourceRef.Database, schema, c.sourceRef.Table)
+	cols, err := c.store.Columns(c.currentID, c.grid.src.Database, schema, c.grid.src.Table)
 	if err != nil {
 		return err
 	}
@@ -97,7 +97,7 @@ func (c *Client) writeInsertScript(f fyne.URIWriteCloser) error {
 	for _, col := range cols {
 		types[strings.ToLower(col.Name)] = col.Type
 	}
-	script, err := db.InsertScript(typ, name, c.sourceRef.Table, c.gridCols, types, c.lastRows)
+	script, err := db.InsertScript(typ, name, c.grid.src.Table, c.grid.cols, types, c.grid.lastRows)
 	if err != nil {
 		return err
 	}
@@ -107,10 +107,10 @@ func (c *Client) writeInsertScript(f fyne.URIWriteCloser) error {
 
 // copyCell copies the selected cell's full value to the clipboard.
 func (c *Client) copyCell() {
-	if !c.hasCell {
+	if !c.grid.hasCell {
 		return
 	}
-	text := c.gridCell(c.selectedCell)
+	text := c.gridCell(c.grid.cell)
 	if text == "" {
 		return
 	}
@@ -122,25 +122,25 @@ func (c *Client) copyCell() {
 // numerically, text lexicographically; NULLs always sort last regardless of
 // direction. Tapping the sorted column again flips ascending/descending.
 func (c *Client) sortGrid(col int) {
-	if col < 0 || col >= len(c.gridHeader) {
+	if col < 0 || col >= len(c.grid.header) {
 		return
 	}
-	if c.edits.any() {
+	if c.grid.edits.any() {
 		c.setStatus("有未保存的更改，先保存或放弃再排序")
 		return
 	}
-	if c.sortCol == col {
-		c.sortAsc = !c.sortAsc
+	if c.grid.sortCol == col {
+		c.grid.sortAsc = !c.grid.sortAsc
 	} else {
-		c.sortCol = col
-		c.sortAsc = true
+		c.grid.sortCol = col
+		c.grid.sortAsc = true
 	}
-	asc := c.sortAsc
-	sort.SliceStable(c.gridRows, func(i, j int) bool {
-		if col >= len(c.gridRows[i]) || col >= len(c.gridRows[j]) {
+	asc := c.grid.sortAsc
+	sort.SliceStable(c.grid.rows, func(i, j int) bool {
+		if col >= len(c.grid.rows[i]) || col >= len(c.grid.rows[j]) {
 			return false
 		}
-		a, b := c.gridRows[i][col], c.gridRows[j][col]
+		a, b := c.grid.rows[i][col], c.grid.rows[j][col]
 		aNull, bNull := a == "NULL", b == "NULL"
 		if aNull != bNull {
 			return !aNull // non-NULL first; NULLs always sink to the bottom
@@ -161,7 +161,7 @@ func (c *Client) sortGrid(col int) {
 		}
 		return a > b
 	})
-	if c.resultGrid != nil {
+	if c.grid.table != nil {
 		// Row order just changed, so any active search must re-collect hits.
 		c.rescanGridSearch()
 	}
@@ -170,11 +170,11 @@ func (c *Client) sortGrid(col int) {
 // gridDims reports the active table dimensions: base result rows plus any
 // queued new rows, × the header columns.
 func (c *Client) gridDims() (int, int) {
-	rows := len(c.gridRows)
-	if c.edits != nil {
-		rows += len(c.edits.inserts)
+	rows := len(c.grid.rows)
+	if c.grid.edits != nil {
+		rows += len(c.grid.edits.inserts)
 	}
-	return rows, len(c.gridHeader)
+	return rows, len(c.grid.header)
 }
 
 // gridCell returns the effective display text of one cell.
@@ -187,7 +187,7 @@ func (c *Client) gridCell(id widget.TableCellID) string {
 // rows), capped to a sane range so one long blob can't monopolise the view.
 func (c *Client) applyColumnWidths(header []string, rows [][]string) {
 	for i := 0; i < len(header); i++ {
-		c.resultGrid.SetColumnWidth(i, c.measureColumn(header[i], rows, i))
+		c.grid.table.SetColumnWidth(i, c.measureColumn(header[i], rows, i))
 	}
 }
 
@@ -283,22 +283,22 @@ func (c *Client) renderResult(res db.QueryResult) {
 		}
 		rows = append(rows, row)
 	}
-	c.gridHeader = header
-	c.gridRows = rows
-	c.gridCols = res.Columns
-	c.gridColTypes = res.ColTypes
-	c.hasCell = false
-	c.sortCol = -1
+	c.grid.header = header
+	c.grid.rows = rows
+	c.grid.cols = res.Columns
+	c.grid.colTypes = res.ColTypes
+	c.grid.hasCell = false
+	c.grid.sortCol = -1
 	c.clearGridSearch()
-	if c.cellView != nil {
-		c.cellView.SetText("")
+	if c.grid.view != nil {
+		c.grid.view.SetText("")
 	}
 	c.applyColumnWidths(header, rows)
-	c.resultGrid.Refresh()
+	c.grid.table.Refresh()
 	c.updateEditButtons()
 	msg := fmt.Sprintf("返回 %d 行 × %d 列，耗时 %.2fs", res.RowCount, len(res.Columns), res.ExecutionTime)
 	if c.gridEditable() {
-		msg += " · 可编辑表 " + c.sourceRef.Table
+		msg += " · 可编辑表 " + c.grid.src.Table
 	} else if res.RowCount > 0 {
 		msg += " · 只读（编辑需 SELECT * 单表）"
 	}

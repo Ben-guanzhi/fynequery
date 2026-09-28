@@ -30,11 +30,11 @@ func TestScriptLoadSave(t *testing.T) {
 	if err := c.loadScript(f); err != nil {
 		t.Fatalf("loadScript: %v", err)
 	}
-	if got := c.queryEntry.Text; got != "SELECT 1;\r\nSELECT 2;\r\n" {
+	if got := c.tabs.entry.Text; got != "SELECT 1;\r\nSELECT 2;\r\n" {
 		t.Fatalf("editor text = %q", got)
 	}
-	if !c.qItems[0].dirty || !strings.HasSuffix(c.qItems[0].item.Text, "●") {
-		t.Fatalf("loaded tab not marked dirty: dirty=%v title=%q", c.qItems[0].dirty, c.qItems[0].item.Text)
+	if !c.tabs.items[0].dirty || !strings.HasSuffix(c.tabs.items[0].item.Text, "●") {
+		t.Fatalf("loaded tab not marked dirty: dirty=%v title=%q", c.tabs.items[0].dirty, c.tabs.items[0].item.Text)
 	}
 
 	// Saving normalises line endings so a script shared with a non-Windows
@@ -55,7 +55,7 @@ func TestScriptGuards(t *testing.T) {
 	w := a.NewWindow("t")
 	c := newTestClient(a, w)
 	w.SetContent(c.buildQueryView())
-	c.queryEntry.setTextSilently("keep me")
+	c.tabs.entry.setTextSilently("keep me")
 
 	if err := c.loadScript(strings.NewReader("SELECT\x001")); err == nil {
 		t.Fatal("binary payload accepted")
@@ -63,7 +63,7 @@ func TestScriptGuards(t *testing.T) {
 	if err := c.loadScript(strings.NewReader(strings.Repeat("a", maxScriptBytes+1))); err == nil {
 		t.Fatal("oversize payload accepted")
 	}
-	if c.queryEntry.Text != "keep me" {
-		t.Fatalf("refused loads changed the editor: %q", c.queryEntry.Text)
+	if c.tabs.entry.Text != "keep me" {
+		t.Fatalf("refused loads changed the editor: %q", c.tabs.entry.Text)
 	}
 }

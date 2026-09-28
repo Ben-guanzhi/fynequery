@@ -22,8 +22,8 @@ const schemaIndent = float32(16.0)
 // long database/table names could not be scrolled into view; a flat row list
 // inside a two-way Scroll derives its width from actual content.
 func (c *Client) buildSchemaView() fyne.CanvasObject {
-	c.schemaRows = container.NewVBox()
-	c.treeFilter = ""
+	c.tree.rows = container.NewVBox()
+	c.tree.term = ""
 
 	newBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
 		c.showConnDialog(nil)
@@ -32,10 +32,10 @@ func (c *Client) buildSchemaView() fyne.CanvasObject {
 	header := container.NewBorder(nil, nil, nil, newBtn,
 		widget.NewLabelWithStyle("导航", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
 
-	c.filterEntry = newKeyedEntry()
-	c.filterEntry.PlaceHolder = "过滤已加载对象"
-	c.filterEntry.onShortcut = c.entryShortcut
-	c.filterEntry.OnChanged = func(string) { c.setTreeFilter(c.filterEntry.Text) }
+	c.tree.filterEntry = newKeyedEntry()
+	c.tree.filterEntry.PlaceHolder = "过滤已加载对象"
+	c.tree.filterEntry.onShortcut = c.entryShortcut
+	c.tree.filterEntry.OnChanged = func(string) { c.setTreeFilter(c.tree.filterEntry.Text) }
 	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
 		c.refreshSchema()
 	})
@@ -45,10 +45,10 @@ func (c *Client) buildSchemaView() fyne.CanvasObject {
 	})
 	searchBtn.Importance = widget.LowImportance
 	filterRow := container.NewBorder(nil, nil, nil,
-		container.NewHBox(searchBtn, refreshBtn), c.filterEntry)
+		container.NewHBox(searchBtn, refreshBtn), c.tree.filterEntry)
 
 	tree := container.NewBorder(filterRow, nil, nil, nil,
-		container.NewScroll(c.schemaRows))
+		container.NewScroll(c.tree.rows))
 
 	// A VBox would hand the tree only its minimum height and leave dead space
 	// below (fyne boxes do not stretch children); Border makes the tree absorb
@@ -59,17 +59,17 @@ func (c *Client) buildSchemaView() fyne.CanvasObject {
 // expandDatabaseInTree loads and opens the database chosen in the dropdown,
 // so the navigator always mirrors "当前库" after a switch.
 func (c *Client) expandDatabaseInTree(db string) {
-	if db == "" || c.schemaRows == nil {
+	if db == "" || c.tree.rows == nil {
 		return
 	}
 	uid := "db:" + db
-	nd := c.treeNodes[uid]
+	nd := c.tree.nodes[uid]
 	if nd == nil {
 		return // not connected, or the db is not visible to this login
 	}
 	nd.loaded = false
 	nd.children = nil
-	c.expanded[uid] = true
+	c.tree.expanded[uid] = true
 	c.loadChildren(nd)
 	c.rebuildSchemaRows()
 }
@@ -77,7 +77,7 @@ func (c *Client) expandDatabaseInTree(db string) {
 // setTreeFilter narrows the navigator to the loaded objects whose label
 // contains the filter, keeping the hierarchy of matching subtrees.
 func (c *Client) setTreeFilter(filter string) {
-	c.treeFilter = strings.ToLower(strings.TrimSpace(filter))
+	c.tree.term = strings.ToLower(strings.TrimSpace(filter))
 	c.rebuildSchemaRows()
 }
 
@@ -99,44 +99,44 @@ type rowCacheKey struct {
 // finished row list is compared against what is on screen: an identical
 // list skips the re-layout, which dominates the cost of a keystroke.
 func (c *Client) rebuildSchemaRows() {
-	if c.schemaRows == nil {
+	if c.tree.rows == nil {
 		return
 	}
 	var rows []fyne.CanvasObject
 	switch {
-	case c.treeFilter != "":
-		marks := make(map[string]bool, len(c.treeNodes))
-		for _, uid := range c.treeNodes[treeRootUID].children {
+	case c.tree.term != "":
+		marks := make(map[string]bool, len(c.tree.nodes))
+		for _, uid := range c.tree.nodes[treeRootUID].children {
 			c.markFilteredSubtree(uid, marks)
 		}
-		for _, uid := range c.treeNodes[treeRootUID].children {
+		for _, uid := range c.tree.nodes[treeRootUID].children {
 			if marks[uid] {
 				rows = c.appendFilteredRow(rows, uid, 0, marks)
 			}
 		}
-	case len(c.treeNodes[treeRootUID].children) == 0:
+	case len(c.tree.nodes[treeRootUID].children) == 0:
 		rows = c.appendSchemaRow(rows, treeRootUID, 0) // 未连接 / 加载失败 / 空目录
 	default:
-		for _, uid := range c.treeNodes[treeRootUID].children {
+		for _, uid := range c.tree.nodes[treeRootUID].children {
 			rows = c.appendSchemaRow(rows, uid, 0)
 		}
 	}
-	if sameRowList(c.schemaRows.Objects, rows) {
+	if sameRowList(c.tree.rows.Objects, rows) {
 		return
 	}
-	c.schemaRows.Objects = rows
-	c.schemaRows.Refresh()
+	c.tree.rows.Objects = rows
+	c.tree.rows.Refresh()
 }
 
 // markFilteredSubtree records every node of the subtree that must stay
 // visible under the current filter (its own label matches, or a descendant
 // makes its subtree relevant) and reports the subtree's relevance.
 func (c *Client) markFilteredSubtree(uid string, marks map[string]bool) bool {
-	nd, ok := c.treeNodes[uid]
+	nd, ok := c.tree.nodes[uid]
 	if !ok {
 		return false
 	}
-	match := strings.Contains(strings.ToLower(nd.label), c.treeFilter)
+	match := strings.Contains(strings.ToLower(nd.label), c.tree.term)
 	for _, child := range nd.children {
 		if c.markFilteredSubtree(child, marks) {
 			match = true
@@ -152,7 +152,7 @@ func (c *Client) markFilteredSubtree(uid string, marks map[string]bool) bool {
 // visible for context, their unmatched siblings are pruned. Callers consult
 // marks, so the subtree is known to contain a match.
 func (c *Client) appendFilteredRow(rows []fyne.CanvasObject, uid string, depth int, marks map[string]bool) []fyne.CanvasObject {
-	nd, ok := c.treeNodes[uid]
+	nd, ok := c.tree.nodes[uid]
 	if !ok {
 		return rows
 	}
@@ -168,12 +168,12 @@ func (c *Client) appendFilteredRow(rows []fyne.CanvasObject, uid string, depth i
 // appendSchemaRow appends one row and recurses into open branches. The root
 // is always expanded.
 func (c *Client) appendSchemaRow(rows []fyne.CanvasObject, uid string, depth int) []fyne.CanvasObject {
-	nd, ok := c.treeNodes[uid]
+	nd, ok := c.tree.nodes[uid]
 	if !ok {
 		return rows
 	}
 	rows = append(rows, c.schemaRowWidget(nd, depth))
-	if nd.kind != "root" && !c.expanded[uid] {
+	if nd.kind != "root" && !c.tree.expanded[uid] {
 		return rows
 	}
 	for _, child := range nd.children {
@@ -205,9 +205,9 @@ func sameRowList(a, b []fyne.CanvasObject) bool {
 // not changed. The key carries every input the row reads: identity, depth,
 // label, whether its branch is open, and whether it is the highlighted node.
 func (c *Client) schemaRowWidget(nd *nodeData, depth int) fyne.CanvasObject {
-	expanded := c.expanded[nd.uid]
-	key := rowCacheKey{uid: nd.uid, depth: depth, label: nd.label, expanded: expanded, selected: nd.uid == c.selectedNode}
-	if row, ok := c.rowCache[key]; ok {
+	expanded := c.tree.expanded[nd.uid]
+	key := rowCacheKey{uid: nd.uid, depth: depth, label: nd.label, expanded: expanded, selected: nd.uid == c.tree.selected}
+	if row, ok := c.tree.cache[key]; ok {
 		return row
 	}
 
@@ -249,7 +249,7 @@ func (c *Client) schemaRowWidget(nd *nodeData, depth int) fyne.CanvasObject {
 		uid := nd.uid
 		btn.OnTapped = func() { c.toggleSchemaNode(uid) }
 	}
-	if nd.uid == c.selectedNode {
+	if nd.uid == c.tree.selected {
 		btn.Importance = widget.HighImportance
 	}
 
@@ -269,10 +269,10 @@ func (c *Client) schemaRowWidget(nd *nodeData, depth int) fyne.CanvasObject {
 			c.showBranchNodeMenu(uid, pos)
 		})
 	}
-	if c.rowCache == nil {
-		c.rowCache = make(map[rowCacheKey]fyne.CanvasObject)
+	if c.tree.cache == nil {
+		c.tree.cache = make(map[rowCacheKey]fyne.CanvasObject)
 	}
-	c.rowCache[key] = out
+	c.tree.cache[key] = out
 	return out
 }
 
@@ -318,12 +318,12 @@ func schemaIndentWidget(depth int) fyne.CanvasObject {
 // the user has found what they were looking for, and a filter that prunes the
 // just-loaded children made every expansion look empty.
 func (c *Client) toggleSchemaNode(uid string) {
-	nd, ok := c.treeNodes[uid]
+	nd, ok := c.tree.nodes[uid]
 	if !ok {
 		return
 	}
-	if c.expanded[uid] {
-		delete(c.expanded, uid)
+	if c.tree.expanded[uid] {
+		delete(c.tree.expanded, uid)
 		c.rebuildSchemaRows()
 		return
 	}
@@ -334,14 +334,14 @@ func (c *Client) toggleSchemaNode(uid string) {
 	if nd.loading {
 		// Async fetch in flight; mark the node open now and let
 		// applyChildren re-render once its children arrive.
-		c.expanded[uid] = true
+		c.tree.expanded[uid] = true
 		c.clearTreeFilter()
 		c.rebuildSchemaRows()
 		return
 	}
 	errorChild := false
 	for _, ch := range nd.children {
-		if n := c.treeNodes[ch]; n != nil && n.kind == "error" {
+		if n := c.tree.nodes[ch]; n != nil && n.kind == "error" {
 			errorChild = true
 		}
 	}
@@ -353,16 +353,16 @@ func (c *Client) toggleSchemaNode(uid string) {
 	default:
 		c.setStatus("就绪")
 	}
-	c.expanded[uid] = true
+	c.tree.expanded[uid] = true
 	c.clearTreeFilter()
 	c.rebuildSchemaRows()
 }
 
 // clearTreeFilter resets the navigator filter, syncing the entry box.
 func (c *Client) clearTreeFilter() {
-	c.treeFilter = ""
-	if c.filterEntry != nil && c.filterEntry.Text != "" {
-		c.filterEntry.SetText("") // fires OnChanged, which rebuilds the rows
+	c.tree.term = ""
+	if c.tree.filterEntry != nil && c.tree.filterEntry.Text != "" {
+		c.tree.filterEntry.SetText("") // fires OnChanged, which rebuilds the rows
 		return
 	}
 	c.rebuildSchemaRows()

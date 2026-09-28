@@ -14,21 +14,21 @@ import (
 // returns the node count.
 func buildWideTree(c *Client, schemas, perSchema int) int {
 	root := &nodeData{kind: "root", label: "数据库", uid: treeRootUID}
-	c.treeNodes[treeRootUID] = root
+	c.tree.nodes[treeRootUID] = root
 	visited := 1
 	dbUID := "db:d"
 	root.children = append(root.children, dbUID)
-	c.treeNodes[dbUID] = &nodeData{kind: "db", label: "d", db: "d", uid: dbUID}
+	c.tree.nodes[dbUID] = &nodeData{kind: "db", label: "d", db: "d", uid: dbUID}
 	visited++
 	for s := 0; s < schemas; s++ {
 		schUID := fmt.Sprintf("%s|s:s%d", dbUID, s)
-		c.treeNodes[dbUID].children = append(c.treeNodes[dbUID].children, schUID)
-		c.treeNodes[schUID] = &nodeData{kind: "schema", label: fmt.Sprintf("s%d", s), db: "d", schema: fmt.Sprintf("s%d", s), uid: schUID}
+		c.tree.nodes[dbUID].children = append(c.tree.nodes[dbUID].children, schUID)
+		c.tree.nodes[schUID] = &nodeData{kind: "schema", label: fmt.Sprintf("s%d", s), db: "d", schema: fmt.Sprintf("s%d", s), uid: schUID}
 		visited++
 		for t := 0; t < perSchema; t++ {
 			tUID := fmt.Sprintf("%s|t:tbl%d", schUID, t)
-			c.treeNodes[tUID] = &nodeData{kind: "table", label: fmt.Sprintf("tbl%d", t), db: "d", schema: fmt.Sprintf("s%d", s), name: fmt.Sprintf("tbl%d", t), uid: tUID}
-			c.treeNodes[schUID].children = append(c.treeNodes[schUID].children, tUID)
+			c.tree.nodes[tUID] = &nodeData{kind: "table", label: fmt.Sprintf("tbl%d", t), db: "d", schema: fmt.Sprintf("s%d", s), name: fmt.Sprintf("tbl%d", t), uid: tUID}
+			c.tree.nodes[schUID].children = append(c.tree.nodes[schUID].children, tUID)
 			visited++
 		}
 	}
@@ -42,10 +42,10 @@ func buildWideTree(c *Client, schemas, perSchema int) int {
 // fyne's re-render of 2009 rows (measured ~880ms before memoization).
 func BenchmarkFilterRebuild(b *testing.B) {
 	test.NewApp()
-	c := &Client{store: db.NewStore(), treeNodes: make(map[string]*nodeData), expanded: make(map[string]bool)}
-	c.schemaRows = container.NewVBox()
+	c := &Client{store: db.NewStore(), tree: treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool)}}
+	c.tree.rows = container.NewVBox()
 	n := buildWideTree(c, 8, 250)
-	c.treeFilter = "tbl"
+	c.tree.term = "tbl"
 	c.rebuildSchemaRows() // warm: real keystrokes arrive on a rendered tree
 	b.ReportMetric(float64(n), "nodes")
 	b.ResetTimer()
@@ -60,15 +60,15 @@ func BenchmarkFilterRebuild(b *testing.B) {
 // survive (their key is unchanged).
 func BenchmarkFilterRebuildChanging(b *testing.B) {
 	test.NewApp()
-	c := &Client{store: db.NewStore(), treeNodes: make(map[string]*nodeData), expanded: make(map[string]bool)}
-	c.schemaRows = container.NewVBox()
+	c := &Client{store: db.NewStore(), tree: treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool)}}
+	c.tree.rows = container.NewVBox()
 	n := buildWideTree(c, 8, 250)
 	filters := []string{"t", "tb", "tbl", "tbl1", "tbl12", "tbl123"}
 	c.rebuildSchemaRows()
 	b.ReportMetric(float64(n), "nodes")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		c.treeFilter = filters[i%len(filters)]
+		c.tree.term = filters[i%len(filters)]
 		c.rebuildSchemaRows()
 	}
 }

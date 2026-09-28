@@ -17,16 +17,16 @@ import (
 // buildHistoryPanel assembles the sidebar bottom: recent statements with a
 // compact header, capped to a fixed height like TablePro's history drawer.
 func (c *Client) buildHistoryPanel() fyne.CanvasObject {
-	c.histFilterEntry = newKeyedEntry()
-	c.histFilterEntry.PlaceHolder = "过滤"
-	c.histFilterEntry.onShortcut = c.entryShortcut
-	c.histFilterEntry.OnChanged = func(text string) {
-		c.histFilter = strings.ToLower(strings.TrimSpace(text))
+	c.hist.filterEntry = newKeyedEntry()
+	c.hist.filterEntry.PlaceHolder = "过滤"
+	c.hist.filterEntry.onShortcut = c.entryShortcut
+	c.hist.filterEntry.OnChanged = func(text string) {
+		c.hist.filter = strings.ToLower(strings.TrimSpace(text))
 		c.rebuildHistoryView()
 	}
 
-	c.historyList = widget.NewList(
-		func() int { return len(c.historyView) },
+	c.hist.list = widget.NewList(
+		func() int { return len(c.hist.view) },
 		func() fyne.CanvasObject {
 			return container.NewVBox(
 				widget.NewLabel("placeholder"),
@@ -34,10 +34,10 @@ func (c *Client) buildHistoryPanel() fyne.CanvasObject {
 			)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			if id < 0 || id >= len(c.historyView) {
+			if id < 0 || id >= len(c.hist.view) {
 				return
 			}
-			e := c.historyView[id]
+			e := c.hist.view[id]
 			box, ok := obj.(*fyne.Container)
 			if !ok || len(box.Objects) < 2 {
 				return
@@ -70,12 +70,12 @@ func (c *Client) buildHistoryPanel() fyne.CanvasObject {
 			sub.SetText(meta)
 		},
 	)
-	c.historyList.OnSelected = func(id widget.ListItemID) {
-		if id < 0 || id >= len(c.historyView) {
+	c.hist.list.OnSelected = func(id widget.ListItemID) {
+		if id < 0 || id >= len(c.hist.view) {
 			return
 		}
-		e := c.historyView[id]
-		c.queryEntry.setTextSilently(e.SQL)
+		e := c.hist.view[id]
+		c.tabs.entry.setTextSilently(e.SQL)
 		if e.Database != "" {
 			c.currentDB = e.Database
 		}
@@ -84,7 +84,7 @@ func (c *Client) buildHistoryPanel() fyne.CanvasObject {
 	}
 
 	rerunBtn := widget.NewButtonWithIcon("", theme.MediaPlayIcon(), func() {
-		if c.queryEntry.Text != "" {
+		if c.tabs.entry.Text != "" {
 			c.runCurrent()
 		}
 	})
@@ -102,10 +102,10 @@ func (c *Client) buildHistoryPanel() fyne.CanvasObject {
 	clearBtn.Importance = widget.LowImportance
 
 	header := container.NewBorder(nil, nil, widget.NewLabel("历史"),
-		container.NewHBox(rerunBtn, clearBtn), c.histFilterEntry)
+		container.NewHBox(rerunBtn, clearBtn), c.hist.filterEntry)
 	// The sidebar's bottom slot takes this panel's min height; a deterministic
 	// fixed-height layout keeps the band stable no matter what the list reports.
-	historyPanel := container.NewBorder(header, nil, nil, nil, c.historyList)
+	historyPanel := container.NewBorder(header, nil, nil, nil, c.hist.list)
 	return container.New(&fixedHeightLayout{height: 150}, historyPanel)
 }
 
@@ -117,15 +117,15 @@ func (c *Client) rebuildHistoryView() {
 	view := make([]db.HistoryEntry, 0, len(entries))
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
-		if c.histFilter == "" ||
-			strings.Contains(strings.ToLower(e.SQL), c.histFilter) ||
-			strings.Contains(strings.ToLower(e.Table), c.histFilter) ||
-			strings.Contains(strings.ToLower(e.Database), c.histFilter) {
+		if c.hist.filter == "" ||
+			strings.Contains(strings.ToLower(e.SQL), c.hist.filter) ||
+			strings.Contains(strings.ToLower(e.Table), c.hist.filter) ||
+			strings.Contains(strings.ToLower(e.Database), c.hist.filter) {
 			view = append(view, e)
 		}
 	}
 	c.mu.Unlock()
-	c.historyView = view
+	c.hist.view = view
 }
 
 // fixedHeightLayout lays its single child out at the full width but an exact
@@ -149,11 +149,11 @@ func (f *fixedHeightLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 
 // refreshHistory re-renders the history list.
 func (c *Client) refreshHistory() {
-	if c.historyList == nil {
+	if c.hist.list == nil {
 		return
 	}
 	c.rebuildHistoryView()
-	c.historyList.Refresh()
+	c.hist.list.Refresh()
 }
 
 // historyTimeLabel renders an entry timestamp: time only for today, with the

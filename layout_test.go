@@ -18,25 +18,21 @@ func TestSidebarTreeFillsHeight(t *testing.T) {
 	a := test.NewApp()
 	w := a.NewWindow("t")
 	c := &Client{
-		app:        a,
-		win:        w,
-		store:      db.NewStore(),
-		treeNodes:  make(map[string]*nodeData),
-		expanded:   make(map[string]bool),
-		sugTables:  make(map[string][]string),
-		sugLoading: make(map[string]bool),
-		fkCache:    make(map[string][]db.ForeignKeyInfo),
-		edits:      newGridEditState(),
-		sortCol:    -1,
+		app:   a,
+		win:   w,
+		store: db.NewStore(),
+		tree:  treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool)},
+		cache: memoCache{tables: make(map[string][]string), loading: make(map[string]bool), fks: make(map[string][]db.ForeignKeyInfo)},
+		grid:  gridState{edits: newGridEditState(), sortCol: -1},
 	}
 	content := c.buildUI()
 	w.SetContent(content)
 	w.Resize(fyne.NewSize(1200, 900))
 
-	if c.schemaRows == nil {
+	if c.tree.rows == nil {
 		t.Fatal("schema rows not built")
 	}
-	h := c.schemaRows.Size().Height
+	h := c.tree.rows.Size().Height
 	// One simulated database row keeps the tree non-empty.
 	if h < 200 {
 		t.Fatalf("tree viewport height = %.0f, want a tall fill (>=200)", h)
@@ -49,20 +45,16 @@ func TestEditorReceivesTypedText(t *testing.T) {
 	a := test.NewApp()
 	w := a.NewWindow("t")
 	c := &Client{
-		app:        a,
-		win:        w,
-		store:      db.NewStore(),
-		treeNodes:  make(map[string]*nodeData),
-		expanded:   make(map[string]bool),
-		sugTables:  make(map[string][]string),
-		sugLoading: make(map[string]bool),
-		fkCache:    make(map[string][]db.ForeignKeyInfo),
-		edits:      newGridEditState(),
-		sortCol:    -1,
+		app:   a,
+		win:   w,
+		store: db.NewStore(),
+		tree:  treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool)},
+		cache: memoCache{tables: make(map[string][]string), loading: make(map[string]bool), fks: make(map[string][]db.ForeignKeyInfo)},
+		grid:  gridState{edits: newGridEditState(), sortCol: -1},
 	}
 	w.SetContent(c.buildUI())
 
-	if c.queryEntry == nil {
+	if c.tabs.entry == nil {
 		t.Fatal("query entry not built")
 	}
 	// Mimic the real glfw driver: char input goes to canvas.Focused().
@@ -71,12 +63,12 @@ func TestEditorReceivesTypedText(t *testing.T) {
 			f.TypedRune(r)
 		}
 	})
-	w.Canvas().Focus(c.queryEntry)
+	w.Canvas().Focus(c.tabs.entry)
 	if w.Canvas().Focused() == nil {
 		t.Fatal("editor did not take focus")
 	}
 	test.TypeOnCanvas(w.Canvas(), "SELECT")
-	if got := c.queryEntry.Text; got != "SELECT" {
+	if got := c.tabs.entry.Text; got != "SELECT" {
 		t.Fatalf("typed text = %q, want SELECT", got)
 	}
 }
@@ -120,7 +112,7 @@ func TestToolbarFitsMainPane(t *testing.T) {
 	w.SetContent(root)
 	w.Resize(fyne.NewSize(1280, 800))
 
-	bar := findContainerWith([]fyne.CanvasObject{root}, c.dbSel)
+	bar := findContainerWith([]fyne.CanvasObject{root}, c.dbs.sel)
 	if bar == nil {
 		t.Fatal("toolbar not found")
 	}

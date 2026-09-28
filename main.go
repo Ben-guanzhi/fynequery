@@ -17,7 +17,7 @@ func main() {
 	w.SetContent(c.buildUI())
 	// Focus sticks only once the content exists; do it here so the editor
 	// owns the keyboard the moment the window opens.
-	w.Canvas().Focus(c.queryEntry)
+	w.Canvas().Focus(c.tabs.entry)
 
 	if c.uiSet.WindowWidth > 100 && c.uiSet.WindowHeight > 100 {
 		w.Resize(fyne.NewSize(c.uiSet.WindowWidth, c.uiSet.WindowHeight))

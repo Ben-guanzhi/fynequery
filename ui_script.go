@@ -33,8 +33,8 @@ func (c *Client) loadScript(r io.Reader) error {
 	if strings.ContainsRune(text, 0) {
 		return fmt.Errorf("看起来不是文本文件")
 	}
-	c.queryEntry.setTextSilently(text)
-	c.markTabDirty(c.queryEntry)
+	c.tabs.entry.setTextSilently(text)
+	c.markTabDirty(c.tabs.entry)
 	c.focusEditor()
 	return nil
 }
@@ -42,7 +42,7 @@ func (c *Client) loadScript(r io.Reader) error {
 // saveScript writes the active tab's text out, LF-normalised so a script
 // shared with a non-Windows tool reads cleanly there.
 func (c *Client) saveScript(w io.Writer) error {
-	_, err := io.WriteString(w, strings.ReplaceAll(c.queryEntry.Text, "\r\n", "\n"))
+	_, err := io.WriteString(w, strings.ReplaceAll(c.tabs.entry.Text, "\r\n", "\n"))
 	return err
 }
 

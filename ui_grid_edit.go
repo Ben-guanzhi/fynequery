@@ -90,7 +90,7 @@ func sortedUpdateRows(m map[int]map[string]string) []int {
 // row, deletes by row, then the new rows. Column order follows the result, so
 // the rendered statements stay stable.
 func (c *Client) collectChanges() []db.RowChange {
-	g := c.edits
+	g := c.grid.edits
 	if g == nil {
 		return nil
 	}
@@ -99,10 +99,10 @@ func (c *Client) collectChanges() []db.RowChange {
 		if g.deletes[i] {
 			continue // the delete wins; editing a deleted row queues nothing new
 		}
-		out = append(out, db.RowChange{Original: c.lastRows[i], Edits: c.editsOf(g.updates[i])})
+		out = append(out, db.RowChange{Original: c.grid.lastRows[i], Edits: c.editsOf(g.updates[i])})
 	}
 	for _, i := range sortedInts(g.deletes) {
-		out = append(out, db.RowChange{Kind: db.RowDelete, Original: c.lastRows[i]})
+		out = append(out, db.RowChange{Kind: db.RowDelete, Original: c.grid.lastRows[i]})
 	}
 	for _, row := range g.inserts {
 		out = append(out, db.RowChange{Kind: db.RowInsert, Edits: c.editsOf(row)})
@@ -114,7 +114,7 @@ func (c *Client) collectChanges() []db.RowChange {
 // queued value means NULL.
 func (c *Client) editsOf(cells map[string]string) []db.CellEdit {
 	edits := make([]db.CellEdit, 0, len(cells))
-	for _, col := range c.gridCols {
+	for _, col := range c.grid.cols {
 		v, ok := cells[col]
 		if !ok {
 			continue
@@ -142,31 +142,31 @@ const (
 // edit queue on top of the base result.
 func (c *Client) gridCellState(row, col int) (string, int) {
 	colName := ""
-	if col >= 0 && col < len(c.gridCols) {
-		colName = c.gridCols[col]
+	if col >= 0 && col < len(c.grid.cols) {
+		colName = c.grid.cols[col]
 	}
-	if row >= 0 && row < len(c.gridRows) {
+	if row >= 0 && row < len(c.grid.rows) {
 		text := ""
-		if col >= 0 && col < len(c.gridRows[row]) {
-			text = c.gridRows[row][col]
+		if col >= 0 && col < len(c.grid.rows[row]) {
+			text = c.grid.rows[row][col]
 		}
-		if v, edited := c.edits.updateAt(row, colName); edited {
+		if v, edited := c.grid.edits.updateAt(row, colName); edited {
 			if v == "" {
 				v = "NULL"
 			}
 			return v, cellEdited
 		}
-		if c.edits.isDeleted(row) {
+		if c.grid.edits.isDeleted(row) {
 			return text, cellDeleted
 		}
 		return text, cellNormal
 	}
 	// A queued new row.
-	i := row - len(c.gridRows)
-	if c.edits == nil || i < 0 || i >= len(c.edits.inserts) {
+	i := row - len(c.grid.rows)
+	if c.grid.edits == nil || i < 0 || i >= len(c.grid.edits.inserts) {
 		return "", cellNormal
 	}
-	if v, ok := c.edits.inserts[i][colName]; ok {
+	if v, ok := c.grid.edits.inserts[i][colName]; ok {
 		if v == "" {
 			v = "NULL"
 		}
@@ -184,19 +184,19 @@ func (c *Client) gridCellState(row, col int) (string, int) {
 // (SELECT * of one table), resetting any unsaved queue. Called after every
 // executed statement.
 func (c *Client) setEditContext(query string, res db.QueryResult) {
-	c.edits = newGridEditState()
-	c.lastRows = nil
-	c.sourceRef = db.TableRef{}
+	c.grid.edits = newGridEditState()
+	c.grid.lastRows = nil
+	c.grid.src = db.TableRef{}
 	if res.Error == "" {
-		c.lastRows = res.Rows
-		c.sourceRef = c.store.QuerySource(c.currentID, query, c.resolveDB())
+		c.grid.lastRows = res.Rows
+		c.grid.src = c.store.QuerySource(c.currentID, query, c.resolveDB())
 	}
 	c.updateEditButtons()
 }
 
 // gridEditable reports whether the current result can be written back.
 func (c *Client) gridEditable() bool {
-	return c.sourceRef.Table != "" && c.gridCols != nil
+	return c.grid.src.Table != "" && c.grid.cols != nil
 }
 
 // editableTableName renders the object the current result reads from, which is
@@ -207,7 +207,7 @@ func (c *Client) editableTableName() (string, error) {
 		return "", err
 	}
 	typ := conn.Config.Type
-	return db.TableName(typ, c.sourceRef.Database, db.DefaultSchema(typ, c.sourceRef.Schema), c.sourceRef.Table)
+	return db.TableName(typ, c.grid.src.Database, db.DefaultSchema(typ, c.grid.src.Schema), c.grid.src.Table)
 }
 
 // ---- actions ----
@@ -215,22 +215,22 @@ func (c *Client) editableTableName() (string, error) {
 // editSelectedCell opens a value dialog for the selected cell and queues the
 // change. An empty input (or the NULL tick) writes NULL.
 func (c *Client) editSelectedCell() {
-	if !c.hasCell || !c.gridEditable() {
+	if !c.grid.hasCell || !c.gridEditable() {
 		return
 	}
-	id := c.selectedCell
-	if id.Col < 0 || id.Col >= len(c.gridCols) {
+	id := c.grid.cell
+	if id.Col < 0 || id.Col >= len(c.grid.cols) {
 		return
 	}
-	column := c.gridCols[id.Col]
-	if c.edits.isDeleted(id.Row) {
+	column := c.grid.cols[id.Col]
+	if c.grid.edits.isDeleted(id.Row) {
 		c.setStatus("该行已标记删除")
 		return
 	}
 
 	current := ""
-	if id.Row < len(c.lastRows) && id.Col < len(c.lastRows[id.Row]) {
-		if v := c.lastRows[id.Row][id.Col]; v != nil {
+	if id.Row < len(c.grid.lastRows) && id.Col < len(c.grid.lastRows[id.Row]) {
+		if v := c.grid.lastRows[id.Row][id.Col]; v != nil {
 			current = fmt.Sprintf("%v", v)
 		}
 	}
@@ -246,8 +246,8 @@ func (c *Client) editSelectedCell() {
 		widget.NewFormItem("值", valueEntry),
 		widget.NewFormItem("", nullCheck),
 	}
-	if cands, err := c.foreignKeyValues(c.currentID, c.sourceRef.Database,
-		c.sourceRef.Schema, c.sourceRef.Table, column, 0); err == nil && len(cands.Values) > 0 {
+	if cands, err := c.foreignKeyValues(c.currentID, c.grid.src.Database,
+		c.grid.src.Schema, c.grid.src.Table, column, 0); err == nil && len(cands.Values) > 0 {
 		keyOf := make(map[string]string, len(cands.Values))
 		options := make([]string, 0, len(cands.Values))
 		for _, v := range cands.Values {
@@ -271,10 +271,10 @@ func (c *Client) editSelectedCell() {
 		if nullCheck.Checked {
 			value = ""
 		}
-		if id.Row < len(c.gridRows) {
-			c.edits.setUpdate(id.Row, column, value)
+		if id.Row < len(c.grid.rows) {
+			c.grid.edits.setUpdate(id.Row, column, value)
 		} else {
-			c.edits.setInsertEdit(id.Row-len(c.gridRows), column, value)
+			c.grid.edits.setInsertEdit(id.Row-len(c.grid.rows), column, value)
 		}
 		c.afterEditQueued()
 		if d != nil {
@@ -300,7 +300,7 @@ func (c *Client) afterEditQueued() {
 
 // editStatusText summarises the unsaved queue for the status bar.
 func (c *Client) editStatusText() string {
-	g := c.edits
+	g := c.grid.edits
 	if !g.any() {
 		return "就绪"
 	}
@@ -322,31 +322,31 @@ func (c *Client) insertRow() {
 	if !c.gridEditable() {
 		return
 	}
-	c.edits.inserts = append(c.edits.inserts, make(map[string]string))
+	c.grid.edits.inserts = append(c.grid.edits.inserts, make(map[string]string))
 	c.afterEditQueued()
 }
 
 // deleteSelectedRow marks the selected row (or removes a queued new row).
 func (c *Client) deleteSelectedRow() {
-	if !c.hasCell || !c.gridEditable() {
+	if !c.grid.hasCell || !c.gridEditable() {
 		return
 	}
-	row := c.selectedCell.Row
-	if row < len(c.gridRows) {
-		if c.edits.deletes[row] {
-			delete(c.edits.deletes, row)
+	row := c.grid.cell.Row
+	if row < len(c.grid.rows) {
+		if c.grid.edits.deletes[row] {
+			delete(c.grid.edits.deletes, row)
 		} else {
-			c.edits.deletes[row] = true
-			delete(c.edits.updates, row)
+			c.grid.edits.deletes[row] = true
+			delete(c.grid.edits.updates, row)
 		}
 	} else {
-		i := row - len(c.gridRows)
-		if i < 0 || i >= len(c.edits.inserts) {
+		i := row - len(c.grid.rows)
+		if i < 0 || i >= len(c.grid.edits.inserts) {
 			return
 		}
-		c.edits.inserts = append(c.edits.inserts[:i], c.edits.inserts[i+1:]...)
-		if c.selectedCell.Row >= len(c.gridRows)+len(c.edits.inserts) {
-			c.hasCell = false
+		c.grid.edits.inserts = append(c.grid.edits.inserts[:i], c.grid.edits.inserts[i+1:]...)
+		if c.grid.cell.Row >= len(c.grid.rows)+len(c.grid.edits.inserts) {
+			c.grid.hasCell = false
 		}
 	}
 	c.afterEditQueued()
@@ -354,7 +354,7 @@ func (c *Client) deleteSelectedRow() {
 
 // discardChanges drops the whole unsaved queue.
 func (c *Client) discardChanges() {
-	c.edits = newGridEditState()
+	c.grid.edits = newGridEditState()
 	c.afterEditQueued()
 }
 
@@ -364,9 +364,9 @@ func (c *Client) saveChanges() {
 	set := db.ChangeSet{
 		ConnID:   c.currentID,
 		Database: c.resolveDB(),
-		Schema:   c.sourceRef.Schema,
-		Table:    c.sourceRef.Table,
-		Columns:  c.gridCols,
+		Schema:   c.grid.src.Schema,
+		Table:    c.grid.src.Table,
+		Columns:  c.grid.cols,
 		Changes:  c.collectChanges(),
 	}
 	statements, err := c.store.BuildChanges(set)
@@ -404,11 +404,11 @@ func (c *Client) saveChanges() {
 
 // updateEditButtons enables the edit actions to match the state.
 func (c *Client) updateEditButtons() {
-	if c.editCellBtn == nil {
+	if c.act.editCell == nil {
 		return
 	}
 	editable := c.gridEditable()
-	rowSelected := c.hasCell
+	rowSelected := c.grid.hasCell
 	rowIsDeleteable := editable && rowSelected
 
 	set := func(b *widget.Button, on bool) {
@@ -418,12 +418,12 @@ func (c *Client) updateEditButtons() {
 			b.Disable()
 		}
 	}
-	set(c.editCellBtn, editable && rowSelected && !c.edits.isDeleted(c.selectedCell.Row))
-	set(c.insertRowBtn, editable)
-	set(c.deleteRowBtn, rowIsDeleteable)
-	set(c.saveChangesBtn, c.edits.any())
-	set(c.discardBtn, c.edits.any())
-	if c.filterBtn != nil {
-		set(c.filterBtn, editable)
+	set(c.act.editCell, editable && rowSelected && !c.grid.edits.isDeleted(c.grid.cell.Row))
+	set(c.act.insertRow, editable)
+	set(c.act.deleteRow, rowIsDeleteable)
+	set(c.act.saveChanges, c.grid.edits.any())
+	set(c.act.discard, c.grid.edits.any())
+	if c.act.filter != nil {
+		set(c.act.filter, editable)
 	}
 }

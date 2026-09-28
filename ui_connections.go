@@ -46,10 +46,10 @@ func engineName(typ string) string {
 // buildConnectionsPanel assembles the sidebar's connection section: the
 // picker with the connect toggle beside it, then the manage actions.
 func (c *Client) buildConnectionsPanel() fyne.CanvasObject {
-	c.connSel = widget.NewSelect(nil, func(string) { c.onConnPicked() })
-	c.connSel.PlaceHolder = "选择连接"
+	c.picker.sel = widget.NewSelect(nil, func(string) { c.onConnPicked() })
+	c.picker.sel.PlaceHolder = "选择连接"
 
-	c.connectBtn = widget.NewButtonWithIcon("连接", theme.ConfirmIcon(), func() {
+	c.picker.toggle = widget.NewButtonWithIcon("连接", theme.ConfirmIcon(), func() {
 		c.toggleSelectedConnection()
 	})
 	testBtn := widget.NewButtonWithIcon("测试", theme.MailComposeIcon(), func() {
@@ -77,7 +77,7 @@ func (c *Client) buildConnectionsPanel() fyne.CanvasObject {
 			}, c.win)
 	})
 
-	connRow := container.NewBorder(nil, nil, nil, c.connectBtn, c.connSel)
+	connRow := container.NewBorder(nil, nil, nil, c.picker.toggle, c.picker.sel)
 	manageRow := container.NewGridWithColumns(3, testBtn, editBtn, delBtn)
 	return container.NewVBox(connRow, manageRow)
 }
@@ -85,8 +85,8 @@ func (c *Client) buildConnectionsPanel() fyne.CanvasObject {
 // onConnPicked syncs the selection state with the dropdown's chosen name.
 func (c *Client) onConnPicked() {
 	for i, cfg := range c.store.Saved() {
-		if connOptionLabel(cfg) == c.connSel.Selected {
-			c.selIdx = i
+		if connOptionLabel(cfg) == c.picker.sel.Selected {
+			c.picker.idx = i
 			c.currentID = cfg.ID
 			c.currentDB = cfg.Database
 			break
@@ -103,7 +103,7 @@ func connOptionLabel(cfg db.ConnConfig) string {
 // selectedConn returns the currently highlighted saved connection.
 func (c *Client) selectedConn() (db.ConnConfig, bool) {
 	saved := c.store.Saved()
-	idx := c.selIdx
+	idx := c.picker.idx
 	if idx < 0 || idx >= len(saved) {
 		return db.ConnConfig{}, false
 	}
@@ -112,7 +112,7 @@ func (c *Client) selectedConn() (db.ConnConfig, bool) {
 
 // refreshConnections repopulates the picker, keeping the current selection.
 func (c *Client) refreshConnections() {
-	if c.connSel == nil {
+	if c.picker.sel == nil {
 		return
 	}
 	saved := c.store.Saved()
@@ -120,13 +120,13 @@ func (c *Client) refreshConnections() {
 	selected := ""
 	for i, cfg := range saved {
 		names[i] = connOptionLabel(cfg)
-		if i == c.selIdx {
+		if i == c.picker.idx {
 			selected = names[i]
 		}
 	}
-	c.connSel.Options = names
-	c.connSel.Selected = selected
-	c.connSel.Refresh()
+	c.picker.sel.Options = names
+	c.picker.sel.Selected = selected
+	c.picker.sel.Refresh()
 	c.updateConnectButton()
 }
 
@@ -145,18 +145,18 @@ func (c *Client) toggleSelectedConnection() {
 
 // updateConnectButton reflects whether the selected connection is live.
 func (c *Client) updateConnectButton() {
-	if c.connectBtn == nil {
+	if c.picker.toggle == nil {
 		return
 	}
 	cfg, ok := c.selectedConn()
 	if ok && c.store.ConnectionStatus(cfg.ID) {
-		c.connectBtn.SetText("断开")
-		c.connectBtn.Icon = theme.CancelIcon()
+		c.picker.toggle.SetText("断开")
+		c.picker.toggle.Icon = theme.CancelIcon()
 	} else {
-		c.connectBtn.SetText("连接")
-		c.connectBtn.Icon = theme.ConfirmIcon()
+		c.picker.toggle.SetText("连接")
+		c.picker.toggle.Icon = theme.ConfirmIcon()
 	}
-	c.connectBtn.Refresh()
+	c.picker.toggle.Refresh()
 }
 
 // testAndReport tests a saved connection and reports the outcome. The ping

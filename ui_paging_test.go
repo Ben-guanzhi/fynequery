@@ -65,8 +65,8 @@ func newPagingClient(t *testing.T, n int, paging bool, size string) *Client {
 	t.Cleanup(func() { c.disconnect("c0") })
 
 	w.SetContent(c.buildUI())
-	c.pageCheck.SetChecked(paging)
-	c.pageSizeSel.SetSelected(size)
+	c.page.check.SetChecked(paging)
+	c.page.sizeSel.SetSelected(size)
 	c.store.ReplaceHistory(nil) // count only what this test records
 	return c
 }
@@ -76,44 +76,44 @@ func newPagingClient(t *testing.T, n int, paging bool, size string) *Client {
 // disables it. Page turns must not add history entries.
 func TestPagingFetchesOneWindowPerPage(t *testing.T) {
 	c := newPagingClient(t, 25, true, "10")
-	c.queryEntry.setTextSilently("SELECT id, name FROM items ORDER BY id")
+	c.tabs.entry.setTextSilently("SELECT id, name FROM items ORDER BY id")
 
 	c.runCurrent()
-	if len(c.gridRows) != 10 {
-		t.Fatalf("page 1 rows = %d, want 10", len(c.gridRows))
+	if len(c.grid.rows) != 10 {
+		t.Fatalf("page 1 rows = %d, want 10", len(c.grid.rows))
 	}
-	if c.gridRows[0][1] != "row-1" {
-		t.Fatalf("page 1 starts at %q", c.gridRows[0][1])
+	if c.grid.rows[0][1] != "row-1" {
+		t.Fatalf("page 1 starts at %q", c.grid.rows[0][1])
 	}
-	if c.pageStmt == "" || c.pageNo != 1 {
-		t.Fatalf("paging state = %q page %d, want page 1 of a statement", c.pageStmt, c.pageNo)
+	if c.page.stmt == "" || c.page.no != 1 {
+		t.Fatalf("paging state = %q page %d, want page 1 of a statement", c.page.stmt, c.page.no)
 	}
-	if !c.pageBar.Visible() {
+	if !c.page.bar.Visible() {
 		t.Fatal("page bar hidden while a paged result is on screen")
 	}
-	if got := c.pageLabel.Text; got != "第 1 页 · 本页 10 行" {
+	if got := c.page.label.Text; got != "第 1 页 · 本页 10 行" {
 		t.Fatalf("page label = %q", got)
 	}
-	if !c.prevPageBtn.Disabled() {
+	if !c.page.prevBtn.Disabled() {
 		t.Fatal("上一页 enabled on page 1")
 	}
-	if c.nextPageBtn.Disabled() {
+	if c.page.nextBtn.Disabled() {
 		t.Fatal("下一页 disabled on a full page")
 	}
 
 	c.stepPage(1)
-	if c.pageNo != 2 || len(c.gridRows) != 10 || c.gridRows[0][1] != "row-11" {
-		t.Fatalf("page 2 = page %d, %d rows starting %q", c.pageNo, len(c.gridRows), c.gridRows[0][1])
+	if c.page.no != 2 || len(c.grid.rows) != 10 || c.grid.rows[0][1] != "row-11" {
+		t.Fatalf("page 2 = page %d, %d rows starting %q", c.page.no, len(c.grid.rows), c.grid.rows[0][1])
 	}
-	if c.prevPageBtn.Disabled() {
+	if c.page.prevBtn.Disabled() {
 		t.Fatal("上一页 disabled on page 2")
 	}
 
 	c.stepPage(1)
-	if c.pageNo != 3 || len(c.gridRows) != 5 {
-		t.Fatalf("last page = page %d, %d rows", c.pageNo, len(c.gridRows))
+	if c.page.no != 3 || len(c.grid.rows) != 5 {
+		t.Fatalf("last page = page %d, %d rows", c.page.no, len(c.grid.rows))
 	}
-	if !c.nextPageBtn.Disabled() {
+	if !c.page.nextBtn.Disabled() {
 		t.Fatal("下一页 still enabled after a short page")
 	}
 
@@ -127,16 +127,16 @@ func TestPagingFetchesOneWindowPerPage(t *testing.T) {
 // bar stays out of the way with a status line explaining why.
 func TestPagingBarHiddenForOwnWindowStatement(t *testing.T) {
 	c := newPagingClient(t, 25, true, "10")
-	c.queryEntry.setTextSilently("SELECT id, name FROM items ORDER BY id LIMIT 3")
+	c.tabs.entry.setTextSilently("SELECT id, name FROM items ORDER BY id LIMIT 3")
 
 	c.runCurrent()
-	if len(c.gridRows) != 3 {
-		t.Fatalf("rows = %d, want the statement's own 3", len(c.gridRows))
+	if len(c.grid.rows) != 3 {
+		t.Fatalf("rows = %d, want the statement's own 3", len(c.grid.rows))
 	}
-	if c.pageStmt != "" {
-		t.Fatalf("pageStmt = %q, want empty for a self-limited statement", c.pageStmt)
+	if c.page.stmt != "" {
+		t.Fatalf("pageStmt = %q, want empty for a self-limited statement", c.page.stmt)
 	}
-	if c.pageBar.Visible() {
+	if c.page.bar.Visible() {
 		t.Fatal("page bar shown for a statement that cannot be paged")
 	}
 	if !strings.Contains(c.status.Text, "未分页") {
@@ -148,24 +148,24 @@ func TestPagingBarHiddenForOwnWindowStatement(t *testing.T) {
 // on a paged result rather than only on the next run.
 func TestPageSizeChangeRefetchesFirstPage(t *testing.T) {
 	c := newPagingClient(t, 25, true, "10")
-	c.queryEntry.setTextSilently("SELECT id, name FROM items ORDER BY id")
+	c.tabs.entry.setTextSilently("SELECT id, name FROM items ORDER BY id")
 	c.runCurrent()
 	c.stepPage(1)
-	if c.pageNo != 2 {
-		t.Fatalf("page = %d, want 2 before the size change", c.pageNo)
+	if c.page.no != 2 {
+		t.Fatalf("page = %d, want 2 before the size change", c.page.no)
 	}
 
-	c.pageSizeSel.SetSelected("50")
-	if c.pageSize != 50 || c.pageNo != 1 {
-		t.Fatalf("after size change: size %d page %d", c.pageSize, c.pageNo)
+	c.page.sizeSel.SetSelected("50")
+	if c.page.size != 50 || c.page.no != 1 {
+		t.Fatalf("after size change: size %d page %d", c.page.size, c.page.no)
 	}
-	if len(c.gridRows) != 25 || c.gridRows[0][1] != "row-1" {
-		t.Fatalf("rows = %d starting %q, want all 25 from row-1", len(c.gridRows), c.gridRows[0][1])
+	if len(c.grid.rows) != 25 || c.grid.rows[0][1] != "row-1" {
+		t.Fatalf("rows = %d starting %q, want all 25 from row-1", len(c.grid.rows), c.grid.rows[0][1])
 	}
 	if c.uiSet.PageSize != 50 {
 		t.Fatalf("persisted page size = %d, want 50", c.uiSet.PageSize)
 	}
-	if !c.nextPageBtn.Disabled() {
+	if !c.page.nextBtn.Disabled() {
 		t.Fatal("下一页 enabled although the short page holds every row")
 	}
 }
@@ -174,18 +174,18 @@ func TestPageSizeChangeRefetchesFirstPage(t *testing.T) {
 // queue must not be thrown away by a page turn.
 func TestPagingRefusedWhileChangesPending(t *testing.T) {
 	c := newPagingClient(t, 25, true, "10")
-	c.queryEntry.setTextSilently("SELECT id, name FROM items ORDER BY id")
+	c.tabs.entry.setTextSilently("SELECT id, name FROM items ORDER BY id")
 	c.runCurrent()
 
-	c.edits.setUpdate(0, "name", "edited")
+	c.grid.edits.setUpdate(0, "name", "edited")
 	c.stepPage(1)
-	if c.pageNo != 1 {
-		t.Fatalf("page turned to %d with unsaved changes", c.pageNo)
+	if c.page.no != 1 {
+		t.Fatalf("page turned to %d with unsaved changes", c.page.no)
 	}
 	if !strings.Contains(c.status.Text, "未保存") {
 		t.Fatalf("status = %q, want the unsaved-changes warning", c.status.Text)
 	}
-	if !c.edits.any() {
+	if !c.grid.edits.any() {
 		t.Fatal("the pending edit queue was dropped")
 	}
 }
@@ -196,28 +196,28 @@ func TestPagingRefusedWhileChangesPending(t *testing.T) {
 // and say so on the bar, and the pages must come back disjoint.
 func TestPagingInjectsPrimaryKeyOrder(t *testing.T) {
 	c := newPagingClient(t, 25, true, "10")
-	c.queryEntry.setTextSilently("SELECT * FROM items")
+	c.tabs.entry.setTextSilently("SELECT * FROM items")
 
 	c.runCurrent()
 	// pageStmt holds the statement to page; the window itself is rendered per
 	// call by PageSQL (pinned in internal/db/paging_test.go).
-	if !strings.HasSuffix(c.pageStmt, `ORDER BY "id"`) {
-		t.Fatalf("paged statement = %q, want an injected primary-key sort", c.pageStmt)
+	if !strings.HasSuffix(c.page.stmt, `ORDER BY "id"`) {
+		t.Fatalf("paged statement = %q, want an injected primary-key sort", c.page.stmt)
 	}
-	if !strings.Contains(c.pageLabel.Text, "已按主键 id 排序") {
-		t.Fatalf("bar = %q, want the injected sort announced", c.pageLabel.Text)
+	if !strings.Contains(c.page.label.Text, "已按主键 id 排序") {
+		t.Fatalf("bar = %q, want the injected sort announced", c.page.label.Text)
 	}
-	if c.gridRows[0][1] != "row-1" || c.gridRows[9][1] != "row-10" {
-		t.Fatalf("page 1 = %q..%q, want row-1..row-10", c.gridRows[0][1], c.gridRows[9][1])
+	if c.grid.rows[0][1] != "row-1" || c.grid.rows[9][1] != "row-10" {
+		t.Fatalf("page 1 = %q..%q, want row-1..row-10", c.grid.rows[0][1], c.grid.rows[9][1])
 	}
 	c.stepPage(1)
-	if c.gridRows[0][1] != "row-11" {
-		t.Fatalf("page 2 starts at %q, want row-11", c.gridRows[0][1])
+	if c.grid.rows[0][1] != "row-11" {
+		t.Fatalf("page 2 starts at %q, want row-11", c.grid.rows[0][1])
 	}
 	// The edit context is rebuilt from the rewritten statement, so paging keeps
 	// the grid writable exactly where the plain SELECT * was.
-	if c.sourceRef.Table != "items" {
-		t.Fatalf("source = %+v, want the items table", c.sourceRef)
+	if c.grid.src.Table != "items" {
+		t.Fatalf("source = %+v, want the items table", c.grid.src)
 	}
 }
 
@@ -226,20 +226,20 @@ func TestPagingInjectsPrimaryKeyOrder(t *testing.T) {
 // a one-row bar pushes the turn buttons out of reach.
 func TestPagingCompositeKeyCountedNotSpelled(t *testing.T) {
 	c := newPagingClient(t, 25, true, "10")
-	c.queryEntry.setTextSilently("SELECT * FROM compkey")
+	c.tabs.entry.setTextSilently("SELECT * FROM compkey")
 
 	c.runCurrent()
 	for _, col := range []string{`"a"`, `"b"`, `"c"`, `"d"`} {
-		if !strings.Contains(c.pageStmt, col) {
-			t.Fatalf("paged statement = %q, want key column %s", c.pageStmt, col)
+		if !strings.Contains(c.page.stmt, col) {
+			t.Fatalf("paged statement = %q, want key column %s", c.page.stmt, col)
 		}
 	}
-	if !strings.Contains(c.pageLabel.Text, "4 列") {
-		t.Fatalf("bar = %q, want the key counted", c.pageLabel.Text)
+	if !strings.Contains(c.page.label.Text, "4 列") {
+		t.Fatalf("bar = %q, want the key counted", c.page.label.Text)
 	}
 	c.stepPage(1)
-	if len(c.gridRows) != 10 || c.gridRows[0][4] != "row-11" {
-		t.Fatalf("page 2 = %d rows starting %q", len(c.gridRows), c.gridRows[0][4])
+	if len(c.grid.rows) != 10 || c.grid.rows[0][4] != "row-11" {
+		t.Fatalf("page 2 = %d rows starting %q", len(c.grid.rows), c.grid.rows[0][4])
 	}
 }
 
@@ -248,16 +248,16 @@ func TestPagingCompositeKeyCountedNotSpelled(t *testing.T) {
 // the windows may overlap rather than invent an order.
 func TestPagingWarnsWithoutKey(t *testing.T) {
 	c := newPagingClient(t, 25, true, "10")
-	c.queryEntry.setTextSilently("SELECT * FROM nokey")
+	c.tabs.entry.setTextSilently("SELECT * FROM nokey")
 
 	c.runCurrent()
-	if strings.Contains(c.pageStmt, "ORDER BY") {
-		t.Fatalf("paged statement = %q, want the user's SQL untouched", c.pageStmt)
+	if strings.Contains(c.page.stmt, "ORDER BY") {
+		t.Fatalf("paged statement = %q, want the user's SQL untouched", c.page.stmt)
 	}
-	if !strings.Contains(c.pageLabel.Text, "排序不稳定") {
-		t.Fatalf("bar = %q, want the instability warning", c.pageLabel.Text)
+	if !strings.Contains(c.page.label.Text, "排序不稳定") {
+		t.Fatalf("bar = %q, want the instability warning", c.page.label.Text)
 	}
-	if c.pageStmt == "" || !c.pageBar.Visible() {
+	if c.page.stmt == "" || !c.page.bar.Visible() {
 		t.Fatal("a keyless table must still be browsable page by page")
 	}
 }
@@ -266,20 +266,20 @@ func TestPagingWarnsWithoutKey(t *testing.T) {
 // else's business, so the pager adds nothing and says nothing.
 func TestPagingKeepsOwnOrderBy(t *testing.T) {
 	c := newPagingClient(t, 25, true, "10")
-	c.queryEntry.setTextSilently("SELECT id, name FROM items ORDER BY name DESC")
+	c.tabs.entry.setTextSilently("SELECT id, name FROM items ORDER BY name DESC")
 
 	c.runCurrent()
-	if strings.Contains(c.pageStmt, `"id"`) || c.pageNote != "" {
-		t.Fatalf("statement = %q note = %q, want the user's sort kept", c.pageStmt, c.pageNote)
+	if strings.Contains(c.page.stmt, `"id"`) || c.page.note != "" {
+		t.Fatalf("statement = %q note = %q, want the user's sort kept", c.page.stmt, c.page.note)
 	}
-	if c.pageStmt != "SELECT id, name FROM items ORDER BY name DESC" {
-		t.Fatalf("statement = %q, want it paged exactly as written", c.pageStmt)
+	if c.page.stmt != "SELECT id, name FROM items ORDER BY name DESC" {
+		t.Fatalf("statement = %q, want it paged exactly as written", c.page.stmt)
 	}
-	if len(c.gridRows) != 10 {
-		t.Fatalf("rows = %d, want one 10-row window", len(c.gridRows))
+	if len(c.grid.rows) != 10 {
+		t.Fatalf("rows = %d, want one 10-row window", len(c.grid.rows))
 	}
-	if c.gridRows[0][1] != "row-9" {
-		t.Fatalf("first row = %q, want the DESC order kept (row-9)", c.gridRows[0][1])
+	if c.grid.rows[0][1] != "row-9" {
+		t.Fatalf("first row = %q, want the DESC order kept (row-9)", c.grid.rows[0][1])
 	}
 }
 
@@ -288,29 +288,29 @@ func TestPagingKeepsOwnOrderBy(t *testing.T) {
 // SELECT show the bar; unticking takes the bar away again.
 func TestPagingCheckGreysRowCap(t *testing.T) {
 	c := newPagingClient(t, 5, false, "10")
-	if c.limitSel.Disabled() {
+	if c.page.limitSel.Disabled() {
 		t.Fatal("行数上限 starts disabled")
 	}
-	c.queryEntry.setTextSilently("SELECT id, name FROM items ORDER BY id")
+	c.tabs.entry.setTextSilently("SELECT id, name FROM items ORDER BY id")
 	c.runCurrent()
-	if c.pageBar.Visible() {
+	if c.page.bar.Visible() {
 		t.Fatal("page bar shown while paging is off")
 	}
 
-	test.Tap(c.pageCheck)
-	if !c.paging || !c.limitSel.Disabled() {
-		t.Fatalf("paging=%v limitSel disabled=%v", c.paging, c.limitSel.Disabled())
+	test.Tap(c.page.check)
+	if !c.page.on || !c.page.limitSel.Disabled() {
+		t.Fatalf("paging=%v limitSel disabled=%v", c.page.on, c.page.limitSel.Disabled())
 	}
 	c.runCurrent()
-	if !c.pageBar.Visible() || len(c.gridRows) != 5 {
-		t.Fatalf("bar visible=%v rows=%d with paging on", c.pageBar.Visible(), len(c.gridRows))
+	if !c.page.bar.Visible() || len(c.grid.rows) != 5 {
+		t.Fatalf("bar visible=%v rows=%d with paging on", c.page.bar.Visible(), len(c.grid.rows))
 	}
 
-	test.Tap(c.pageCheck)
-	if c.paging || c.limitSel.Disabled() {
-		t.Fatalf("after unticking: paging=%v limitSel disabled=%v", c.paging, c.limitSel.Disabled())
+	test.Tap(c.page.check)
+	if c.page.on || c.page.limitSel.Disabled() {
+		t.Fatalf("after unticking: paging=%v limitSel disabled=%v", c.page.on, c.page.limitSel.Disabled())
 	}
-	if c.pageBar.Visible() {
+	if c.page.bar.Visible() {
 		t.Fatal("page bar survived turning paging off")
 	}
 }
@@ -320,7 +320,7 @@ func TestPagingCheckGreysRowCap(t *testing.T) {
 // like a cancellation. A syntax error must stay a syntax error.
 func TestFailedQueryKeepsItsError(t *testing.T) {
 	c := newPagingClient(t, 5, false, "10")
-	c.queryEntry.setTextSilently("SELECT * FROM missing_table")
+	c.tabs.entry.setTextSilently("SELECT * FROM missing_table")
 	c.runCurrent()
 	if !strings.Contains(c.status.Text, "错误") {
 		t.Fatalf("status = %q, want the query error", c.status.Text)
@@ -341,18 +341,18 @@ func TestPageBarFitsMainPane(t *testing.T) {
 	w.SetContent(root)
 	w.Resize(fyne.NewSize(1280, 800))
 
-	c.pageStmt = "SELECT * FROM t"
-	c.pageNo = 1234
-	c.pageSize = 500
-	c.gridHeader = []string{"a"}
-	c.gridRows = [][]string{{"1"}, {"2"}}
-	bar := c.pageBar
+	c.page.stmt = "SELECT * FROM t"
+	c.page.no = 1234
+	c.page.size = 500
+	c.grid.header = []string{"a"}
+	c.grid.rows = [][]string{{"1"}, {"2"}}
+	bar := c.page.bar
 
 	for _, note := range []string{
 		" · 已按主键 id, tenant_id, created_at 排序",
 		" · ⚠ 排序不稳定，翻页可能重复或漏行",
 	} {
-		c.pageNote = note
+		c.page.note = note
 		c.refreshPageBar()
 		test.LaidOutObjects(root)
 		if !bar.Visible() {

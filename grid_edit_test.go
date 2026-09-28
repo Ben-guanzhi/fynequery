@@ -8,18 +8,20 @@ import (
 
 func TestCollectChangesOrderAndNULL(t *testing.T) {
 	c := &Client{
-		gridCols: []string{"id", "name"},
-		lastRows: [][]interface{}{
-			{1.0, "a"},
-			{2.0, "b"},
-			{3.0, "c"},
+		grid: gridState{
+			cols: []string{"id", "name"},
+			lastRows: [][]interface{}{
+				{1.0, "a"},
+				{2.0, "b"},
+				{3.0, "c"},
+			},
+			edits: newGridEditState(),
 		},
-		edits: newGridEditState(),
 	}
-	c.edits.setUpdate(2, "name", "x")
-	c.edits.setUpdate(0, "name", "") // NULL
-	c.edits.deletes[0] = true
-	c.edits.inserts = append(c.edits.inserts, map[string]string{"name": "n", "id": "9"})
+	c.grid.edits.setUpdate(2, "name", "x")
+	c.grid.edits.setUpdate(0, "name", "") // NULL
+	c.grid.edits.deletes[0] = true
+	c.grid.edits.inserts = append(c.grid.edits.inserts, map[string]string{"name": "n", "id": "9"})
 
 	changes := c.collectChanges()
 	// Queue order: updates by row, deletes by row, then new rows.
@@ -35,8 +37,8 @@ func TestCollectChangesOrderAndNULL(t *testing.T) {
 	if changes[2].Kind != db.RowInsert {
 		t.Errorf("third change = %+v, want insert", changes[2])
 	}
-	ins := db.RowChange{Kind: db.RowInsert, Edits: c.editsOf(c.edits.inserts[0])}
-	statements, err := db.BuildStatements("mysql", "`t`", c.gridCols, []string{"id"},
+	ins := db.RowChange{Kind: db.RowInsert, Edits: c.editsOf(c.grid.edits.inserts[0])}
+	statements, err := db.BuildStatements("mysql", "`t`", c.grid.cols, []string{"id"},
 		map[string]string{"id": "int", "name": "varchar(50)", "amount": "decimal(18,2)"}, []db.RowChange{ins})
 	if err != nil {
 		t.Fatalf("insert build: %v", err)

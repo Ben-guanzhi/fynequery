@@ -170,7 +170,7 @@ func TestForeignKeyMemoAndPicker(t *testing.T) {
 	}
 	sdb.Close()
 
-	c := &Client{store: db.NewStore(), fkCache: make(map[string][]db.ForeignKeyInfo)}
+	c := &Client{store: db.NewStore(), cache: memoCache{fks: make(map[string][]db.ForeignKeyInfo)}}
 	if err := c.connect(db.ConnConfig{ID: "c0", Name: "t", Type: db.DbTypeSQLite, Database: dbFile}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestQueryGoroutineUsesSessionSnapshot(t *testing.T) {
 	finished := make(chan func(), 1)
 	c.dispatch = func(f func()) { finished <- f }
 
-	c.queryEntry.setTextSilently(`WITH RECURSIVE cnt(x) AS (
+	c.tabs.entry.setTextSilently(`WITH RECURSIVE cnt(x) AS (
 		SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 300000
 	) SELECT count(*) FROM cnt`)
 	c.runCurrent()

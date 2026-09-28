@@ -1,7 +1,7 @@
 package main
 
 // Schema tree loading: fetching catalog data from the store, mutating the
-// node table (c.treeNodes), and the taps that drive the editor from a node.
+// node table (c.tree.nodes), and the taps that drive the editor from a node.
 // Rendering of those nodes lives in ui_schema.go; node action dialogs in
 // ui_schema_actions.go.
 
@@ -16,14 +16,14 @@ import (
 
 // onSchemaTableTapped fills the editor with a SELECT preview for the table.
 func (c *Client) onSchemaTableTapped(uid string) {
-	nd, ok := c.treeNodes[uid]
+	nd, ok := c.tree.nodes[uid]
 	if !ok || nd.kind != "table" {
 		return
 	}
-	c.selectedNode = uid
+	c.tree.selected = uid
 	c.currentID = c.selectedOrLive()
 	c.currentDB = nd.db
-	c.queryEntry.setTextSilently(c.selectSQL(nd))
+	c.tabs.entry.setTextSilently(c.selectSQL(nd))
 	c.dbSelRefresh()
 	c.rebuildSchemaRows()
 	c.focusEditor() // the next keystrokes should edit the generated SELECT
@@ -80,16 +80,16 @@ func plainIdent(name string) string {
 // demand when their row is tapped.
 func (c *Client) refreshSchema() {
 	c.mu.Lock()
-	c.treeNodes = map[string]*nodeData{treeRootUID: {kind: "root", label: "数据库"}}
+	c.tree.nodes = map[string]*nodeData{treeRootUID: {kind: "root", label: "数据库"}}
 	c.mu.Unlock()
-	c.expanded = make(map[string]bool)
-	c.selectedNode = ""
-	c.rowCache = make(map[rowCacheKey]fyne.CanvasObject) // the old tree is gone; drop its rendered rows
+	c.tree.expanded = make(map[string]bool)
+	c.tree.selected = ""
+	c.tree.cache = make(map[rowCacheKey]fyne.CanvasObject) // the old tree is gone; drop its rendered rows
 
 	id := c.selectedOrLive()
 	if id == "" || !c.store.ConnectionStatus(id) {
 		c.mu.Lock()
-		c.treeNodes[treeRootUID].label = "未连接"
+		c.tree.nodes[treeRootUID].label = "未连接"
 		c.mu.Unlock()
 		c.rebuildSchemaRows()
 		return
@@ -99,17 +99,17 @@ func (c *Client) refreshSchema() {
 	dbs, err := c.store.Databases(id)
 	if err != nil {
 		c.mu.Lock()
-		c.treeNodes[treeRootUID].label = "加载失败：" + err.Error()
+		c.tree.nodes[treeRootUID].label = "加载失败：" + err.Error()
 		c.mu.Unlock()
 		c.rebuildSchemaRows()
 		return
 	}
 
 	c.mu.Lock()
-	root := c.treeNodes[treeRootUID]
+	root := c.tree.nodes[treeRootUID]
 	for _, dbName := range dbs {
 		dbUID := "db:" + dbName
-		c.treeNodes[dbUID] = &nodeData{kind: "db", label: dbName, db: dbName, uid: dbUID}
+		c.tree.nodes[dbUID] = &nodeData{kind: "db", label: dbName, db: dbName, uid: dbUID}
 		root.children = append(root.children, dbUID)
 	}
 	root.label = fmt.Sprintf("数据库 (%d)", len(dbs))
@@ -118,13 +118,13 @@ func (c *Client) refreshSchema() {
 	// Open the connection's own database right away, all the way down to its
 	// tables — the reference navigator shows them the moment you connect.
 	if cfg, ok := c.store.LiveConfig(id); ok && cfg.Database != "" {
-		if uid := "db:" + cfg.Database; c.treeNodes[uid] != nil {
-			c.expanded[uid] = true
-			dbNode := c.treeNodes[uid]
+		if uid := "db:" + cfg.Database; c.tree.nodes[uid] != nil {
+			c.tree.expanded[uid] = true
+			dbNode := c.tree.nodes[uid]
 			c.loadChildren(dbNode)
 			for _, ch := range dbNode.children {
-				if s := c.treeNodes[ch]; s != nil && s.kind == "schema" {
-					c.expanded[s.uid] = true
+				if s := c.tree.nodes[ch]; s != nil && s.kind == "schema" {
+					c.tree.expanded[s.uid] = true
 					c.loadChildren(s) // tables of this schema
 				}
 			}
@@ -184,15 +184,15 @@ func (c *Client) applyChildren(nd *nodeData, schemas []string, tables []db.Table
 		// An expanded database also loads its schemas' tables so the tree
 		// fills in like the reference navigator.
 		for _, ch := range nd.children {
-			if s := c.treeNodes[ch]; s != nil && s.kind == "schema" {
-				c.expanded[s.uid] = true
+			if s := c.tree.nodes[ch]; s != nil && s.kind == "schema" {
+				c.tree.expanded[s.uid] = true
 				c.loadChildren(s)
 			}
 		}
 	default:
 		c.attachTables(nd, tables)
 	}
-	if c.expanded[nd.uid] {
+	if c.tree.expanded[nd.uid] {
 		c.rebuildSchemaRows()
 	}
 }
@@ -202,7 +202,7 @@ func (c *Client) attachSchemas(nd *nodeData, schemas []string) {
 	for _, sch := range schemas {
 		schUID := nd.uid + "|s:" + sch
 		c.mu.Lock()
-		c.treeNodes[schUID] = &nodeData{kind: "schema", label: sch, db: nd.db, schema: sch, uid: schUID}
+		c.tree.nodes[schUID] = &nodeData{kind: "schema", label: sch, db: nd.db, schema: sch, uid: schUID}
 		nd.children = append(nd.children, schUID)
 		c.mu.Unlock()
 	}
@@ -214,7 +214,7 @@ func (c *Client) attachTables(nd *nodeData, tables []db.TableInfo) {
 	if len(tables) == 0 {
 		uid := nd.uid + "|empty"
 		c.mu.Lock()
-		c.treeNodes[uid] = &nodeData{
+		c.tree.nodes[uid] = &nodeData{
 			kind:   "empty",
 			label:  "（没有可见的表：登录可能无权限，或该库为空）",
 			uid:    uid,
@@ -237,7 +237,7 @@ func (c *Client) attachTables(nd *nodeData, tables []db.TableInfo) {
 			label = fmt.Sprintf("%s.%s [%s]", tSchema, t.Name, t.Type)
 		}
 		tUID := nd.uid + "|t:" + tSchema + "." + t.Name
-		c.treeNodes[tUID] = &nodeData{
+		c.tree.nodes[tUID] = &nodeData{
 			kind:   "table",
 			label:  label,
 			db:     nd.db,
@@ -255,7 +255,7 @@ func (c *Client) attachTables(nd *nodeData, tables []db.TableInfo) {
 func (c *Client) addErrorNode(nd *nodeData, err error) {
 	uid := nd.uid + "|error"
 	c.mu.Lock()
-	c.treeNodes[uid] = &nodeData{
+	c.tree.nodes[uid] = &nodeData{
 		kind:   "error",
 		label:  "⚠ 加载失败：" + err.Error(),
 		uid:    uid,
@@ -268,12 +268,12 @@ func (c *Client) addErrorNode(nd *nodeData, err error) {
 
 // retrySchemaNode clears a failed load and expands the parent again.
 func (c *Client) retrySchemaNode(parentUID string) {
-	parent := c.treeNodes[parentUID]
+	parent := c.tree.nodes[parentUID]
 	if parent == nil {
 		return
 	}
 	parent.loaded = false
 	parent.children = nil
-	delete(c.expanded, parentUID)
+	delete(c.tree.expanded, parentUID)
 	c.toggleSchemaNode(parentUID)
 }

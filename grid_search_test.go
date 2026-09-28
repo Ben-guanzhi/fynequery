@@ -37,82 +37,82 @@ func TestGridSearch(t *testing.T) {
 
 	// The box sits in the cell-bar HBox, which lays children at their MinSize:
 	// a bare Entry would be ~37px wide, i.e. unusable.
-	if mw := c.gridSearchEntry.MinSize().Width; mw < 150 {
+	if mw := c.find.entry.MinSize().Width; mw < 150 {
 		t.Fatalf("search box min width = %.0f, want >= 150", mw)
 	}
 
-	c.gridSearchEntry.SetText("li")
-	if len(c.searchHits) != 3 {
-		t.Fatalf("hits = %d, want 3 (%v)", len(c.searchHits), c.searchHits)
+	c.find.entry.SetText("li")
+	if len(c.find.hits) != 3 {
+		t.Fatalf("hits = %d, want 3 (%v)", len(c.find.hits), c.find.hits)
 	}
 	// Reading order: Alice(0,0), Berlin(1,1), Lima(2,1).
 	wantHits := []searchHitKey{{0, 0}, {1, 1}, {2, 1}}
 	for i, h := range wantHits {
-		if c.searchHits[i] != h {
-			t.Fatalf("hits = %v, want %v", c.searchHits, wantHits)
+		if c.find.hits[i] != h {
+			t.Fatalf("hits = %v, want %v", c.find.hits, wantHits)
 		}
 	}
-	if got := c.searchHitsLabel.Text; got != "1/3" {
+	if got := c.find.label.Text; got != "1/3" {
 		t.Fatalf("counter = %q, want 1/3", got)
 	}
 	if !c.isSearchHit(1, 1) || c.isSearchHit(1, 0) {
 		t.Fatal("highlight set wrong")
 	}
 	// The first hit is revealed through the table selection.
-	if !c.hasCell || c.selectedCell != (widget.TableCellID{Row: 0, Col: 0}) {
-		t.Fatalf("selection = %v (hasCell %v), want {0 0}", c.selectedCell, c.hasCell)
+	if !c.grid.hasCell || c.grid.cell != (widget.TableCellID{Row: 0, Col: 0}) {
+		t.Fatalf("selection = %v (hasCell %v), want {0 0}", c.grid.cell, c.grid.hasCell)
 	}
 
 	// Enter → next hit.
-	c.gridSearchEntry.TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn})
-	if c.searchCur != 1 || c.searchHitsLabel.Text != "2/3" {
-		t.Fatalf("after Enter: cur=%d counter=%q, want cur=1 2/3", c.searchCur, c.searchHitsLabel.Text)
+	c.find.entry.TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn})
+	if c.find.cur != 1 || c.find.label.Text != "2/3" {
+		t.Fatalf("after Enter: cur=%d counter=%q, want cur=1 2/3", c.find.cur, c.find.label.Text)
 	}
-	if c.cellView.Text != "Berlin" {
-		t.Fatalf("cell viewer = %q, want Berlin", c.cellView.Text)
+	if c.grid.view.Text != "Berlin" {
+		t.Fatalf("cell viewer = %q, want Berlin", c.grid.view.Text)
 	}
 
 	// Shift+Enter → back, then wrapping to the last hit.
-	c.gridSearchEntry.KeyDown(&fyne.KeyEvent{Name: desktop.KeyShiftLeft})
-	c.gridSearchEntry.TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn})
-	c.gridSearchEntry.KeyUp(&fyne.KeyEvent{Name: desktop.KeyShiftLeft})
-	if c.searchCur != 0 || c.searchHitsLabel.Text != "1/3" {
-		t.Fatalf("after Shift+Enter: cur=%d counter=%q, want cur=0 1/3", c.searchCur, c.searchHitsLabel.Text)
+	c.find.entry.KeyDown(&fyne.KeyEvent{Name: desktop.KeyShiftLeft})
+	c.find.entry.TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn})
+	c.find.entry.KeyUp(&fyne.KeyEvent{Name: desktop.KeyShiftLeft})
+	if c.find.cur != 0 || c.find.label.Text != "1/3" {
+		t.Fatalf("after Shift+Enter: cur=%d counter=%q, want cur=0 1/3", c.find.cur, c.find.label.Text)
 	}
-	c.gridSearchEntry.KeyDown(&fyne.KeyEvent{Name: desktop.KeyShiftRight})
-	c.gridSearchEntry.TypedKey(&fyne.KeyEvent{Name: fyne.KeyEnter})
-	c.gridSearchEntry.KeyUp(&fyne.KeyEvent{Name: desktop.KeyShiftRight})
-	if c.searchCur != 2 || c.searchHitsLabel.Text != "3/3" {
-		t.Fatalf("after wrapping Shift+Enter: cur=%d counter=%q, want cur=2 3/3", c.searchCur, c.searchHitsLabel.Text)
+	c.find.entry.KeyDown(&fyne.KeyEvent{Name: desktop.KeyShiftRight})
+	c.find.entry.TypedKey(&fyne.KeyEvent{Name: fyne.KeyEnter})
+	c.find.entry.KeyUp(&fyne.KeyEvent{Name: desktop.KeyShiftRight})
+	if c.find.cur != 2 || c.find.label.Text != "3/3" {
+		t.Fatalf("after wrapping Shift+Enter: cur=%d counter=%q, want cur=2 3/3", c.find.cur, c.find.label.Text)
 	}
 	// Plain Enter must still insert nothing into the box.
-	if c.gridSearchEntry.Text != "li" {
-		t.Fatalf("search text = %q, want unchanged %q", c.gridSearchEntry.Text, "li")
+	if c.find.entry.Text != "li" {
+		t.Fatalf("search text = %q, want unchanged %q", c.find.entry.Text, "li")
 	}
 
 	// Emptying the box clears hits, highlights and counter.
-	c.gridSearchEntry.SetText("")
-	if len(c.searchHits) != 0 || c.isSearchHit(1, 1) || c.searchHitsLabel.Text != "" {
-		t.Fatalf("clear failed: hits=%v label=%q", c.searchHits, c.searchHitsLabel.Text)
+	c.find.entry.SetText("")
+	if len(c.find.hits) != 0 || c.isSearchHit(1, 1) || c.find.label.Text != "" {
+		t.Fatalf("clear failed: hits=%v label=%q", c.find.hits, c.find.label.Text)
 	}
 
 	// A sort reorders rows, so the hits must be re-collected: Lima moves from
 	// row 2 to row 1 under ascending city order.
-	c.gridSearchEntry.SetText("lima")
-	if len(c.searchHits) != 1 || c.searchHits[0] != (searchHitKey{2, 1}) {
-		t.Fatalf("hits = %v, want [{2 1}]", c.searchHits)
+	c.find.entry.SetText("lima")
+	if len(c.find.hits) != 1 || c.find.hits[0] != (searchHitKey{2, 1}) {
+		t.Fatalf("hits = %v, want [{2 1}]", c.find.hits)
 	}
 	c.sortGrid(1)
-	if len(c.searchHits) != 1 || c.searchHits[0] != (searchHitKey{1, 1}) {
-		t.Fatalf("hits after sort = %v, want [{1 1}]", c.searchHits)
+	if len(c.find.hits) != 1 || c.find.hits[0] != (searchHitKey{1, 1}) {
+		t.Fatalf("hits after sort = %v, want [{1 1}]", c.find.hits)
 	}
 
 	// A new result resets the search entirely.
-	c.gridSearchEntry.SetText("li")
+	c.find.entry.SetText("li")
 	c.renderResult(searchResult())
-	if c.searchTerm != "" || len(c.searchHits) != 0 || c.gridSearchEntry.Text != "" {
+	if c.find.term != "" || len(c.find.hits) != 0 || c.find.entry.Text != "" {
 		t.Fatalf("new result did not reset search: term=%q hits=%v entry=%q",
-			c.searchTerm, c.searchHits, c.gridSearchEntry.Text)
+			c.find.term, c.find.hits, c.find.entry.Text)
 	}
 }
 
@@ -125,12 +125,12 @@ func TestGridSearchNoHit(t *testing.T) {
 	w.SetContent(c.buildQueryView())
 	c.renderResult(searchResult())
 
-	c.gridSearchEntry.SetText("zzz")
-	if len(c.searchHits) != 0 {
-		t.Fatalf("hits = %v, want none", c.searchHits)
+	c.find.entry.SetText("zzz")
+	if len(c.find.hits) != 0 {
+		t.Fatalf("hits = %v, want none", c.find.hits)
 	}
-	if got := c.searchHitsLabel.Text; got != "0/0" {
+	if got := c.find.label.Text; got != "0/0" {
 		t.Fatalf("counter = %q, want 0/0", got)
 	}
-	c.gridSearchEntry.TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn}) // must not panic
+	c.find.entry.TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn}) // must not panic
 }

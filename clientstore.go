@@ -49,7 +49,7 @@ func (c *Client) foreignKeys(connID, database, schema, table string) ([]db.Forei
 	}
 	key := connID + "\x00" + database + "\x00" + schema + "\x00" + table
 	c.mu.Lock()
-	cached, ok := c.fkCache[key]
+	cached, ok := c.cache.fks[key]
 	c.mu.Unlock()
 	if ok {
 		return cached, nil
@@ -59,7 +59,7 @@ func (c *Client) foreignKeys(connID, database, schema, table string) ([]db.Forei
 		return nil, err
 	}
 	c.mu.Lock()
-	c.fkCache[key] = fks
+	c.cache.fks[key] = fks
 	c.mu.Unlock()
 	return fks, nil
 }
@@ -86,24 +86,24 @@ func (c *Client) foreignKeyValues(connID, database, schema, table, column string
 // cells too. The rendering itself lives in db.BuildWorkbook; only the fyne
 // file target belongs to this side of the barrier.
 func (c *Client) writeWorkbookFile(f fyne.URIWriteCloser) error {
-	if len(c.gridHeader) == 0 {
+	if len(c.grid.header) == 0 {
 		return fmt.Errorf("当前结果没有列，无法导出 XLSX")
 	}
-	if len(c.lastRows) == 0 {
+	if len(c.grid.lastRows) == 0 {
 		return fmt.Errorf("当前结果为空，没有可导出的行")
 	}
-	if len(c.lastRows) > db.WorkbookMaxRows {
+	if len(c.grid.lastRows) > db.WorkbookMaxRows {
 		return fmt.Errorf("一次最多导出 %d 行，请翻页或缩小范围", db.WorkbookMaxRows)
 	}
-	columns := make([]db.WorkbookColumn, len(c.gridHeader))
-	for i, h := range c.gridHeader {
+	columns := make([]db.WorkbookColumn, len(c.grid.header))
+	for i, h := range c.grid.header {
 		typ := ""
-		if i < len(c.gridColTypes) {
-			typ = c.gridColTypes[i]
+		if i < len(c.grid.colTypes) {
+			typ = c.grid.colTypes[i]
 		}
 		columns[i] = db.WorkbookColumn{Name: db.StripTypeSuffix(h), Type: typ}
 	}
-	data, err := db.BuildWorkbook(columns, c.lastRows)
+	data, err := db.BuildWorkbook(columns, c.grid.lastRows)
 	if err != nil {
 		return err
 	}

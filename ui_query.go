@@ -18,20 +18,73 @@ import (
 // This file assembles the query page: the toolbar, query tabs, the editor
 // area and the result grid, plus the execution entry point (runCurrent).
 
-// buildQueryView assembles the editor/grid half of the main window.
+// buildQueryView assembles the editor/grid half of the main window. Each region
+// is built by its own assembler (toolbar, editor area, result grid, cell bar,
+// status bar); this function only wires them into the border/split, so the
+// layout - and the layout tests that pin it - stays readable.
 func (c *Client) buildQueryView() fyne.CanvasObject {
-	// Query tabs: several independent editors, one shared result grid.
-	// Everything downstream addresses the active editor through c.queryEntry,
-	// so switching tabs is just re-pointing that alias.
-	c.sugBar = container.NewVBox()
-	c.sugBar.Hide()
-	c.tabSeq = 0
-	c.qTabs = container.NewAppTabs()
-	c.qTabs.OnSelected = func(item *container.TabItem) { c.syncActiveTab(item) }
+	toolbar := c.buildQueryToolbar()
+	editorArea := c.buildEditorArea()
+	c.buildResultGrid()
+	bottom := container.NewVBox(c.buildCellBar(), c.buildStatusBar())
+
+	// The page bar rides above the grid and is hidden unless the result on
+	// screen is a paged one, so a normal query costs no vertical space.
+	gridArea := container.NewBorder(c.buildPageBar(), nil, nil, nil, c.grid.table)
+	split := container.NewVSplit(
+		editorArea,
+		gridArea,
+	)
+	split.Offset = 0.35
+	if r := c.uiSet.EditorRatio; r > 0.1 && r < 0.9 {
+		split.Offset = float64(r)
+	}
+	c.vSplit = split
+
+	return container.NewBorder(toolbar, bottom, nil, nil, split)
+}
+
+// buildEditorArea creates the query tabs plus the strip that hosts new/close
+// and script open/save. Everything downstream addresses the active editor
+// through c.tabs.entry, so switching tabs is just re-pointing that alias.
+func (c *Client) buildEditorArea() fyne.CanvasObject {
+	c.tabs.sug = container.NewVBox()
+	c.tabs.sug.Hide()
+	c.tabs.seq = 0
+	c.tabs.bar = container.NewAppTabs()
+	c.tabs.bar.OnSelected = func(item *container.TabItem) { c.syncActiveTab(item) }
 	c.addQueryTab()
 	c.restoreQueryTabs()
 
-	c.dbSel = widget.NewSelect(nil, func(db string) {
+	openScriptBtn := widget.NewButtonWithIcon("打开脚本", theme.FolderOpenIcon(), func() {
+		c.showOpenScriptDialog()
+	})
+	openScriptBtn.Importance = widget.LowImportance
+	saveScriptBtn := widget.NewButtonWithIcon("保存脚本", theme.DocumentSaveIcon(), func() {
+		c.showSaveScriptDialog()
+	})
+	saveScriptBtn.Importance = widget.LowImportance
+
+	// fyne 2.5 tabs cannot host close buttons, so new/close live on this strip,
+	// and script open/save sit with them because both act on the active tab.
+	tabActions := container.NewHBox(
+		widget.NewButtonWithIcon("新查询", theme.ContentAddIcon(), func() { c.addQueryTab() }),
+		widget.NewButtonWithIcon("关闭", theme.CancelIcon(), func() { c.closeActiveTab() }),
+		widget.NewSeparator(),
+		openScriptBtn, saveScriptBtn,
+	)
+	tabsArea := container.NewBorder(tabActions, nil, nil, nil, c.tabs.bar)
+
+	// The candidate bar sits between the editor and the split handle; hidden
+	// while there is nothing to suggest.
+	return container.NewBorder(nil, c.tabs.sug, nil, nil, tabsArea)
+}
+
+// buildQueryToolbar builds the strip above the tabs. Its order follows the
+// reference layout: database first, the prominent run button, then the shortcut
+// dialog; paging and export on the right.
+func (c *Client) buildQueryToolbar() *fyne.Container {
+	c.dbs.sel = widget.NewSelect(nil, func(db string) {
 		c.currentDB = db
 		c.expandDatabaseInTree(db)
 	})
@@ -48,7 +101,7 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	cancelRunBtn.Disable()
 	c.cancelRunBtn = cancelRunBtn
 	clearBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
-		c.queryEntry.SetText("")
+		c.tabs.entry.SetText("")
 	})
 	// The shortcut hint used to be a 300px label here, which alone pushed the
 	// toolbar past the width of the main pane and clipped 导出/主题. It is now a
@@ -57,23 +110,14 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	keysBtn.Importance = widget.LowImportance
 
 	limitSel := widget.NewSelect([]string{"100", "500", "1000", "5000", "无限制"}, func(s string) {
-		c.limitText = s
+		c.page.limitText = s
 	})
 	limitSel.SetSelected("1000")
-	c.limitSel = limitSel
+	c.page.limitSel = limitSel
 
 	exportBtn := widget.NewButtonWithIcon("导出", theme.DownloadIcon(), func() {
 		c.exportGrid()
 	})
-
-	openScriptBtn := widget.NewButtonWithIcon("打开脚本", theme.FolderOpenIcon(), func() {
-		c.showOpenScriptDialog()
-	})
-	openScriptBtn.Importance = widget.LowImportance
-	saveScriptBtn := widget.NewButtonWithIcon("保存脚本", theme.DocumentSaveIcon(), func() {
-		c.showSaveScriptDialog()
-	})
-	saveScriptBtn.Importance = widget.LowImportance
 
 	themeSel := widget.NewSelect([]string{"跟随系统", "浅色", "深色"}, func(s string) {
 		switch s {
@@ -94,33 +138,25 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 		themeSel.SetSelected("深色")
 	}
 
-	// Toolbar order follows the reference layout: database first, the
-	// prominent run button, then the shortcut dialog; paging and export on the
-	// right.
-	c.pageCheck = c.buildPagingCheck()
-	toolbar := container.NewHBox(
-		c.dbSel,
+	c.page.check = c.buildPagingCheck()
+	return container.NewHBox(
+		c.dbs.sel,
 		runBtn, cancelRunBtn, clearBtn, keysBtn,
 		widget.NewSeparator(),
 		widget.NewLabel("行数上限"),
-		limitSel, c.pageCheck,
+		limitSel, c.page.check,
 		widget.NewSeparator(),
 		exportBtn,
 		widget.NewSeparator(),
 		themeSel,
 	)
+}
 
-	// fyne 2.5 tabs cannot host close buttons, so new/close live on this strip,
-	// and script open/save sit with them because both act on the active tab.
-	tabActions := container.NewHBox(
-		widget.NewButtonWithIcon("新查询", theme.ContentAddIcon(), func() { c.addQueryTab() }),
-		widget.NewButtonWithIcon("关闭", theme.CancelIcon(), func() { c.closeActiveTab() }),
-		widget.NewSeparator(),
-		openScriptBtn, saveScriptBtn,
-	)
-	tabsArea := container.NewBorder(tabActions, nil, nil, nil, c.qTabs)
-
-	c.resultGrid = widget.NewTable(
+// buildResultGrid builds the shared result table: header cells are buttons so a
+// column header can be tapped to sort, and each cell's style comes from
+// gridCellState (edits, deletes, NULLs, search hits).
+func (c *Client) buildResultGrid() {
+	c.grid.table = widget.NewTable(
 		func() (int, int) { return c.gridDims() },
 		func() fyne.CanvasObject { return widget.NewLabel("") },
 		func(id widget.TableCellID, obj fyne.CanvasObject) {
@@ -154,11 +190,10 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 			label.SetText(text)
 		},
 	)
-	c.resultGrid.ShowHeaderRow = true
-	c.resultGrid.ShowHeaderColumn = true // left row-number column
-	// Header cells are buttons so a column header can be tapped to sort.
-	c.resultGrid.CreateHeader = func() fyne.CanvasObject { return widget.NewButton("", nil) }
-	c.resultGrid.UpdateHeader = func(id widget.TableCellID, obj fyne.CanvasObject) {
+	c.grid.table.ShowHeaderRow = true
+	c.grid.table.ShowHeaderColumn = true // left row-number column
+	c.grid.table.CreateHeader = func() fyne.CanvasObject { return widget.NewButton("", nil) }
+	c.grid.table.UpdateHeader = func(id widget.TableCellID, obj fyne.CanvasObject) {
 		btn, ok := obj.(*widget.Button)
 		if !ok {
 			return
@@ -169,10 +204,10 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 		case id.Col == -1: // row-number column header cells
 			btn.SetText(fmt.Sprintf("%d", id.Row+1))
 			btn.OnTapped = nil
-		case id.Row == -1 && id.Col >= 0 && id.Col < len(c.gridHeader): // column headers
-			text := c.gridHeader[id.Col]
-			if id.Col == c.sortCol {
-				if c.sortAsc {
+		case id.Row == -1 && id.Col >= 0 && id.Col < len(c.grid.header): // column headers
+			text := c.grid.header[id.Col]
+			if id.Col == c.grid.sortCol {
+				if c.grid.sortAsc {
 					text += " ▲"
 				} else {
 					text += " ▼"
@@ -186,27 +221,31 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 			btn.OnTapped = nil
 		}
 	}
-	c.resultGrid.OnSelected = func(id widget.TableCellID) {
-		c.selectedCell = id
-		c.hasCell = true
-		if c.cellView != nil {
-			c.cellView.SetText(c.gridCell(id))
+	c.grid.table.OnSelected = func(id widget.TableCellID) {
+		c.grid.cell = id
+		c.grid.hasCell = true
+		if c.grid.view != nil {
+			c.grid.view.SetText(c.gridCell(id))
 		}
 		c.updateEditButtons()
 	}
+}
 
-	c.cellView = newKeyedEntry()
-	c.cellView.SetPlaceHolder("选中一个单元格查看完整值")
-	c.cellView.TextStyle = fyne.TextStyle{Monospace: true}
-	c.cellView.onShortcut = c.entryShortcut
-	c.gridSearchEntry = newSearchEntry()
-	c.gridSearchEntry.SetPlaceHolder("在结果中搜索")
-	c.gridSearchEntry.OnChanged = c.onGridSearchChanged
-	c.gridSearchEntry.onShortcut = c.entryShortcut
-	c.gridSearchEntry.onNext = func() { c.stepSearch(1) }
-	c.gridSearchEntry.onPrev = func() { c.stepSearch(-1) }
-	c.searchHitsLabel = widget.NewLabel("")
-	c.searchHitsLabel.Importance = widget.LowImportance
+// buildCellBar builds the row under the grid: the full value of the selected
+// cell on the left, the in-result search and the copy actions on the right.
+func (c *Client) buildCellBar() fyne.CanvasObject {
+	c.grid.view = newKeyedEntry()
+	c.grid.view.SetPlaceHolder("选中一个单元格查看完整值")
+	c.grid.view.TextStyle = fyne.TextStyle{Monospace: true}
+	c.grid.view.onShortcut = c.entryShortcut
+	c.find.entry = newSearchEntry()
+	c.find.entry.SetPlaceHolder("在结果中搜索")
+	c.find.entry.OnChanged = c.onGridSearchChanged
+	c.find.entry.onShortcut = c.entryShortcut
+	c.find.entry.onNext = func() { c.stepSearch(1) }
+	c.find.entry.onPrev = func() { c.stepSearch(-1) }
+	c.find.label = widget.NewLabel("")
+	c.find.label.Importance = widget.LowImportance
 	copyBtn := widget.NewButtonWithIcon("复制", theme.ContentCopyIcon(), func() {
 		c.copyCell()
 	})
@@ -214,76 +253,57 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 		c.copySelectedRow()
 	})
 	rowCopyBtn.Importance = widget.LowImportance
-	cellBar := container.NewBorder(
+	return container.NewBorder(
 		nil,
 		nil,
 		widget.NewLabel("单元格"),
-		container.NewHBox(c.gridSearchEntry, c.searchHitsLabel, copyBtn, rowCopyBtn),
-		c.cellView,
+		container.NewHBox(c.find.entry, c.find.label, copyBtn, rowCopyBtn),
+		c.grid.view,
 	)
+}
 
+// buildStatusBar builds TablePro's signature bottom bar: status on the left,
+// the row and change actions on the right. The buttons stay disabled unless the
+// result is a writable SELECT * of one table (see setEditContext).
+func (c *Client) buildStatusBar() fyne.CanvasObject {
 	c.status = widget.NewLabel("就绪")
-
-	// TablePro's signature bottom bar: status on the left, the row and change
-	// actions on the right. The buttons stay disabled unless the result is a
-	// writable SELECT * of one table (see setEditContext).
-	c.filterBtn = widget.NewButtonWithIcon("过滤", theme.SearchIcon(), func() {
+	c.act.filter = widget.NewButtonWithIcon("过滤", theme.SearchIcon(), func() {
 		c.showFilterDialog()
 	})
-	c.editCellBtn = widget.NewButtonWithIcon("编辑", theme.DocumentCreateIcon(), func() {
+	c.act.editCell = widget.NewButtonWithIcon("编辑", theme.DocumentCreateIcon(), func() {
 		c.editSelectedCell()
 	})
-	c.insertRowBtn = widget.NewButtonWithIcon("插行", theme.ContentAddIcon(), func() {
+	c.act.insertRow = widget.NewButtonWithIcon("插行", theme.ContentAddIcon(), func() {
 		c.insertRow()
 	})
-	c.deleteRowBtn = widget.NewButtonWithIcon("删行", theme.ContentRemoveIcon(), func() {
+	c.act.deleteRow = widget.NewButtonWithIcon("删行", theme.ContentRemoveIcon(), func() {
 		c.deleteSelectedRow()
 	})
-	c.saveChangesBtn = widget.NewButtonWithIcon("保存", theme.ConfirmIcon(), func() {
+	c.act.saveChanges = widget.NewButtonWithIcon("保存", theme.ConfirmIcon(), func() {
 		c.saveChanges()
 	})
-	c.saveChangesBtn.Importance = widget.HighImportance
-	c.discardBtn = widget.NewButtonWithIcon("放弃", theme.CancelIcon(), func() {
+	c.act.saveChanges.Importance = widget.HighImportance
+	c.act.discard = widget.NewButtonWithIcon("放弃", theme.CancelIcon(), func() {
 		c.discardChanges()
 	})
-	for _, b := range []*widget.Button{c.filterBtn, c.editCellBtn, c.insertRowBtn,
-		c.deleteRowBtn, c.saveChangesBtn, c.discardBtn} {
+	for _, b := range []*widget.Button{c.act.filter, c.act.editCell, c.act.insertRow,
+		c.act.deleteRow, c.act.saveChanges, c.act.discard} {
 		b.Importance = widget.LowImportance
 	}
 	editActions := container.NewHBox(
-		c.filterBtn, c.editCellBtn,
-		c.insertRowBtn, c.deleteRowBtn,
-		c.saveChangesBtn, c.discardBtn,
+		c.act.filter, c.act.editCell,
+		c.act.insertRow, c.act.deleteRow,
+		c.act.saveChanges, c.act.discard,
 	)
-
-	statusBar := container.NewBorder(nil, nil, c.status, editActions)
-	bottom := container.NewVBox(cellBar, statusBar)
-
-	// The candidate bar sits between the editor and the split handle; hidden
-	// while there is nothing to suggest.
-	editorArea := container.NewBorder(nil, c.sugBar, nil, nil, tabsArea)
-	// The page bar rides above the grid and is hidden unless the result on
-	// screen is a paged one, so a normal query costs no vertical space.
-	gridArea := container.NewBorder(c.buildPageBar(), nil, nil, nil, c.resultGrid)
-	split := container.NewVSplit(
-		editorArea,
-		gridArea,
-	)
-	split.Offset = 0.35
-	if r := c.uiSet.EditorRatio; r > 0.1 && r < 0.9 {
-		split.Offset = float64(r)
-	}
-	c.vSplit = split
-
-	return container.NewBorder(toolbar, bottom, nil, nil, split)
+	return container.NewBorder(nil, nil, c.status, editActions)
 }
 
 // limitValue parses the chosen row limit; "无限制" means no cap (0).
 func (c *Client) limitValue() int {
-	if c.limitText == "无限制" {
+	if c.page.limitText == "无限制" {
 		return 0
 	}
-	if n, err := strconv.Atoi(c.limitText); err == nil && n > 0 {
+	if n, err := strconv.Atoi(c.page.limitText); err == nil && n > 0 {
 		return n
 	}
 	return 1000
@@ -291,33 +311,33 @@ func (c *Client) limitValue() int {
 
 // dbSelRefresh repopulates the database selector for the live connection.
 func (c *Client) dbSelRefresh() {
-	if c.dbSel == nil {
+	if c.dbs.sel == nil {
 		return
 	}
 	if c.currentID == "" || !c.store.ConnectionStatus(c.currentID) {
-		c.dbSel.Disable()
-		c.dbSel.SetOptions(nil)
+		c.dbs.sel.Disable()
+		c.dbs.sel.SetOptions(nil)
 		return
 	}
 	dbs, err := c.store.Databases(c.currentID)
 	if err != nil {
-		c.dbSel.Enable()
+		c.dbs.sel.Enable()
 		c.setStatus("数据库列表加载失败：" + err.Error())
 		return
 	}
 	if len(dbs) == 0 {
-		c.dbSel.Enable()
+		c.dbs.sel.Enable()
 		return
 	}
 	c.mu.Lock()
-	c.dbList = dbs
+	c.dbs.list = dbs
 	c.mu.Unlock()
-	c.dbSel.Enable()
-	c.dbSel.SetOptions(dbs)
+	c.dbs.sel.Enable()
+	c.dbs.sel.SetOptions(dbs)
 	if c.currentDB == "" {
 		c.currentDB = dbs[0]
 	}
-	c.dbSel.SetSelected(c.resolveDB())
+	c.dbs.sel.SetSelected(c.resolveDB())
 }
 
 // resolveDB returns the effective database to run against.
@@ -340,7 +360,7 @@ func (c *Client) resolveDB() string {
 func (c *Client) querySession() (connID, database string, pageSize int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.currentID, c.resolveDB(), c.pageSize
+	return c.currentID, c.resolveDB(), c.page.size
 }
 
 // runCurrent evaluates the editor text: a single statement runs directly, a
@@ -360,7 +380,7 @@ func (c *Client) runCurrent() {
 		dialog.ShowInformation("未连接", "该连接尚未建立，请先连接。", c.win)
 		return
 	}
-	q := c.queryEntry.Text
+	q := c.tabs.entry.Text
 	if strings.TrimSpace(q) == "" {
 		return
 	}
@@ -378,7 +398,7 @@ func (c *Client) runCurrent() {
 	limit := c.limitValue()
 	// Paging covers one statement only; a script's last result is whatever the
 	// script ended with, which is not something a page bar can re-run honestly.
-	paged := c.paging && len(stmts) == 1 && db.Pageable(conn.Config.Type, stmts[0])
+	paged := c.page.on && len(stmts) == 1 && db.Pageable(conn.Config.Type, stmts[0])
 	var pageNote string
 
 	c.runTracked("执行中 ...（点「取消」可中断）",
@@ -410,7 +430,7 @@ func (c *Client) runCurrent() {
 			c.renderResult(res)
 			c.afterRunPaging(lastStmt, res, pageNote)
 			c.refreshHistory()
-			c.clearTabDirty(c.queryEntry)
+			c.clearTabDirty(c.tabs.entry)
 			if canceled && res.Error != "" {
 				c.setStatus("查询已取消")
 			}

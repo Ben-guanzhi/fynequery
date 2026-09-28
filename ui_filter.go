@@ -58,9 +58,9 @@ func (c *Client) showFilterDialog() {
 	rows := container.NewVBox()
 	addCond := func() {
 		r := &filterCondRow{}
-		r.column = widget.NewSelect(c.gridCols, nil)
-		if len(c.gridCols) > 0 {
-			r.column.SetSelected(c.gridCols[0])
+		r.column = widget.NewSelect(c.grid.cols, nil)
+		if len(c.grid.cols) > 0 {
+			r.column.SetSelected(c.grid.cols[0])
 		}
 		labels := make([]string, len(filterOpLabel))
 		for i, l := range filterOpLabel {
@@ -97,17 +97,17 @@ func (c *Client) showFilterDialog() {
 				Value:  r.value.Text,
 			})
 		}
-		where, err := c.store.TableWhere(c.currentID, c.sourceRef.Database, c.sourceRef.Schema, c.sourceRef.Table, filters)
+		where, err := c.store.TableWhere(c.currentID, c.grid.src.Database, c.grid.src.Schema, c.grid.src.Table, filters)
 		if err != nil {
 			dialog.ShowError(err, c.win)
 			return
 		}
-		c.queryEntry.setTextSilently("SELECT * FROM " + base + where)
+		c.tabs.entry.setTextSilently("SELECT * FROM " + base + where)
 		d.Hide()
 		c.runCurrent()
 	}
 	clear := func() {
-		c.queryEntry.setTextSilently("SELECT * FROM " + base)
+		c.tabs.entry.setTextSilently("SELECT * FROM " + base)
 		d.Hide()
 		c.runCurrent()
 	}
@@ -134,7 +134,7 @@ func (c *Client) showFilterDialog() {
 		buttons, nil, nil,
 		container.NewVScroll(rows),
 	)
-	d = dialog.NewCustom("过滤 "+c.sourceRef.Table, "关闭", content, c.win)
+	d = dialog.NewCustom("过滤 "+c.grid.src.Table, "关闭", content, c.win)
 	d.Resize(fyne.NewSize(560, 340))
 	d.Show()
 }

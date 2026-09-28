@@ -21,38 +21,38 @@ func TestRebuildHistoryView(t *testing.T) {
 		{ID: 3, SQL: "INSERT INTO users (name) VALUES ('x')"},
 	})
 
-	c.histFilter = ""
+	c.hist.filter = ""
 	c.rebuildHistoryView()
-	if len(c.historyView) != 3 || c.historyView[0].ID != 3 {
-		t.Fatalf("unfiltered view = %+v, want 3 entries newest first", c.historyView)
+	if len(c.hist.view) != 3 || c.hist.view[0].ID != 3 {
+		t.Fatalf("unfiltered view = %+v, want 3 entries newest first", c.hist.view)
 	}
 
-	c.histFilter = "users"
+	c.hist.filter = "users"
 	c.rebuildHistoryView()
-	if len(c.historyView) != 2 || c.historyView[0].ID != 3 || c.historyView[1].ID != 1 {
-		t.Fatalf("filtered view = %+v, want ids [3 1]", c.historyView)
+	if len(c.hist.view) != 2 || c.hist.view[0].ID != 3 || c.hist.view[1].ID != 1 {
+		t.Fatalf("filtered view = %+v, want ids [3 1]", c.hist.view)
 	}
 
 	// The Table field is searched too.
-	c.histFilter = "orders"
+	c.hist.filter = "orders"
 	c.rebuildHistoryView()
-	if len(c.historyView) != 1 || c.historyView[0].ID != 2 {
-		t.Fatalf("table-filtered view = %+v, want id 2", c.historyView)
+	if len(c.hist.view) != 1 || c.hist.view[0].ID != 2 {
+		t.Fatalf("table-filtered view = %+v, want id 2", c.hist.view)
 	}
 
 	// The database field is searched as well.
-	c.histFilter = "zs"
+	c.hist.filter = "zs"
 	entries := c.store.History()
 	entries[1].Database = "zs"
 	c.store.ReplaceHistory(entries)
 	c.rebuildHistoryView()
-	if len(c.historyView) != 1 || c.historyView[0].ID != 2 {
-		t.Fatalf("db-filtered view = %+v, want id 2", c.historyView)
+	if len(c.hist.view) != 1 || c.hist.view[0].ID != 2 {
+		t.Fatalf("db-filtered view = %+v, want id 2", c.hist.view)
 	}
 
-	c.histFilter = "no such thing"
+	c.hist.filter = "no such thing"
 	c.rebuildHistoryView()
-	if len(c.historyView) != 0 {
-		t.Fatalf("no-match view = %+v, want empty", c.historyView)
+	if len(c.hist.view) != 0 {
+		t.Fatalf("no-match view = %+v, want empty", c.hist.view)
 	}
 }

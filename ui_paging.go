@@ -35,27 +35,27 @@ const defaultPageSize = 100
 // left, the window size and the turn buttons on the right. It starts hidden
 // because paging is opt-in and only a pageable result shows it.
 func (c *Client) buildPageBar() *fyne.Container {
-	if !validPageSize(c.pageSize) {
-		c.pageSize = defaultPageSize
+	if !validPageSize(c.page.size) {
+		c.page.size = defaultPageSize
 	}
-	c.pageLabel = widget.NewLabel("")
-	c.pageLabel.Importance = widget.LowImportance
+	c.page.label = widget.NewLabel("")
+	c.page.label.Importance = widget.LowImportance
 
-	c.pageSizeSel = widget.NewSelect(pageSizes, c.onPageSizeChange)
-	c.pageSizeSel.SetSelected(strconv.Itoa(c.pageSize))
+	c.page.sizeSel = widget.NewSelect(pageSizes, c.onPageSizeChange)
+	c.page.sizeSel.SetSelected(strconv.Itoa(c.page.size))
 
-	c.prevPageBtn = widget.NewButtonWithIcon("上一页", theme.NavigateBackIcon(), func() { c.stepPage(-1) })
-	c.prevPageBtn.Importance = widget.LowImportance
-	c.nextPageBtn = widget.NewButtonWithIcon("下一页", theme.NavigateNextIcon(), func() { c.stepPage(1) })
-	c.nextPageBtn.Importance = widget.LowImportance
+	c.page.prevBtn = widget.NewButtonWithIcon("上一页", theme.NavigateBackIcon(), func() { c.stepPage(-1) })
+	c.page.prevBtn.Importance = widget.LowImportance
+	c.page.nextBtn = widget.NewButtonWithIcon("下一页", theme.NavigateNextIcon(), func() { c.stepPage(1) })
+	c.page.nextBtn.Importance = widget.LowImportance
 
 	note := widget.NewLabel("搜索与排序仅作用于当前页")
 	note.Importance = widget.LowImportance
 
-	c.pageBar = container.NewBorder(nil, nil, c.pageLabel,
-		container.NewHBox(note, widget.NewSeparator(), c.pageSizeSel, c.prevPageBtn, c.nextPageBtn), nil)
-	c.pageBar.Hide()
-	return c.pageBar
+	c.page.bar = container.NewBorder(nil, nil, c.page.label,
+		container.NewHBox(note, widget.NewSeparator(), c.page.sizeSel, c.page.prevBtn, c.page.nextBtn), nil)
+	c.page.bar.Hide()
+	return c.page.bar
 }
 
 // buildPagingCheck is the toolbar switch that hands the row cap over to the
@@ -63,15 +63,15 @@ func (c *Client) buildPageBar() *fyne.Container {
 // SELECT - the window is the cap - so the selector is greyed out.
 func (c *Client) buildPagingCheck() *widget.Check {
 	check := widget.NewCheck("分页浏览", func(on bool) {
-		c.paging = on
+		c.page.on = on
 		if on {
-			c.limitSel.Disable()
+			c.page.limitSel.Disable()
 			return
 		}
-		c.limitSel.Enable()
-		c.pageStmt = ""
-		c.pageNote = ""
-		c.pageNo = 1
+		c.page.limitSel.Enable()
+		c.page.stmt = ""
+		c.page.note = ""
+		c.page.no = 1
 		c.refreshPageBar()
 	})
 	return check
@@ -91,7 +91,7 @@ func validPageSize(n int) bool {
 // pageEligible decides whether the result just shown can be browsed as row
 // windows, and explains why not when 分页浏览 is on but the statement refuses.
 func (c *Client) pageEligible(stmt string, res db.QueryResult) (bool, string) {
-	if !c.paging || res.Error != "" {
+	if !c.page.on || res.Error != "" {
 		return false, ""
 	}
 	cfg, ok := c.store.LiveConfig(c.currentID)
@@ -154,12 +154,12 @@ func (c *Client) stablePageQuery(conn *db.Conn, database, stmt string) (string, 
 // result now on screen, then refreshes the bar. Called after every full run:
 // executing is always page 1, and note is what stablePageQuery reported.
 func (c *Client) afterRunPaging(stmt string, res db.QueryResult, note string) {
-	c.pageNo = 1
-	c.pageStmt = ""
-	c.pageNote = ""
+	c.page.no = 1
+	c.page.stmt = ""
+	c.page.note = ""
 	if ok, why := c.pageEligible(stmt, res); ok {
-		c.pageStmt = stmt
-		c.pageNote = note
+		c.page.stmt = stmt
+		c.page.note = note
 	} else if why != "" {
 		c.setStatus(why + "，本次结果未分页")
 	}
@@ -169,26 +169,26 @@ func (c *Client) afterRunPaging(stmt string, res db.QueryResult, note string) {
 // refreshPageBar redraws the bar from the current page state. Nothing to page
 // means nothing to show.
 func (c *Client) refreshPageBar() {
-	if c.pageBar == nil {
+	if c.page.bar == nil {
 		return
 	}
-	if c.pageStmt == "" {
-		c.pageBar.Hide()
+	if c.page.stmt == "" {
+		c.page.bar.Hide()
 		return
 	}
-	rows := len(c.gridRows)
-	c.pageLabel.SetText(fmt.Sprintf("第 %d 页 · 本页 %d 行%s", c.pageNo, rows, c.pageNote))
-	if c.pageNo <= 1 {
-		c.prevPageBtn.Disable()
+	rows := len(c.grid.rows)
+	c.page.label.SetText(fmt.Sprintf("第 %d 页 · 本页 %d 行%s", c.page.no, rows, c.page.note))
+	if c.page.no <= 1 {
+		c.page.prevBtn.Disable()
 	} else {
-		c.prevPageBtn.Enable()
+		c.page.prevBtn.Enable()
 	}
-	if rows < c.pageSize {
-		c.nextPageBtn.Disable()
+	if rows < c.page.size {
+		c.page.nextBtn.Disable()
 	} else {
-		c.nextPageBtn.Enable()
+		c.page.nextBtn.Enable()
 	}
-	c.pageBar.Show()
+	c.page.bar.Show()
 }
 
 // onPageSizeChange records the new window size and, when a paged result is
@@ -198,13 +198,13 @@ func (c *Client) onPageSizeChange(s string) {
 	if err != nil || n < 1 {
 		return
 	}
-	c.pageSize = n
+	c.page.size = n
 	c.uiSet.PageSize = n
-	if c.pageStmt == "" {
+	if c.page.stmt == "" {
 		c.setStatus(fmt.Sprintf("已设为每页 %d 行", n))
 		return
 	}
-	if c.edits.any() {
+	if c.grid.edits.any() {
 		c.setStatus(fmt.Sprintf("已设为每页 %d 行；有未保存的更改，先保存或放弃再翻页", n))
 		return
 	}
@@ -213,14 +213,14 @@ func (c *Client) onPageSizeChange(s string) {
 
 // stepPage turns to the neighbouring window of the same statement.
 func (c *Client) stepPage(delta int) {
-	if c.pageStmt == "" {
+	if c.page.stmt == "" {
 		return
 	}
-	if c.edits.any() {
+	if c.grid.edits.any() {
 		c.setStatus("有未保存的更改，先保存或放弃再翻页")
 		return
 	}
-	target := c.pageNo + delta
+	target := c.page.no + delta
 	if target < 1 {
 		return
 	}
@@ -237,7 +237,7 @@ func (c *Client) runPage(pageNo int) {
 		c.setStatus("错误：" + err.Error())
 		return
 	}
-	stmt := c.pageStmt
+	stmt := c.page.stmt
 	c.runTracked("翻页中 ...（点「取消」可中断）",
 		func(ctx context.Context) (db.QueryResult, string) {
 			return c.store.ExecutePage(ctx, conn, dbName, stmt, pageNo, pageSize), stmt
@@ -257,7 +257,7 @@ func (c *Client) runPage(pageNo int) {
 			}
 			c.setEditContext(stmt, res)
 			c.renderResult(res)
-			c.pageNo = pageNo
+			c.page.no = pageNo
 			c.refreshPageBar()
 		})
 }

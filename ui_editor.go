@@ -28,7 +28,7 @@ func (c *Client) newQueryEntry() *suggestEntry {
 	e.onLines = func() { c.syncTabMetrics(e) }
 	e.onShortcut = c.entryShortcut
 	e.OnChanged = func(string) {
-		if c.queryEntry == e {
+		if c.tabs.entry == e {
 			c.onQueryTextChanged()
 		}
 		c.markTabDirty(e)
@@ -41,7 +41,7 @@ func (c *Client) newQueryEntry() *suggestEntry {
 // metrics; both sit in the tab's own vertical scroller so long scripts
 // scroll instead of stretching the window.
 func (c *Client) addQueryTab() {
-	c.tabSeq++
+	c.tabs.seq++
 	e := c.newQueryEntry()
 	gutter := widget.NewMultiLineEntry()
 	gutter.TextStyle = fyne.TextStyle{Monospace: true}
@@ -49,10 +49,10 @@ func (c *Client) addQueryTab() {
 	gutter.Disable()
 	row := container.NewBorder(nil, nil, gutter, nil, e)
 	scroller := container.NewVScroll(row)
-	item := container.NewTabItem(fmt.Sprintf("查询 %d", c.tabSeq), scroller)
-	c.qItems = append(c.qItems, &queryTab{item: item, entry: e, gutter: gutter, scroller: scroller, baseTitle: item.Text})
-	c.qTabs.Append(item)
-	c.qTabs.Select(item)
+	item := container.NewTabItem(fmt.Sprintf("查询 %d", c.tabs.seq), scroller)
+	c.tabs.items = append(c.tabs.items, &queryTab{item: item, entry: e, gutter: gutter, scroller: scroller, baseTitle: item.Text})
+	c.tabs.bar.Append(item)
+	c.tabs.bar.Select(item)
 	// fyne 2.8 auto-selects a first tab without firing OnSelected; make the
 	// active-editor alias explicit either way.
 	c.syncActiveTab(item)
@@ -81,13 +81,13 @@ func (c *Client) newTableTab(nd *nodeData) {
 		c.dbSelRefresh()
 	}
 	c.addQueryTab()
-	tab := c.tabByItem(c.qTabs.CurrentTab())
+	tab := c.tabByItem(c.tabs.bar.CurrentTab())
 	if tab == nil {
 		return
 	}
 	tab.baseTitle = "新建表"
 	tab.item.Text = tab.baseTitle
-	c.queryEntry.SetText(stmt)
+	c.tabs.entry.SetText(stmt)
 	c.setStatus("新建表草案已打开，改完名字和字段再执行")
 }
 
@@ -98,10 +98,10 @@ func (c *Client) newTableTab(nd *nodeData) {
 // are replayed from the draft instead.
 func (c *Client) restoreQueryTabs() {
 	for i, d := range c.uiSet.Tabs {
-		if i >= len(c.qItems) {
+		if i >= len(c.tabs.items) {
 			c.addQueryTab()
 		}
-		t := c.qItems[i]
+		t := c.tabs.items[i]
 		t.entry.setTextSilently(d.Content)
 		t.dirty = d.Dirty
 		if d.Dirty {
@@ -109,17 +109,17 @@ func (c *Client) restoreQueryTabs() {
 		}
 	}
 	if len(c.uiSet.Tabs) > 0 {
-		c.qTabs.Refresh()
+		c.tabs.bar.Refresh()
 	}
 }
 
 // markTabDirty flags a tab whose text changed since it last ran.
 func (c *Client) markTabDirty(e *suggestEntry) {
-	for _, t := range c.qItems {
+	for _, t := range c.tabs.items {
 		if t.entry == e && !t.dirty {
 			t.dirty = true
 			t.item.Text = t.baseTitle + " ●"
-			c.qTabs.Refresh()
+			c.tabs.bar.Refresh()
 			return
 		}
 	}
@@ -127,11 +127,11 @@ func (c *Client) markTabDirty(e *suggestEntry) {
 
 // clearTabDirty clears the modified marker once the tab's text was executed.
 func (c *Client) clearTabDirty(e *suggestEntry) {
-	for _, t := range c.qItems {
+	for _, t := range c.tabs.items {
 		if t.entry == e && t.dirty {
 			t.dirty = false
 			t.item.Text = t.baseTitle
-			c.qTabs.Refresh()
+			c.tabs.bar.Refresh()
 			return
 		}
 	}
@@ -139,7 +139,7 @@ func (c *Client) clearTabDirty(e *suggestEntry) {
 
 // tabByItem finds the bookkeeping record of a tab-strip item.
 func (c *Client) tabByItem(item *container.TabItem) *queryTab {
-	for _, t := range c.qItems {
+	for _, t := range c.tabs.items {
 		if t.item == item {
 			return t
 		}
@@ -151,10 +151,10 @@ func (c *Client) tabByItem(item *container.TabItem) *queryTab {
 // adjusts its selection silently on Remove, so the active-editor alias is
 // re-synced here explicitly. A tab with unexecuted edits asks first.
 func (c *Client) closeActiveTab() {
-	if len(c.qItems) <= 1 {
+	if len(c.tabs.items) <= 1 {
 		return
 	}
-	item := c.qTabs.CurrentTab()
+	item := c.tabs.bar.CurrentTab()
 	tab := c.tabByItem(item)
 	if tab != nil && tab.dirty {
 		dialog.ShowConfirm("关闭标签",
@@ -171,46 +171,46 @@ func (c *Client) closeActiveTab() {
 
 // removeTab drops one tab and re-syncs the active editor.
 func (c *Client) removeTab(item *container.TabItem) {
-	for i, t := range c.qItems {
+	for i, t := range c.tabs.items {
 		if t.item == item {
-			c.qItems = append(c.qItems[:i], c.qItems[i+1:]...)
+			c.tabs.items = append(c.tabs.items[:i], c.tabs.items[i+1:]...)
 			break
 		}
 	}
-	c.qTabs.Remove(item)
-	if len(c.qItems) > 0 {
-		if cur := c.qTabs.CurrentTab(); cur != nil {
+	c.tabs.bar.Remove(item)
+	if len(c.tabs.items) > 0 {
+		if cur := c.tabs.bar.CurrentTab(); cur != nil {
 			c.syncActiveTab(cur)
 		} else {
-			c.qTabs.SelectIndex(0)
+			c.tabs.bar.SelectIndex(0)
 		}
 	}
 	c.focusEditor()
 }
 
-// syncActiveTab re-points c.queryEntry at the selected tab's editor; the
+// syncActiveTab re-points c.tabs.entry at the selected tab's editor; the
 // previous editor's pending candidates are dropped with the shared bar.
 func (c *Client) syncActiveTab(item *container.TabItem) {
-	for _, t := range c.qItems {
+	for _, t := range c.tabs.items {
 		if t.item == item {
-			if old := c.queryEntry; old != nil && old != t.entry {
+			if old := c.tabs.entry; old != nil && old != t.entry {
 				old.suggest = nil
 				old.sugSel = 0
 			}
-			c.queryEntry = t.entry
+			c.tabs.entry = t.entry
 			break
 		}
 	}
-	if c.sugBar != nil {
-		c.sugBar.Hide()
-		c.sugBar.Refresh()
+	if c.tabs.sug != nil {
+		c.tabs.sug.Hide()
+		c.tabs.sug.Refresh()
 	}
 }
 
 // onQueryTextChanged recomputes the completion candidates after each edit
 // and keeps the tab's gutter in step.
 func (c *Client) onQueryTextChanged() {
-	s := c.queryEntry
+	s := c.tabs.entry
 	c.syncTabMetrics(s)
 	w := s.currentWord()
 	if w.text == "" {
@@ -225,7 +225,7 @@ func (c *Client) onQueryTextChanged() {
 // so the editor and the gutter fill the tab's scroller and scroll together.
 func (c *Client) syncTabMetrics(e *suggestEntry) {
 	var tab *queryTab
-	for _, t := range c.qItems {
+	for _, t := range c.tabs.items {
 		if t.entry == e {
 			tab = t
 			break
@@ -266,22 +266,22 @@ func (c *Client) syncTabMetrics(e *suggestEntry) {
 // background load, kicked off here on a miss, so typing can never freeze the
 // window waiting for a catalog query.
 func (c *Client) suggestionPool() []string {
-	pool := make([]string, 0, len(sqlKeywords)+len(c.dbList)+len(c.gridCols)+16)
+	pool := make([]string, 0, len(sqlKeywords)+len(c.dbs.list)+len(c.grid.cols)+16)
 	pool = append(pool, sqlKeywords...)
-	pool = append(pool, c.dbList...)
+	pool = append(pool, c.dbs.list...)
 	// The last result's columns are prime candidates for follow-up queries
 	// (WHERE <col> ..., ORDER BY <col> ...).
-	pool = append(pool, c.gridCols...)
+	pool = append(pool, c.grid.cols...)
 
 	if c.currentID != "" {
 		if _, err := c.store.OpenConn(c.currentID); err == nil {
 			dbName := c.resolveDB()
 			key := c.currentID + "\x00" + dbName
 			c.mu.Lock()
-			tables, ok := c.sugTables[key]
-			loading := c.sugLoading[key]
+			tables, ok := c.cache.tables[key]
+			loading := c.cache.loading[key]
 			if !ok && !loading {
-				c.sugLoading[key] = true
+				c.cache.loading[key] = true
 			}
 			c.mu.Unlock()
 			if !ok && !loading {
@@ -307,19 +307,19 @@ func (c *Client) loadSuggestTables(connID, db, key string) {
 	}
 	c.mu.Lock()
 	if err == nil {
-		c.sugTables[key] = tables
+		c.cache.tables[key] = tables
 	}
-	delete(c.sugLoading, key)
+	delete(c.cache.loading, key)
 	c.mu.Unlock()
 }
 
 // renderSuggestions redraws the candidate bar under the SQL editor.
 func (c *Client) renderSuggestions() {
-	if c.sugBar == nil {
+	if c.tabs.sug == nil {
 		return
 	}
-	s := c.queryEntry
-	c.sugBar.Objects = c.sugBar.Objects[:0]
+	s := c.tabs.entry
+	c.tabs.sug.Objects = c.tabs.sug.Objects[:0]
 	for i, cand := range s.suggest {
 		i, cand := i, cand
 		b := widget.NewButton(cand, func() {
@@ -329,12 +329,12 @@ func (c *Client) renderSuggestions() {
 		if i == s.sugSel {
 			b.Importance = widget.HighImportance
 		}
-		c.sugBar.Objects = append(c.sugBar.Objects, b)
+		c.tabs.sug.Objects = append(c.tabs.sug.Objects, b)
 	}
 	if len(s.suggest) == 0 {
-		c.sugBar.Hide()
+		c.tabs.sug.Hide()
 	} else {
-		c.sugBar.Show()
+		c.tabs.sug.Show()
 	}
-	c.sugBar.Refresh()
+	c.tabs.sug.Refresh()
 }

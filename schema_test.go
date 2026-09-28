@@ -15,63 +15,63 @@ import (
 // table row fills the SQL editor.
 func TestSchemaRowsModel(t *testing.T) {
 	test.NewApp()
-	c := &Client{store: db.NewStore(), treeNodes: make(map[string]*nodeData)}
+	c := &Client{store: db.NewStore(), tree: treeState{nodes: make(map[string]*nodeData)}}
 	c.buildSchemaView()
 
 	c.refreshSchema() // nothing connected
-	if got := len(c.schemaRows.Objects); got != 1 {
+	if got := len(c.tree.rows.Objects); got != 1 {
 		t.Fatalf("disconnected rows = %d, want 1 (root only)", got)
 	}
-	if btn := schemaRowButton(t, c.schemaRows.Objects[0]); btn.Text != "未连接" {
+	if btn := schemaRowButton(t, c.tree.rows.Objects[0]); btn.Text != "未连接" {
 		t.Fatalf("root label = %q, want 未连接", btn.Text)
 	}
 
 	// Simulate a loaded tree: two dbs under the root; the root row itself is
 	// hidden once there is content, matching the reference navigator.
-	root := c.treeNodes[treeRootUID]
+	root := c.tree.nodes[treeRootUID]
 	root.label = "数据库 (2)"
 	root.children = []string{"db:a", "db:b"}
-	c.treeNodes["db:a"] = &nodeData{kind: "db", label: "a", db: "a", uid: "db:a"}
-	c.treeNodes["db:b"] = &nodeData{kind: "db", label: "b", db: "b", uid: "db:b"}
+	c.tree.nodes["db:a"] = &nodeData{kind: "db", label: "a", db: "a", uid: "db:a"}
+	c.tree.nodes["db:b"] = &nodeData{kind: "db", label: "b", db: "b", uid: "db:b"}
 	c.rebuildSchemaRows()
-	if got := len(c.schemaRows.Objects); got != 2 {
+	if got := len(c.tree.rows.Objects); got != 2 {
 		t.Fatalf("rows with 2 dbs = %d, want 2 (root hidden)", got)
 	}
 
-	c.treeNodes["db:a"].loaded = true
-	c.treeNodes["db:a"].children = []string{"db:a|t:ta"}
-	c.treeNodes["db:a|t:ta"] = &nodeData{kind: "table", label: "ta", name: "ta", db: "a", uid: "db:a|t:ta"}
-	c.expanded["db:a"] = true
+	c.tree.nodes["db:a"].loaded = true
+	c.tree.nodes["db:a"].children = []string{"db:a|t:ta"}
+	c.tree.nodes["db:a|t:ta"] = &nodeData{kind: "table", label: "ta", name: "ta", db: "a", uid: "db:a|t:ta"}
+	c.tree.expanded["db:a"] = true
 	c.rebuildSchemaRows()
-	if got := len(c.schemaRows.Objects); got != 3 {
+	if got := len(c.tree.rows.Objects); got != 3 {
 		t.Fatalf("rows with expanded db = %d, want 3", got)
 	}
 	// Rows: db:a, its expanded table, then db:b.
-	if btn := schemaRowButton(t, c.schemaRows.Objects[1]); btn.Text != "ta" {
+	if btn := schemaRowButton(t, c.tree.rows.Objects[1]); btn.Text != "ta" {
 		t.Fatalf("table row = %q, want ta", btn.Text)
 	}
 
 	// The filter narrows the loaded objects, keeping the matching subtree.
 	c.setTreeFilter("ta")
-	if got := len(c.schemaRows.Objects); got != 2 { // db:a (ancestor context) + ta
+	if got := len(c.tree.rows.Objects); got != 2 { // db:a (ancestor context) + ta
 		t.Fatalf("filtered rows = %d, want 2", got)
 	}
-	if btn := schemaRowButton(t, c.schemaRows.Objects[1]); btn.Text != "ta" {
+	if btn := schemaRowButton(t, c.tree.rows.Objects[1]); btn.Text != "ta" {
 		t.Fatalf("filtered table row = %q, want ta", btn.Text)
 	}
 	c.setTreeFilter("")
-	if got := len(c.schemaRows.Objects); got != 3 {
+	if got := len(c.tree.rows.Objects); got != 3 {
 		t.Fatalf("rows after clearing filter = %d, want 3", got)
 	}
 
 	// Tapping the table row fills the editor (offline: plain identifier).
-	c.queryEntry = newSuggestEntry()
+	c.tabs.entry = newSuggestEntry()
 	c.onSchemaTableTapped("db:a|t:ta")
-	if got := c.queryEntry.Text; got != "SELECT * FROM ta" {
+	if got := c.tabs.entry.Text; got != "SELECT * FROM ta" {
 		t.Fatalf("editor text = %q, want SELECT * FROM ta", got)
 	}
-	if c.selectedNode != "db:a|t:ta" {
-		t.Fatalf("selectedNode = %q, want db:a|t:ta", c.selectedNode)
+	if c.tree.selected != "db:a|t:ta" {
+		t.Fatalf("selectedNode = %q, want db:a|t:ta", c.tree.selected)
 	}
 }
 
@@ -80,19 +80,19 @@ func TestSchemaRowsModel(t *testing.T) {
 // status row is not.
 func TestBranchRowsCarryMenu(t *testing.T) {
 	test.NewApp()
-	c := &Client{store: db.NewStore(), treeNodes: make(map[string]*nodeData), expanded: make(map[string]bool)}
+	c := &Client{store: db.NewStore(), tree: treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool)}}
 	c.buildSchemaView()
-	c.treeNodes[treeRootUID] = &nodeData{kind: "root", label: "数据库", uid: treeRootUID}
-	c.treeNodes["db:a"] = &nodeData{kind: "db", label: "a", db: "a", uid: "db:a"}
-	c.treeNodes["db:a|s:pub"] = &nodeData{kind: "schema", label: "pub", db: "a", schema: "pub", uid: "db:a|s:pub"}
-	c.treeNodes["root|error"] = &nodeData{kind: "error", label: "加载失败", uid: "root|error"}
+	c.tree.nodes[treeRootUID] = &nodeData{kind: "root", label: "数据库", uid: treeRootUID}
+	c.tree.nodes["db:a"] = &nodeData{kind: "db", label: "a", db: "a", uid: "db:a"}
+	c.tree.nodes["db:a|s:pub"] = &nodeData{kind: "schema", label: "pub", db: "a", schema: "pub", uid: "db:a|s:pub"}
+	c.tree.nodes["root|error"] = &nodeData{kind: "error", label: "加载失败", uid: "root|error"}
 
 	for _, uid := range []string{"db:a", "db:a|s:pub"} {
-		if _, ok := c.schemaRowWidget(c.treeNodes[uid], 0).(*tapMenuRow); !ok {
+		if _, ok := c.schemaRowWidget(c.tree.nodes[uid], 0).(*tapMenuRow); !ok {
 			t.Errorf("%s row must carry the right-click menu", uid)
 		}
 	}
-	if _, ok := c.schemaRowWidget(c.treeNodes["root|error"], 0).(*tapMenuRow); ok {
+	if _, ok := c.schemaRowWidget(c.tree.nodes["root|error"], 0).(*tapMenuRow); ok {
 		t.Error("an error row has no node actions")
 	}
 }
@@ -102,35 +102,35 @@ func TestBranchRowsCarryMenu(t *testing.T) {
 // skips the re-layout, while any visual input change produces a new widget.
 func TestSchemaRowCacheReuse(t *testing.T) {
 	test.NewApp()
-	c := &Client{store: db.NewStore(), treeNodes: make(map[string]*nodeData), expanded: make(map[string]bool)}
+	c := &Client{store: db.NewStore(), tree: treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool)}}
 	c.buildSchemaView()
-	c.treeNodes[treeRootUID] = &nodeData{kind: "root", label: "数据库", uid: treeRootUID}
-	root := c.treeNodes[treeRootUID]
+	c.tree.nodes[treeRootUID] = &nodeData{kind: "root", label: "数据库", uid: treeRootUID}
+	root := c.tree.nodes[treeRootUID]
 	root.label = "数据库 (1)"
 	root.children = []string{"db:a"}
-	c.treeNodes["db:a"] = &nodeData{kind: "db", label: "a", db: "a", uid: "db:a"}
-	c.treeNodes["db:a"].loaded = true
-	c.treeNodes["db:a"].children = []string{"db:a|t:ta"}
-	c.treeNodes["db:a|t:ta"] = &nodeData{kind: "table", label: "ta", name: "ta", db: "a", uid: "db:a|t:ta"}
-	c.expanded["db:a"] = true
+	c.tree.nodes["db:a"] = &nodeData{kind: "db", label: "a", db: "a", uid: "db:a"}
+	c.tree.nodes["db:a"].loaded = true
+	c.tree.nodes["db:a"].children = []string{"db:a|t:ta"}
+	c.tree.nodes["db:a|t:ta"] = &nodeData{kind: "table", label: "ta", name: "ta", db: "a", uid: "db:a|t:ta"}
+	c.tree.expanded["db:a"] = true
 	c.rebuildSchemaRows()
 
-	first := append([]fyne.CanvasObject(nil), c.schemaRows.Objects...)
+	first := append([]fyne.CanvasObject(nil), c.tree.rows.Objects...)
 	c.rebuildSchemaRows()
-	if !sameRowList(first, c.schemaRows.Objects) {
+	if !sameRowList(first, c.tree.rows.Objects) {
 		t.Fatal("unchanged rebuild must reuse the exact row widgets")
 	}
 
-	c.selectedNode = "db:a|t:ta"
+	c.tree.selected = "db:a|t:ta"
 	c.rebuildSchemaRows()
-	if len(c.schemaRows.Objects) != 2 || c.schemaRows.Objects[1] == first[1] {
+	if len(c.tree.rows.Objects) != 2 || c.tree.rows.Objects[1] == first[1] {
 		t.Fatal("selecting a row must render a new widget for it")
 	}
 
-	c.selectedNode = ""
-	c.treeNodes["db:a|t:ta"].label = "ta [table]"
+	c.tree.selected = ""
+	c.tree.nodes["db:a|t:ta"].label = "ta [table]"
 	c.rebuildSchemaRows()
-	if len(c.schemaRows.Objects) != 2 || c.schemaRows.Objects[1] == first[1] {
+	if len(c.tree.rows.Objects) != 2 || c.tree.rows.Objects[1] == first[1] {
 		t.Fatal("relabeled node must render a new widget")
 	}
 }
