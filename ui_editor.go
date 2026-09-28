@@ -57,6 +57,28 @@ func (c *Client) addQueryTab() {
 	c.syncTabMetrics(e)
 }
 
+// restoreQueryTabs refills the freshly built tab strip from the persisted
+// drafts: the first draft lands in the tab addQueryTab already created, the
+// rest append new tabs. setTextSilently keeps the restore from looking like
+// typing (no completion pass, no dirty mark); the dirty flag and its ● title
+// are replayed from the draft instead.
+func (c *Client) restoreQueryTabs() {
+	for i, d := range c.uiSet.Tabs {
+		if i >= len(c.qItems) {
+			c.addQueryTab()
+		}
+		t := c.qItems[i]
+		t.entry.setTextSilently(d.Content)
+		t.dirty = d.Dirty
+		if d.Dirty {
+			t.item.Text = t.baseTitle + " ●"
+		}
+	}
+	if len(c.uiSet.Tabs) > 0 {
+		c.qTabs.Refresh()
+	}
+}
+
 // markTabDirty flags a tab whose text changed since it last ran.
 func (c *Client) markTabDirty(e *suggestEntry) {
 	for _, t := range c.qItems {

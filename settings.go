@@ -15,12 +15,20 @@ import (
 // like connections.json, and is written only on close (single UI-thread
 // writer), so no locking is needed here.
 type uiSettings struct {
-	Theme        string  `json:"theme"` // "" = follow system, "light", "dark"
-	WindowWidth  float32 `json:"windowWidth"`
-	WindowHeight float32 `json:"windowHeight"`
-	SidebarRatio float32 `json:"sidebarRatio"`
-	EditorRatio  float32 `json:"editorRatio"`
-	ActiveTab    int     `json:"activeTab"`
+	Theme        string          `json:"theme"` // "" = follow system, "light", "dark"
+	WindowWidth  float32         `json:"windowWidth"`
+	WindowHeight float32         `json:"windowHeight"`
+	SidebarRatio float32         `json:"sidebarRatio"`
+	EditorRatio  float32         `json:"editorRatio"`
+	ActiveTab    int             `json:"activeTab"`
+	Tabs         []queryTabDraft `json:"tabs,omitempty"`
+}
+
+// queryTabDraft is one editor tab's unsaved work: the SQL text plus whether
+// it was edited since its last run, so the ● marker survives a restart.
+type queryTabDraft struct {
+	Content string `json:"content"`
+	Dirty   bool   `json:"dirty,omitempty"`
 }
 
 func uiSettingsPath() string {

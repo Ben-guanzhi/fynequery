@@ -292,7 +292,8 @@ func (c *Client) editSelectedCell() {
 
 // afterEditQueued refreshes the grid, counters and buttons after a change.
 func (c *Client) afterEditQueued() {
-	c.resultGrid.Refresh()
+	// Displayed values just changed, so an active search re-collects its hits.
+	c.rescanGridSearch()
 	c.setStatus(c.editStatusText())
 	c.updateEditButtons()
 }

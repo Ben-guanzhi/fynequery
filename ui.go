@@ -73,6 +73,15 @@ type Client struct {
 	selectedCell widget.TableCellID
 	hasCell      bool
 
+	// result-set search: term, ordered hits with the spotlight index, and the
+	// cell-bar widgets
+	gridSearchEntry *searchEntry
+	searchHitsLabel *widget.Label
+	searchTerm      string
+	searchHits      []searchHitKey
+	searchHitSet    map[searchHitKey]bool
+	searchCur       int
+
 	// schema navigator state: node cache keyed by uid, which branches are
 	// open, and the highlighted table node
 	expanded     map[string]bool
@@ -165,6 +174,9 @@ func newClient(a fyne.App, w fyne.Window) *Client {
 		edits:      newGridEditState(),
 		sortCol:    -1,
 	}
+	// The layout + editor drafts are read once here; the only writer is
+	// saveWindowSettings on close, so no locking is needed.
+	c.uiSet = loadUISettings(uiSettingsPath())
 	c.asyncRun = true
 	c.dispatch = fyne.Do
 	return c
@@ -229,8 +241,9 @@ func (c *Client) buildUI() fyne.CanvasObject {
 	return split
 }
 
-// saveWindowSettings captures the window geometry, split positions and the
-// active query tab into the persisted ui settings.
+// saveWindowSettings captures the window geometry, split positions, the
+// active query tab and every tab's editor draft into the persisted ui
+// settings.
 func (c *Client) saveWindowSettings(w fyne.Window) {
 	s := c.uiSet
 	// The canvas size is what layouts see; on desktop Window.Resize requests
@@ -245,6 +258,10 @@ func (c *Client) saveWindowSettings(w fyne.Window) {
 	}
 	if c.qTabs != nil {
 		s.ActiveTab = c.qTabs.CurrentTabIndex()
+	}
+	s.Tabs = s.Tabs[:0]
+	for _, t := range c.qItems {
+		s.Tabs = append(s.Tabs, queryTabDraft{Content: t.entry.Text, Dirty: t.dirty})
 	}
 	c.uiSet = s
 	saveUISettings(uiSettingsPath(), s)

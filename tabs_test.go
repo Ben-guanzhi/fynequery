@@ -193,3 +193,41 @@ func TestCtrlEnterShortcut(t *testing.T) {
 		t.Fatal("Ctrl+Z must not be mistaken for the run shortcut")
 	}
 }
+
+// TestDraftSaveRestoreRoundTrip drives the whole loop: type into two tabs,
+// close-save writes the drafts into ui.json, and a fresh client restoring
+// from that file rebuilds the same tabs, texts and dirty markers.
+func TestDraftSaveRestoreRoundTrip(t *testing.T) {
+	a := test.NewApp()
+	w := a.NewWindow("t")
+	c := newTestClient(a, w)
+	w.SetContent(c.buildQueryView())
+
+	c.addQueryTab()
+	c.qItems[0].entry.setTextSilently("SELECT 1")
+	c.qItems[1].entry.setTextSilently("SELECT dirty")
+	c.markTabDirty(c.qItems[1].entry)
+	c.saveWindowSettings(w)
+
+	loaded := loadUISettings(uiSettingsPath())
+	if len(loaded.Tabs) != 2 || loaded.Tabs[0].Content != "SELECT 1" ||
+		!loaded.Tabs[1].Dirty || loaded.Tabs[1].Content != "SELECT dirty" {
+		t.Fatalf("drafts on disk = %+v", loaded.Tabs)
+	}
+
+	c2 := newTestClient(a, a.NewWindow("t2"))
+	c2.uiSet = loaded
+	c2.buildQueryView()
+	if len(c2.qItems) != 2 {
+		t.Fatalf("restored tabs = %d, want 2", len(c2.qItems))
+	}
+	if c2.qItems[0].entry.Text != "SELECT 1" || c2.qItems[0].dirty {
+		t.Fatalf("restored tab 0 = %q dirty=%v", c2.qItems[0].entry.Text, c2.qItems[0].dirty)
+	}
+	if c2.qItems[1].entry.Text != "SELECT dirty" || !c2.qItems[1].dirty {
+		t.Fatalf("restored tab 1 = %q dirty=%v", c2.qItems[1].entry.Text, c2.qItems[1].dirty)
+	}
+	if !strings.Contains(c2.qItems[1].item.Text, "●") {
+		t.Fatalf("restored dirty title = %q, want a ● marker", c2.qItems[1].item.Text)
+	}
+}

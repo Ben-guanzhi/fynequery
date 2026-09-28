@@ -162,7 +162,8 @@ func (c *Client) sortGrid(col int) {
 		return a > b
 	})
 	if c.resultGrid != nil {
-		c.resultGrid.Refresh()
+		// Row order just changed, so any active search must re-collect hits.
+		c.rescanGridSearch()
 	}
 }
 
@@ -288,6 +289,7 @@ func (c *Client) renderResult(res db.QueryResult) {
 	c.gridColTypes = res.ColTypes
 	c.hasCell = false
 	c.sortCol = -1
+	c.clearGridSearch()
 	if c.cellView != nil {
 		c.cellView.SetText("")
 	}

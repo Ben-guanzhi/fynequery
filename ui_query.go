@@ -29,6 +29,7 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	c.qTabs = container.NewAppTabs()
 	c.qTabs.OnSelected = func(item *container.TabItem) { c.syncActiveTab(item) }
 	c.addQueryTab()
+	c.restoreQueryTabs()
 
 	c.dbSel = widget.NewSelect(nil, func(db string) {
 		c.currentDB = db
@@ -130,6 +131,10 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 				label.TextStyle = fyne.TextStyle{Italic: true}
 				label.Importance = widget.LowImportance
 			}
+			if state == cellNormal && c.isSearchHit(id.Row, id.Col) {
+				label.TextStyle = fyne.TextStyle{Bold: true}
+				label.Importance = widget.HighImportance
+			}
 			// SetText refreshes the cell internally; no extra Refresh needed.
 			label.SetText(text)
 		},
@@ -178,6 +183,13 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	c.cellView = widget.NewEntry()
 	c.cellView.SetPlaceHolder("选中一个单元格查看完整值")
 	c.cellView.TextStyle = fyne.TextStyle{Monospace: true}
+	c.gridSearchEntry = newSearchEntry()
+	c.gridSearchEntry.SetPlaceHolder("在结果中搜索")
+	c.gridSearchEntry.OnChanged = c.onGridSearchChanged
+	c.gridSearchEntry.onNext = func() { c.stepSearch(1) }
+	c.gridSearchEntry.onPrev = func() { c.stepSearch(-1) }
+	c.searchHitsLabel = widget.NewLabel("")
+	c.searchHitsLabel.Importance = widget.LowImportance
 	copyBtn := widget.NewButtonWithIcon("复制", theme.ContentCopyIcon(), func() {
 		c.copyCell()
 	})
@@ -185,8 +197,13 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 		c.copySelectedRow()
 	})
 	rowCopyBtn.Importance = widget.LowImportance
-	cellBar := container.NewBorder(nil, nil, widget.NewLabel("单元格"),
-		container.NewHBox(copyBtn, rowCopyBtn), c.cellView)
+	cellBar := container.NewBorder(
+		nil,
+		nil,
+		widget.NewLabel("单元格"),
+		container.NewHBox(c.gridSearchEntry, c.searchHitsLabel, copyBtn, rowCopyBtn),
+		c.cellView,
+	)
 
 	c.status = widget.NewLabel("就绪")
 
