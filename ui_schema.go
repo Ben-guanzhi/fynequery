@@ -80,86 +80,136 @@ func (c *Client) setTreeFilter(filter string) {
 	c.rebuildSchemaRows()
 }
 
+// rowCacheKey identifies a rendered navigator row by everything its widget
+// reads; two rebuilds that hit the same key share one widget instance.
+type rowCacheKey struct {
+	uid      string
+	depth    int
+	label    string
+	expanded bool
+	selected bool
+}
+
 // rebuildSchemaRows re-renders the navigator. Unfiltered, it walks the open
 // branches from the root - whose own row only appears while there is nothing
 // to list (未连接 / 加载失败). With a filter, matching subtrees keep their
-// hierarchy and everything else is pruned.
+// hierarchy and everything else is pruned. The filtered pass marks every
+// node in ONE subtree walk (each label is lowered exactly once), and the
+// finished row list is compared against what is on screen: an identical
+// list skips the re-layout, which dominates the cost of a keystroke.
 func (c *Client) rebuildSchemaRows() {
 	if c.schemaRows == nil {
 		return
 	}
-	c.schemaRows.Objects = nil
+	var rows []fyne.CanvasObject
 	switch {
 	case c.treeFilter != "":
+		marks := make(map[string]bool, len(c.treeNodes))
 		for _, uid := range c.treeNodes[treeRootUID].children {
-			if c.filterHasMatch(uid) {
-				c.appendFilteredRow(uid, 0)
+			c.markFilteredSubtree(uid, marks)
+		}
+		for _, uid := range c.treeNodes[treeRootUID].children {
+			if marks[uid] {
+				rows = c.appendFilteredRow(rows, uid, 0, marks)
 			}
 		}
 	case len(c.treeNodes[treeRootUID].children) == 0:
-		c.appendSchemaRow(treeRootUID, 0) // 未连接 / 加载失败 / 空目录
+		rows = c.appendSchemaRow(rows, treeRootUID, 0) // 未连接 / 加载失败 / 空目录
 	default:
 		for _, uid := range c.treeNodes[treeRootUID].children {
-			c.appendSchemaRow(uid, 0)
+			rows = c.appendSchemaRow(rows, uid, 0)
 		}
 	}
+	if sameRowList(c.schemaRows.Objects, rows) {
+		return
+	}
+	c.schemaRows.Objects = rows
 	c.schemaRows.Refresh()
 }
 
-// filterHasMatch reports whether the subtree rooted at uid contains a label
-// matching the current filter.
-func (c *Client) filterHasMatch(uid string) bool {
+// markFilteredSubtree records every node of the subtree that must stay
+// visible under the current filter (its own label matches, or a descendant
+// makes its subtree relevant) and reports the subtree's relevance.
+func (c *Client) markFilteredSubtree(uid string, marks map[string]bool) bool {
 	nd, ok := c.treeNodes[uid]
 	if !ok {
 		return false
 	}
-	if strings.Contains(strings.ToLower(nd.label), c.treeFilter) {
-		return true
-	}
+	match := strings.Contains(strings.ToLower(nd.label), c.treeFilter)
 	for _, child := range nd.children {
-		if c.filterHasMatch(child) {
-			return true
+		if c.markFilteredSubtree(child, marks) {
+			match = true
 		}
 	}
-	return false
+	if match {
+		marks[uid] = true
+	}
+	return match
 }
 
 // appendFilteredRow appends a matching subtree; ancestors of a match stay
-// visible for context, their unmatched siblings are pruned. Callers guard
-// with filterHasMatch, so the subtree is known to contain a match.
-func (c *Client) appendFilteredRow(uid string, depth int) {
+// visible for context, their unmatched siblings are pruned. Callers consult
+// marks, so the subtree is known to contain a match.
+func (c *Client) appendFilteredRow(rows []fyne.CanvasObject, uid string, depth int, marks map[string]bool) []fyne.CanvasObject {
 	nd, ok := c.treeNodes[uid]
 	if !ok {
-		return
+		return rows
 	}
-	c.schemaRows.Objects = append(c.schemaRows.Objects, c.schemaRowWidget(nd, depth))
+	rows = append(rows, c.schemaRowWidget(nd, depth))
 	for _, child := range nd.children {
-		if c.filterHasMatch(child) {
-			c.appendFilteredRow(child, depth+1)
+		if marks[child] {
+			rows = c.appendFilteredRow(rows, child, depth+1, marks)
 		}
 	}
+	return rows
 }
 
 // appendSchemaRow appends one row and recurses into open branches. The root
 // is always expanded.
-func (c *Client) appendSchemaRow(uid string, depth int) {
+func (c *Client) appendSchemaRow(rows []fyne.CanvasObject, uid string, depth int) []fyne.CanvasObject {
 	nd, ok := c.treeNodes[uid]
 	if !ok {
-		return
+		return rows
 	}
-	c.schemaRows.Objects = append(c.schemaRows.Objects, c.schemaRowWidget(nd, depth))
+	rows = append(rows, c.schemaRowWidget(nd, depth))
 	if nd.kind != "root" && !c.expanded[uid] {
-		return
+		return rows
 	}
 	for _, child := range nd.children {
-		c.appendSchemaRow(child, depth+1)
+		rows = c.appendSchemaRow(rows, child, depth+1)
 	}
+	return rows
+}
+
+// sameRowList reports whether the two lists are pointer-identical: every row
+// already on screen is exactly the row the rebuild produced, in order.
+func sameRowList(a, b []fyne.CanvasObject) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // schemaRowWidget builds one navigator row: a fixed indent, then a
 // full-width leading-aligned button so the whole row is clickable and its
 // label reports the true min width (which drives the horizontal scrollbar).
+// The result is memoized: building a row costs ~0.5µs and re-rendering it
+// costs fyne ~100µs, so rebuilding the same visible tree (every keystroke in
+// the filter box, every re-expansion) must not recreate widgets that have
+// not changed. The key carries every input the row reads: identity, depth,
+// label, whether its branch is open, and whether it is the highlighted node.
 func (c *Client) schemaRowWidget(nd *nodeData, depth int) fyne.CanvasObject {
+	expanded := c.expanded[nd.uid]
+	key := rowCacheKey{uid: nd.uid, depth: depth, label: nd.label, expanded: expanded, selected: nd.uid == c.selectedNode}
+	if row, ok := c.rowCache[key]; ok {
+		return row
+	}
+
 	var icon fyne.Resource
 	switch nd.kind {
 	case "empty":
@@ -169,7 +219,7 @@ func (c *Client) schemaRowWidget(nd *nodeData, depth int) fyne.CanvasObject {
 	case "db":
 		icon = theme.StorageIcon()
 	case "schema":
-		if c.expanded[nd.uid] {
+		if expanded {
 			icon = theme.FolderOpenIcon()
 		} else {
 			icon = theme.FolderIcon()
@@ -203,14 +253,19 @@ func (c *Client) schemaRowWidget(nd *nodeData, depth int) fyne.CanvasObject {
 	}
 
 	row := container.NewBorder(nil, nil, schemaIndentWidget(depth), nil, btn)
-	if nd.kind != "table" {
-		return row
+	var out fyne.CanvasObject = row
+	if nd.kind == "table" {
+		// Right-click a table/view row for its catalog actions.
+		uid := nd.uid
+		out = newTapMenuRow(row, func(pos fyne.Position) {
+			c.showTableNodeMenu(uid, pos)
+		})
 	}
-	// Right-click a table/view row for its catalog actions.
-	uid := nd.uid
-	return newTapMenuRow(row, func(pos fyne.Position) {
-		c.showTableNodeMenu(uid, pos)
-	})
+	if c.rowCache == nil {
+		c.rowCache = make(map[rowCacheKey]fyne.CanvasObject)
+	}
+	c.rowCache[key] = out
+	return out
 }
 
 // tapMenuRow is a navigator row that opens the object menu on right-click.

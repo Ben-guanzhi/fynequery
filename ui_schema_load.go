@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"strings"
 
+	"fyne.io/fyne/v2"
+
 	"tablepro-fyne/internal/db"
 )
 
@@ -82,6 +84,7 @@ func (c *Client) refreshSchema() {
 	c.mu.Unlock()
 	c.expanded = make(map[string]bool)
 	c.selectedNode = ""
+	c.rowCache = make(map[rowCacheKey]fyne.CanvasObject) // the old tree is gone; drop its rendered rows
 
 	id := c.selectedOrLive()
 	if id == "" || !c.store.ConnectionStatus(id) {

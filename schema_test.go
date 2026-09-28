@@ -75,6 +75,44 @@ func TestSchemaRowsModel(t *testing.T) {
 	}
 }
 
+// TestSchemaRowCacheReuse pins the navigator memoization: a rebuild whose
+// rows are unchanged reuses the rendered widgets and the identical list
+// skips the re-layout, while any visual input change produces a new widget.
+func TestSchemaRowCacheReuse(t *testing.T) {
+	test.NewApp()
+	c := &Client{store: db.NewStore(), treeNodes: make(map[string]*nodeData), expanded: make(map[string]bool)}
+	c.buildSchemaView()
+	c.treeNodes[treeRootUID] = &nodeData{kind: "root", label: "数据库", uid: treeRootUID}
+	root := c.treeNodes[treeRootUID]
+	root.label = "数据库 (1)"
+	root.children = []string{"db:a"}
+	c.treeNodes["db:a"] = &nodeData{kind: "db", label: "a", db: "a", uid: "db:a"}
+	c.treeNodes["db:a"].loaded = true
+	c.treeNodes["db:a"].children = []string{"db:a|t:ta"}
+	c.treeNodes["db:a|t:ta"] = &nodeData{kind: "table", label: "ta", name: "ta", db: "a", uid: "db:a|t:ta"}
+	c.expanded["db:a"] = true
+	c.rebuildSchemaRows()
+
+	first := append([]fyne.CanvasObject(nil), c.schemaRows.Objects...)
+	c.rebuildSchemaRows()
+	if !sameRowList(first, c.schemaRows.Objects) {
+		t.Fatal("unchanged rebuild must reuse the exact row widgets")
+	}
+
+	c.selectedNode = "db:a|t:ta"
+	c.rebuildSchemaRows()
+	if len(c.schemaRows.Objects) != 2 || c.schemaRows.Objects[1] == first[1] {
+		t.Fatal("selecting a row must render a new widget for it")
+	}
+
+	c.selectedNode = ""
+	c.treeNodes["db:a|t:ta"].label = "ta [table]"
+	c.rebuildSchemaRows()
+	if len(c.schemaRows.Objects) != 2 || c.schemaRows.Objects[1] == first[1] {
+		t.Fatal("relabeled node must render a new widget")
+	}
+}
+
 // schemaRowButtonOf returns the row's button without test failure semantics.
 func schemaRowButtonOf(row fyne.CanvasObject) *widget.Button {
 	var box *fyne.Container

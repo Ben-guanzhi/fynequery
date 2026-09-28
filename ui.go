@@ -78,6 +78,11 @@ type Client struct {
 	expanded     map[string]bool
 	selectedNode string
 
+	// rendered navigator rows memoized by uid + every input the row widget
+	// reads; a rebuild whose rows are unchanged reuses the widgets and can
+	// skip the re-layout entirely
+	rowCache map[rowCacheKey]fyne.CanvasObject
+
 	// per-connection+database table-name memo for SQL completion, warmed by a
 	// background load; sugLoading marks in-flight loads
 	sugTables  map[string][]string
@@ -153,6 +158,7 @@ func newClient(a fyne.App, w fyne.Window) *Client {
 		store:      db.NewStore(),
 		treeNodes:  make(map[string]*nodeData),
 		expanded:   make(map[string]bool),
+		rowCache:   make(map[rowCacheKey]fyne.CanvasObject),
 		sugTables:  make(map[string][]string),
 		sugLoading: make(map[string]bool),
 		fkCache:    make(map[string][]db.ForeignKeyInfo),

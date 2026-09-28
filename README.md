@@ -43,14 +43,15 @@ fynequery/
 ├── ui.go                   # Client 状态与主布局（侧栏+主区装配）
 ├── ui_connections.go       # 连接面板（下拉/连接/管理）
 ├── ui_connections_dialog.go# 连接新建/编辑对话框（SQLite 文件选择器）
-├── ui_editor.go            # SQL 编辑器模块：补全控件、候选条、查询标签
+├── ui_suggest.go           # SQL 补全控件：suggestEntry、词元定位、候选匹配
+├── ui_editor.go            # SQL 编辑器编排：查询标签、行号槽、候选条、补全池
 ├── ui_grid.go              # 结果网格模块：单元格状态、列宽、排序、复制、导出
 ├── ui_grid_edit.go         # 网格编辑队列与操作
 ├── ui_query.go             # 查询页装配与执行入口（runCurrent）
 ├── ui_filter.go            # 过滤条件对话框
 ├── ui_search.go            # 快速打开对话框
 ├── ui_structure.go         # 表结构查看器
-├── ui_schema.go            # 结构浏览行列表
+├── ui_schema.go            # 结构导航渲染：行构件按 uid+外观记忆化，集合未变跳过重排
 └── internal/db/            # 数据层（抽象屏障：编译器强制，不含任何 fyne 依赖）
     ├── db.go               # Store 内核：连接表/连接池/语句历史的唯一持有者
     ├── core.go             # 数据类型与常量（ConnConfig/QueryResult/…）
