@@ -50,10 +50,11 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	clearBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
 		c.queryEntry.SetText("")
 	})
-	// Shortcut hint; kept dim so it reads as documentation, not UI.
-	hint := widget.NewLabel("Ctrl+Enter 执行 · Ctrl+P 搜索表")
-	hint.TextStyle = fyne.TextStyle{Italic: true}
-	hint.Importance = widget.LowImportance
+	// The shortcut hint used to be a 300px label here, which alone pushed the
+	// toolbar past the width of the main pane and clipped 导出/主题. It is now a
+	// button over the dialog that bindKey documents (see ui_keys.go).
+	keysBtn := widget.NewButtonWithIcon("快捷键", theme.HelpIcon(), c.showKeysDialog)
+	keysBtn.Importance = widget.LowImportance
 
 	limitSel := widget.NewSelect([]string{"100", "500", "1000", "5000", "无限制"}, func(s string) {
 		c.limitText = s
@@ -63,6 +64,15 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	exportBtn := widget.NewButtonWithIcon("导出", theme.DownloadIcon(), func() {
 		c.exportGrid()
 	})
+
+	openScriptBtn := widget.NewButtonWithIcon("打开脚本", theme.FolderOpenIcon(), func() {
+		c.showOpenScriptDialog()
+	})
+	openScriptBtn.Importance = widget.LowImportance
+	saveScriptBtn := widget.NewButtonWithIcon("保存脚本", theme.DocumentSaveIcon(), func() {
+		c.showSaveScriptDialog()
+	})
+	saveScriptBtn.Importance = widget.LowImportance
 
 	themeSel := widget.NewSelect([]string{"跟随系统", "浅色", "深色"}, func(s string) {
 		switch s {
@@ -84,11 +94,11 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	}
 
 	// Toolbar order follows the reference layout: database first, the
-	// prominent run button, then the shortcut hint; paging and export on the
+	// prominent run button, then the shortcut dialog; paging and export on the
 	// right.
 	toolbar := container.NewHBox(
 		c.dbSel,
-		runBtn, cancelRunBtn, clearBtn, hint,
+		runBtn, cancelRunBtn, clearBtn, keysBtn,
 		widget.NewSeparator(),
 		widget.NewLabel("行数上限"),
 		limitSel,
@@ -98,10 +108,13 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 		themeSel,
 	)
 
-	// fyne 2.5 tabs cannot host close buttons, so new/close live on this strip.
+	// fyne 2.5 tabs cannot host close buttons, so new/close live on this strip,
+	// and script open/save sit with them because both act on the active tab.
 	tabActions := container.NewHBox(
 		widget.NewButtonWithIcon("新查询", theme.ContentAddIcon(), func() { c.addQueryTab() }),
 		widget.NewButtonWithIcon("关闭", theme.CancelIcon(), func() { c.closeActiveTab() }),
+		widget.NewSeparator(),
+		openScriptBtn, saveScriptBtn,
 	)
 	tabsArea := container.NewBorder(tabActions, nil, nil, nil, c.qTabs)
 
@@ -180,12 +193,14 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 		c.updateEditButtons()
 	}
 
-	c.cellView = widget.NewEntry()
+	c.cellView = newKeyedEntry()
 	c.cellView.SetPlaceHolder("选中一个单元格查看完整值")
 	c.cellView.TextStyle = fyne.TextStyle{Monospace: true}
+	c.cellView.onShortcut = c.entryShortcut
 	c.gridSearchEntry = newSearchEntry()
 	c.gridSearchEntry.SetPlaceHolder("在结果中搜索")
 	c.gridSearchEntry.OnChanged = c.onGridSearchChanged
+	c.gridSearchEntry.onShortcut = c.entryShortcut
 	c.gridSearchEntry.onNext = func() { c.stepSearch(1) }
 	c.gridSearchEntry.onPrev = func() { c.stepSearch(-1) }
 	c.searchHitsLabel = widget.NewLabel("")

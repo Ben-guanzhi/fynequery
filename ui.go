@@ -38,7 +38,12 @@ type Client struct {
 
 	// navigator filter: narrows the loaded objects by label
 	treeFilter  string
-	filterEntry *widget.Entry
+	filterEntry *keyedEntry
+
+	// app-level keyboard shortcuts, consulted by the canvas and by every entry
+	// that can hold focus (see ui_keys.go); keyDocs renders the 快捷键 dialog
+	keys    map[keyCombo]keyBinding
+	keyDocs []string
 
 	dbSel      *widget.Select
 	queryEntry *suggestEntry
@@ -69,7 +74,7 @@ type Client struct {
 	status       *widget.Label
 
 	// selected cell viewer (full value + copy)
-	cellView     *widget.Entry
+	cellView     *keyedEntry
 	selectedCell widget.TableCellID
 	hasCell      bool
 
@@ -113,7 +118,7 @@ type Client struct {
 	// renders (rebuilt on every change)
 	histFilter      string
 	historyView     []db.HistoryEntry
-	histFilterEntry *widget.Entry
+	histFilterEntry *keyedEntry
 
 	// persisted ui state (theme, window geometry, splits, active tab)
 	uiSet  uiSettings
@@ -179,6 +184,7 @@ func newClient(a fyne.App, w fyne.Window) *Client {
 	c.uiSet = loadUISettings(uiSettingsPath())
 	c.asyncRun = true
 	c.dispatch = fyne.Do
+	c.keys = make(map[keyCombo]keyBinding)
 	return c
 }
 
@@ -201,28 +207,23 @@ func (c *Client) buildUI() fyne.CanvasObject {
 		c.buildSchemaView(), // center: the navigator
 	)
 
-	// Ctrl+P / Cmd+P opens the quick-open box from anywhere.
-	ctrlP := &desktop.CustomShortcut{KeyName: fyne.KeyP, Modifier: fyne.KeyModifierControl}
-	cmdP := &desktop.CustomShortcut{KeyName: fyne.KeyP, Modifier: fyne.KeyModifierSuper}
-	c.win.Canvas().AddShortcut(ctrlP, func(fyne.Shortcut) { c.showSearchDialog() })
-	c.win.Canvas().AddShortcut(cmdP, func(fyne.Shortcut) { c.showSearchDialog() })
+	// Ctrl+P / Cmd+P opens the quick-open box, Ctrl+N a fresh tab, Ctrl+Enter
+	// runs, Ctrl+O / Ctrl+S read and write the active tab as a .sql script.
+	// Every one of them goes through the shortcut table so it also fires while
+	// a text entry holds focus (see ui_keys.go). The main Enter is
+	// fyne.KeyReturn and the numpad Enter is fyne.KeyEnter, so both bind.
+	c.bindKey(fyne.KeyP, "快速打开：按表名片段搜表/视图", func() { c.showSearchDialog() })
+	c.bindKey(fyne.KeyN, "新建查询标签", func() { c.addQueryTab() })
+	c.bindKey(fyne.KeyReturn, "执行编辑器中的 SQL", func() { c.runCurrent() })
+	c.bindKey(fyne.KeyEnter, "", func() { c.runCurrent() }) // same action, numpad Enter
+	c.bindKey(fyne.KeyO, "打开 .sql 脚本到当前标签", func() { c.showOpenScriptDialog() })
+	c.bindKey(fyne.KeyS, "把当前标签保存为 .sql 脚本", func() { c.showSaveScriptDialog() })
+	// Copy stays a canvas-level registration on purpose: an entry that claimed
+	// Ctrl+C from the table could no longer copy its own selection.
 	copySel := &desktop.CustomShortcut{KeyName: fyne.KeyC, Modifier: fyne.KeyModifierControl}
 	c.win.Canvas().AddShortcut(copySel, func(fyne.Shortcut) { c.copyCell() })
-	ctrlN := &desktop.CustomShortcut{KeyName: fyne.KeyN, Modifier: fyne.KeyModifierControl}
-	cmdN := &desktop.CustomShortcut{KeyName: fyne.KeyN, Modifier: fyne.KeyModifierSuper}
-	c.win.Canvas().AddShortcut(ctrlN, func(fyne.Shortcut) { c.addQueryTab() })
-	c.win.Canvas().AddShortcut(cmdN, func(fyne.Shortcut) { c.addQueryTab() })
-	// Ctrl+Enter / Cmd+Enter runs the editor text. The main Enter is
-	// fyne.KeyReturn and the numpad Enter is fyne.KeyEnter, so both are
-	// registered. When the editor has focus the shortcut reaches it directly
-	// (see (*suggestEntry).TypedShortcut); these canvas registrations cover
-	// every other focus target.
-	for _, key := range []fyne.KeyName{fyne.KeyReturn, fyne.KeyEnter} {
-		ctrlEnter := &desktop.CustomShortcut{KeyName: key, Modifier: fyne.KeyModifierControl}
-		cmdEnter := &desktop.CustomShortcut{KeyName: key, Modifier: fyne.KeyModifierSuper}
-		c.win.Canvas().AddShortcut(ctrlEnter, func(fyne.Shortcut) { c.runCurrent() })
-		c.win.Canvas().AddShortcut(cmdEnter, func(fyne.Shortcut) { c.runCurrent() })
-	}
+	c.docKey("Ctrl+C    复制选中单元格（焦点不在输入框时）")
+	c.docKey("Enter / Shift+Enter    在结果搜索框内跳下一个 / 上一个命中")
 
 	query := c.buildQueryView()
 	split := container.NewHSplit(sidebar, query)

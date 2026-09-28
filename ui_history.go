@@ -17,8 +17,9 @@ import (
 // buildHistoryPanel assembles the sidebar bottom: recent statements with a
 // compact header, capped to a fixed height like TablePro's history drawer.
 func (c *Client) buildHistoryPanel() fyne.CanvasObject {
-	c.histFilterEntry = widget.NewEntry()
+	c.histFilterEntry = newKeyedEntry()
 	c.histFilterEntry.PlaceHolder = "过滤"
+	c.histFilterEntry.onShortcut = c.entryShortcut
 	c.histFilterEntry.OnChanged = func(text string) {
 		c.histFilter = strings.ToLower(strings.TrimSpace(text))
 		c.rebuildHistoryView()

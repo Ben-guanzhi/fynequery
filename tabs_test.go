@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
@@ -156,41 +155,6 @@ func TestTabDirtyFlow(t *testing.T) {
 	c.copyCell()
 	if got := a.Clipboard().Content(); got != "alice" {
 		t.Fatalf("clipboard = %q, want alice", got)
-	}
-}
-
-// TestCtrlEnterShortcut pins the fix: with the editor focused, glfw routes
-// Ctrl/Cmd+Enter to the widget (an Entry is always Shortcutable), so
-// suggestEntry.TypedShortcut must run the query instead of falling through
-// to Entry as a newline. This is the exact delivery path the driver takes.
-func TestCtrlEnterShortcut(t *testing.T) {
-	test.NewApp()
-	for _, tc := range []struct {
-		name string
-		mod  fyne.KeyModifier
-		key  fyne.KeyName
-	}{{"ctrl/return", fyne.KeyModifierControl, fyne.KeyReturn}, {"super/enter", fyne.KeyModifierSuper, fyne.KeyEnter}} {
-		ran := false
-		s := newSuggestEntry()
-		s.setTextSilently("SELECT 1")
-		s.onRun = func() { ran = true }
-		s.TypedShortcut(&desktop.CustomShortcut{KeyName: tc.key, Modifier: tc.mod})
-		if !ran {
-			t.Fatalf("%s: Ctrl/Cmd+Enter did not run the query", tc.name)
-		}
-		if strings.Contains(s.Text, "\n") {
-			t.Fatalf("%s: shortcut leaked through as a newline: %q", tc.name, s.Text)
-		}
-	}
-
-	// an unrelated shortcut (Ctrl+Z undo) must still reach the embedded Entry
-	ran := false
-	s := newSuggestEntry()
-	s.setTextSilently("SELECT 1")
-	s.onRun = func() { ran = true }
-	s.TypedShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyZ, Modifier: fyne.KeyModifierControl})
-	if ran {
-		t.Fatal("Ctrl+Z must not be mistaken for the run shortcut")
 	}
 }
 

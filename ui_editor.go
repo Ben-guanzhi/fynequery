@@ -24,7 +24,7 @@ func (c *Client) newQueryEntry() *suggestEntry {
 	e.TextStyle = fyne.TextStyle{Monospace: true}
 	e.onSugChanged = c.renderSuggestions
 	e.onLines = func() { c.syncTabMetrics(e) }
-	e.onRun = func() { c.runCurrent() }
+	e.onShortcut = c.entryShortcut
 	e.OnChanged = func(string) {
 		if c.queryEntry == e {
 			c.onQueryTextChanged()

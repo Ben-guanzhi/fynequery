@@ -32,8 +32,9 @@ func (c *Client) buildSchemaView() fyne.CanvasObject {
 	header := container.NewBorder(nil, nil, nil, newBtn,
 		widget.NewLabelWithStyle("导航", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
 
-	c.filterEntry = widget.NewEntry()
+	c.filterEntry = newKeyedEntry()
 	c.filterEntry.PlaceHolder = "过滤已加载对象"
+	c.filterEntry.onShortcut = c.entryShortcut
 	c.filterEntry.OnChanged = func(string) { c.setTreeFilter(c.filterEntry.Text) }
 	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
 		c.refreshSchema()

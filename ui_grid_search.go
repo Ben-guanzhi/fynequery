@@ -22,9 +22,10 @@ type searchHitKey [2]int
 // KeyDown/KeyUp, which the driver calls on the focused widget first.
 type searchEntry struct {
 	widget.Entry
-	onNext func()
-	onPrev func()
-	shift  bool
+	onNext     func()
+	onPrev     func()
+	onShortcut func(fyne.Shortcut) bool
+	shift      bool
 }
 
 func newSearchEntry() *searchEntry {
@@ -71,6 +72,15 @@ func (e *searchEntry) TypedKey(key *fyne.KeyEvent) {
 		return
 	}
 	e.Entry.TypedKey(key)
+}
+
+// TypedShortcut claims the app-level combos (the search box is Shortcutable
+// like any Entry, so the canvas would never see them) before stepping hits.
+func (e *searchEntry) TypedShortcut(sc fyne.Shortcut) {
+	if e.onShortcut != nil && e.onShortcut(sc) {
+		return
+	}
+	e.Entry.TypedShortcut(sc)
 }
 
 // setTextSilently clears the box without firing the change callback, so a

@@ -5,12 +5,13 @@
 
 ## 功能
 
-- **多数据库支持**：MySQL、PostgreSQL、SQLite、SQL Server、Oracle
-- **连接管理**：新建 / 编辑 / 测试 / 删除连接，密码使用 Windows DPAPI 加密保存
+- **多数据库支持**：MySQL、PostgreSQL、SQLite、SQL Server、Oracle- **连接管理**：新建 / 编辑 / 测试 / 删除连接，密码使用 Windows DPAPI 加密保存
   （复用项目原有的 `connections.json` 与加密格式）
 - **查询编辑器**：多行 SQL 输入，支持 `Ctrl+Enter` / `Cmd+Enter` 执行，
   关键字 / 库名 / 表名自动补全，可限制返回行数；
-  支持多语句脚本（按引号/注释感知的方式切分，逐条执行、失败即停并报出序号）
+  支持多语句脚本（按引号/注释感知的方式切分，逐条执行、失败即停并报出序号）；
+  `Ctrl+O` / `Ctrl+S`（或标签操作条上的「打开脚本 / 保存脚本」）读写 `.sql` 文件，
+  保存时统一为 LF，载入超过 8MB 或含 NUL 的文件会被拒绝
 - **结果表格**：动态列宽，表头显示列名与类型（点击排序），错误信息展示在状态栏；
   单元格栏内置「在结果中搜索」——输入片段即时高亮全部命中并定位首个，
   `Enter` 下一个、`Shift+Enter` 上一个（循环），命中计数 `n/N`，换结果自动清空
@@ -33,6 +34,11 @@
   点击表自动生成 `SELECT * FROM …` 预览，右键可 浏览数据（直接出结果）/
   查看结构 / 删除 / 清空 / 重命名
 - **行数上限**：100 / 500 / 1000 / 5000 / 无限制
+- **快捷键**：`Ctrl/Cmd+Enter` 执行、`Ctrl/Cmd+N` 新标签、`Ctrl/Cmd+P` 快速打开、
+  `Ctrl/Cmd+O` / `Ctrl/Cmd+S` 读写脚本——光标在编辑器、过滤框或搜索框内同样生效
+  （Fyne 会把快捷键先交给聚焦控件，故每个输入框都查同一张 `ui_keys.go` 绑定表；
+  `Ctrl+C` 除外，输入框保留自身复制语义）。工具条上的「快捷键」按钮列出全部组合键，
+  说明文字与绑定同处登记，加一个绑定就多一行
 
 ## 项目结构
 
@@ -43,10 +49,12 @@ fynequery/
 ├── clientstore.go          # Client→Store 薄包装：连接生命周期、外键缓存、XLSX 落盘
 ├── settings.go             # 界面状态持久化（主题/窗口/分割位/标签草稿）
 ├── ui.go                   # Client 状态与主布局（侧栏+主区装配）
+├── ui_keys.go              # 快捷键表：bindKey 登记 + 各输入框共用 entryShortcut + 快捷键对话框
 ├── ui_connections.go       # 连接面板（下拉/连接/管理）
 ├── ui_connections_dialog.go# 连接新建/编辑对话框（SQLite 文件选择器）
 ├── ui_suggest.go           # SQL 补全控件：suggestEntry、词元定位、候选匹配
 ├── ui_editor.go            # SQL 编辑器编排：查询标签、行号槽、候选条、补全池
+├── ui_script.go            # .sql 脚本打开/保存（流式读写 + 文件对话框）
 ├── ui_grid.go              # 结果网格模块：单元格状态、列宽、排序、复制、导出
 ├── ui_grid_search.go       # 结果集内搜索：扫描命中、Enter/Shift+Enter 跳转、高亮
 ├── ui_grid_edit.go         # 网格编辑队列与操作

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -77,5 +78,101 @@ func TestEditorReceivesTypedText(t *testing.T) {
 	test.TypeOnCanvas(w.Canvas(), "SELECT")
 	if got := c.queryEntry.Text; got != "SELECT" {
 		t.Fatalf("typed text = %q, want SELECT", got)
+	}
+}
+
+// findContainerWith returns the container whose first child is want, walking
+// through widget renderers as well because the main layout nests the query page
+// inside a *container.Split, which is a widget, not a *fyne.Container.
+func findContainerWith(objs []fyne.CanvasObject, want fyne.CanvasObject) *fyne.Container {
+	for _, o := range objs {
+		switch n := o.(type) {
+		case *fyne.Container:
+			if len(n.Objects) > 0 && n.Objects[0] == want {
+				return n
+			}
+			if r := findContainerWith(n.Objects, want); r != nil {
+				return r
+			}
+		case fyne.Widget:
+			rend := test.WidgetRenderer(n)
+			if rend == nil {
+				continue
+			}
+			if r := findContainerWith(rend.Objects(), want); r != nil {
+				return r
+			}
+		}
+	}
+	return nil
+}
+
+// TestToolbarFitsMainPane pins the overflow fix. An HBox never wraps: it lays
+// every child at its own MinSize width and simply pushes the tail past the
+// right edge, where it is clipped and unreachable. With the default window the
+// query toolbar used to need 1023px against ~990px of pane, so 导出 and the
+// theme select were cut off.
+func TestToolbarFitsMainPane(t *testing.T) {
+	a := test.NewApp()
+	w := a.NewWindow("t")
+	c := newTestClient(a, w)
+	root := c.buildUI()
+	w.SetContent(root)
+	w.Resize(fyne.NewSize(1280, 800))
+
+	bar := findContainerWith([]fyne.CanvasObject{root}, c.dbSel)
+	if bar == nil {
+		t.Fatal("toolbar not found")
+	}
+	last := bar.Objects[len(bar.Objects)-1]
+	// A layout pass has to have run for positions to mean anything.
+	if last.Position().X == 0 {
+		t.Fatal("toolbar was never laid out")
+	}
+	if right := last.Position().X + last.MinSize().Width; right > bar.Size().Width {
+		t.Fatalf("toolbar tail clipped: last control ends at %.0f, bar is %.0f wide (needs %.0f)",
+			right, bar.Size().Width, bar.MinSize().Width)
+	}
+	if need := bar.MinSize().Width; need > bar.Size().Width {
+		t.Fatalf("toolbar needs %.0fpx, pane gives %.0fpx", need, bar.Size().Width)
+	}
+}
+
+// TestKeyDialogDocumentsEveryBinding keeps the 快捷键 dialog honest: it is the
+// only place the combos are spelled out now that the hint label is gone, so a
+// binding without a doc line (or a doc line that repeats on a second layout) is
+// a bug.
+func TestKeyDialogDocumentsEveryBinding(t *testing.T) {
+	a := test.NewApp()
+	w := a.NewWindow("t")
+	c := newTestClient(a, w)
+	w.SetContent(c.buildUI())
+
+	text := strings.Join(c.keyDocs, "\n")
+	documented := map[string]bool{}
+	for combo, b := range c.keys {
+		if b.desc == "" {
+			continue
+		}
+		name := keyName(combo.key)
+		documented[name] = true
+		if !strings.Contains(text, "+ "+name+" ") {
+			t.Fatalf("combo %s (%q) is bound but not documented: %q", combo.key, b.desc, text)
+		}
+	}
+	if len(documented) < 5 {
+		t.Fatalf("only %d distinct documented combos, expected at least 5", len(documented))
+	}
+	// The numpad Enter shares the run action and must not add a second line.
+	if n := strings.Count(text, "执行编辑器中的 SQL"); n != 1 {
+		t.Fatalf("run action documented %d times, want 1", n)
+	}
+
+	// One line per documented combo plus the two canvas-level combos written by
+	// hand (Ctrl+C, and the search box's Enter / Shift+Enter). The dialog is the
+	// only place the keys are still spelled out, so a stale or doubled line is a
+	// real defect, not cosmetics.
+	if want := len(documented) + 2; len(c.keyDocs) != want {
+		t.Fatalf("dialog has %d lines, want %d: %q", len(c.keyDocs), want, c.keyDocs)
 	}
 }
