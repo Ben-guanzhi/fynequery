@@ -13,6 +13,8 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // newQueryEntry builds one tab's SQL editor; completion only reacts while its
@@ -55,6 +57,38 @@ func (c *Client) addQueryTab() {
 	// active-editor alias explicit either way.
 	c.syncActiveTab(item)
 	c.syncTabMetrics(e)
+}
+
+// newTableTab opens the "新建表" draft: a fresh tab holding the engine's
+// starter CREATE TABLE, renamed from 查询 N so the strip says what it is, and
+// the session switched to the branch's database because the statement runs
+// where the session points. SetText goes through OnChanged, so the tab is
+// marked dirty like any hand-typed draft.
+func (c *Client) newTableTab(nd *nodeData) {
+	id := c.selectedOrLive()
+	conn, err := c.store.OpenConn(id)
+	if err != nil {
+		dialog.ShowError(err, c.win)
+		return
+	}
+	stmt, err := db.CreateTableTemplate(conn.Config.Type, nd.schema)
+	if err != nil {
+		dialog.ShowError(err, c.win)
+		return
+	}
+	if nd.db != "" && nd.db != c.currentDB {
+		c.currentDB = nd.db
+		c.dbSelRefresh()
+	}
+	c.addQueryTab()
+	tab := c.tabByItem(c.qTabs.CurrentTab())
+	if tab == nil {
+		return
+	}
+	tab.baseTitle = "新建表"
+	tab.item.Text = tab.baseTitle
+	c.queryEntry.SetText(stmt)
+	c.setStatus("新建表草案已打开，改完名字和字段再执行")
 }
 
 // restoreQueryTabs refills the freshly built tab strip from the persisted

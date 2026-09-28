@@ -60,6 +60,7 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 		c.limitText = s
 	})
 	limitSel.SetSelected("1000")
+	c.limitSel = limitSel
 
 	exportBtn := widget.NewButtonWithIcon("导出", theme.DownloadIcon(), func() {
 		c.exportGrid()
@@ -96,12 +97,13 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	// Toolbar order follows the reference layout: database first, the
 	// prominent run button, then the shortcut dialog; paging and export on the
 	// right.
+	c.pageCheck = c.buildPagingCheck()
 	toolbar := container.NewHBox(
 		c.dbSel,
 		runBtn, cancelRunBtn, clearBtn, keysBtn,
 		widget.NewSeparator(),
 		widget.NewLabel("行数上限"),
-		limitSel,
+		limitSel, c.pageCheck,
 		widget.NewSeparator(),
 		exportBtn,
 		widget.NewSeparator(),
@@ -260,9 +262,12 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	// The candidate bar sits between the editor and the split handle; hidden
 	// while there is nothing to suggest.
 	editorArea := container.NewBorder(nil, c.sugBar, nil, nil, tabsArea)
+	// The page bar rides above the grid and is hidden unless the result on
+	// screen is a paged one, so a normal query costs no vertical space.
+	gridArea := container.NewBorder(c.buildPageBar(), nil, nil, nil, c.resultGrid)
 	split := container.NewVSplit(
 		editorArea,
-		c.resultGrid,
+		gridArea,
 	)
 	split.Offset = 0.35
 	if r := c.uiSet.EditorRatio; r > 0.1 && r < 0.9 {
@@ -326,11 +331,26 @@ func (c *Client) resolveDB() string {
 	return ""
 }
 
+// querySession snapshots, under the session lock, the state one background
+// query round runs against. currentID/currentDB/pageSize belong to the UI
+// thread - connect and disconnect rewrite the first two while a query is in
+// flight, and the 每页 select rewrites the third - so a work closure must never
+// reach for them; it carries this copy instead. The database is the effective
+// one, which is also what the history entry must be filed under.
+func (c *Client) querySession() (connID, database string, pageSize int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.currentID, c.resolveDB(), c.pageSize
+}
+
 // runCurrent evaluates the editor text: a single statement runs directly, a
 // multi-statement script runs in order and stops at the first failure, with
-// every statement recorded in the history. The query executes on a background
-// goroutine so the window stays responsive; a cancel button aborts it, and
-// the result is marshalled back to the UI thread before the grid updates.
+// every statement recorded in the history. While 分页浏览 is on and the editor
+// holds one pageable SELECT, that statement runs as page 1 of the chosen row
+// window instead of the 行数上限-capped whole result. The query executes on a
+// background goroutine so the window stays responsive; a cancel button aborts
+// it, and the result is marshalled back to the UI thread before the grid
+// updates.
 func (c *Client) runCurrent() {
 	if c.currentID == "" {
 		dialog.ShowInformation("未连接", "请先在左侧选择一个连接并点击「连接」。", c.win)
@@ -349,57 +369,86 @@ func (c *Client) runCurrent() {
 		c.setStatus("没有可执行的语句（只有注释或空白）")
 		return
 	}
-	conn, err := c.store.OpenConn(c.currentID)
+	connID, dbName, pageSize := c.querySession()
+	conn, err := c.store.OpenConn(connID)
 	if err != nil {
 		c.setStatus("错误：" + err.Error())
 		return
 	}
-	dbName := c.resolveDB()
 	limit := c.limitValue()
+	// Paging covers one statement only; a script's last result is whatever the
+	// script ended with, which is not something a page bar can re-run honestly.
+	paged := c.paging && len(stmts) == 1 && db.Pageable(conn.Config.Type, stmts[0])
+	var pageNote string
 
+	c.runTracked("执行中 ...（点「取消」可中断）",
+		func(ctx context.Context) (db.QueryResult, string) {
+			// The whole query + history-record runs off the UI thread.
+			if paged {
+				// Making the window stable reads the catalog, so it belongs
+				// here rather than on the UI thread.
+				stmt, note := c.stablePageQuery(conn, dbName, stmts[0])
+				pageNote = note
+				res := c.store.ExecutePage(ctx, conn, dbName, stmt, 1, pageSize)
+				c.store.RecordStatement(connID, dbName, stmts[0], res)
+				return res, stmt
+			}
+			if len(stmts) == 1 {
+				res := c.store.Execute(ctx, conn, dbName, stmts[0], limit)
+				c.store.RecordStatement(connID, dbName, stmts[0], res)
+				return res, stmts[0]
+			}
+			last, lastStmt, _ := c.store.RunScript(ctx, conn, dbName, stmts, limit)
+			return last, lastStmt
+		},
+		func(res db.QueryResult, lastStmt string, canceled bool) {
+			c.mu.Lock()
+			c.cancelFn = nil
+			c.mu.Unlock()
+			c.setRunning(false)
+			c.setEditContext(lastStmt, res)
+			c.renderResult(res)
+			c.afterRunPaging(lastStmt, res, pageNote)
+			c.refreshHistory()
+			c.clearTabDirty(c.queryEntry)
+			if canceled && res.Error != "" {
+				c.setStatus("查询已取消")
+			}
+			c.focusEditor()
+		})
+}
+
+// runTracked runs one query round with the 取消 button wired to it: work runs on
+// a background goroutine (inline when asyncRun is false, for deterministic
+// tests) and finish receives its result on the UI thread. runCurrent and
+// runPage share the cancellation, busy-button and marshalling bookkeeping.
+func (c *Client) runTracked(busy string, work func(context.Context) (db.QueryResult, string),
+	finish func(db.QueryResult, string, bool)) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
 	c.cancelFn = cancel
 	c.mu.Unlock()
 	c.setRunning(true)
-	c.setStatus("执行中 ...（点「取消」可中断）")
+	c.setStatus(busy)
 
-	// The whole query + history-record runs off the UI thread.
-	work := func() (db.QueryResult, string) {
-		if len(stmts) == 1 {
-			res := c.store.Execute(ctx, conn, dbName, stmts[0], limit)
-			c.store.RecordStatement(c.currentID, c.currentDB, stmts[0], res)
-			return res, stmts[0]
-		}
-		last, lastStmt, _ := c.store.RunScript(ctx, conn, dbName, stmts, limit)
-		return last, lastStmt
-	}
-	finish := func(res db.QueryResult, lastStmt string) {
-		c.mu.Lock()
-		c.cancelFn = nil
-		c.mu.Unlock()
-		c.setRunning(false)
-		c.setEditContext(lastStmt, res)
-		c.renderResult(res)
-		c.refreshHistory()
-		c.clearTabDirty(c.queryEntry)
-		if ctx.Err() == context.Canceled && res.Error != "" {
-			c.setStatus("查询已取消")
-		}
-		c.focusEditor()
-	}
-
-	if c.asyncRun {
-		go func() {
-			res, lastStmt := work()
-			cancel()
-			c.dispatch(func() { finish(res, lastStmt) })
-		}()
-	} else {
-		res, lastStmt := work()
+	run := func() (db.QueryResult, string, bool) {
+		res, lastStmt := work(ctx)
+		// Read the cancellation flag before cancel() below: a cancelled context
+		// reports Canceled for every query afterwards, which would make even a
+		// plain error look like a user cancellation.
+		canceled := ctx.Err() == context.Canceled
 		cancel()
-		finish(res, lastStmt)
+		return res, lastStmt, canceled
 	}
+	if !c.asyncRun {
+		res, lastStmt, canceled := run()
+		finish(res, lastStmt, canceled)
+		return
+	}
+	go func() {
+		res, lastStmt, canceled := run()
+		c.dispatch(func() { finish(res, lastStmt, canceled) })
+	}()
 }
 
 // cancelRun aborts the in-flight query, if any.

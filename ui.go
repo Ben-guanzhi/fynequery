@@ -50,6 +50,27 @@ type Client struct {
 	sugBar     *fyne.Container // autocomplete candidates under the editor
 	resultGrid *widget.Table
 
+	// result paging (see ui_paging.go): the toolbar switch, the row-cap selector
+	// it supersedes, and the bar over the grid
+	limitSel    *widget.Select
+	pageCheck   *widget.Check
+	pageBar     *fyne.Container
+	pageLabel   *widget.Label
+	pageSizeSel *widget.Select
+	prevPageBtn *widget.Button
+	nextPageBtn *widget.Button
+	paging      bool
+	// pageStmt is the statement the on-screen page came from, empty while the
+	// result is not pageable; pageNo is its 1-based window and pageSize the
+	// number of rows one window holds
+	pageStmt string
+	pageNo   int
+	pageSize int
+	// pageNote is the bar's verdict on the window's row order: either the sort
+	// the pager injected ("已按主键 id 排序") or the warning that nothing makes
+	// consecutive pages disjoint ("⚠ 排序不稳定")
+	pageNote string
+
 	// grid edit actions, enabled while the result is a writable table
 	editCellBtn    *widget.Button
 	insertRowBtn   *widget.Button
@@ -182,14 +203,19 @@ func newClient(a fyne.App, w fyne.Window) *Client {
 	// The layout + editor drafts are read once here; the only writer is
 	// saveWindowSettings on close, so no locking is needed.
 	c.uiSet = loadUISettings(uiSettingsPath())
+	if validPageSize(c.uiSet.PageSize) {
+		c.pageSize = c.uiSet.PageSize
+	}
 	c.asyncRun = true
 	c.dispatch = fyne.Do
 	c.keys = make(map[keyCombo]keyBinding)
 	return c
 }
 
-// closeAll closes every live database pool before quitting.
+// closeAll flushes what the throttled writes left pending and closes every live
+// database pool before quitting.
 func (c *Client) closeAll() {
+	c.store.PersistHistory()
 	c.store.CloseAll()
 	c.mu.Lock()
 	c.currentID = ""

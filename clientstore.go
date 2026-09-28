@@ -12,7 +12,11 @@ import (
 // keeps the UI's notion of "current connection" in sync, and the foreign-key
 // memo stays on this side because it is a UI-session cache.
 
-// connect opens a connection and makes it the current one.
+// connect opens a connection and makes it the current one. Call it on the UI
+// thread: the currentID write is under the session lock because a query
+// snapshot takes it there, but the async connect path in ui_connections.go
+// goes through store.Connect directly and sets the session in the callback fyne
+// dispatches back to the main goroutine.
 func (c *Client) connect(cfg db.ConnConfig) error {
 	if err := c.store.Connect(cfg); err != nil {
 		return err

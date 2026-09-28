@@ -255,11 +255,18 @@ func (c *Client) schemaRowWidget(nd *nodeData, depth int) fyne.CanvasObject {
 
 	row := container.NewBorder(nil, nil, schemaIndentWidget(depth), nil, btn)
 	var out fyne.CanvasObject = row
-	if nd.kind == "table" {
+	switch nd.kind {
+	case "table":
 		// Right-click a table/view row for its catalog actions.
 		uid := nd.uid
 		out = newTapMenuRow(row, func(pos fyne.Position) {
 			c.showTableNodeMenu(uid, pos)
+		})
+	case "db", "schema":
+		// A branch row has one action of its own, aimed at the node it is on.
+		uid := nd.uid
+		out = newTapMenuRow(row, func(pos fyne.Position) {
+			c.showBranchNodeMenu(uid, pos)
 		})
 	}
 	if c.rowCache == nil {

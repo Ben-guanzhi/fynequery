@@ -81,13 +81,42 @@ func (c *Store) RecordStatement(connID, database, query string, res QueryResult)
 	}
 	c.mu.Unlock()
 
-	c.PersistHistory()
+	c.persistHistorySoon()
 }
 
+// historyPersistDelay bounds how often the whole statement log is rewritten.
+// Every executed statement used to trigger a full rewrite of up to 500 entries,
+// which is a lot of identical writes for a log the user reads occasionally: a
+// burst now writes once and the tail goes out when the window closes. The cost
+// is stated honestly - a process killed before that flush loses at most the
+// statements recorded inside one delay.
+const historyPersistDelay = 5 * time.Second
+
+// persistHistorySoon records that the log changed and writes it unless one
+// delay has already passed since the last write.
+func (c *Store) persistHistorySoon() {
+	c.mu.Lock()
+	c.historyDirty = true
+	recent := !c.historyFlushed.IsZero() && time.Since(c.historyFlushed) < historyPersistDelay
+	c.mu.Unlock()
+	if !recent {
+		c.PersistHistory()
+	}
+}
+
+// PersistHistory writes the statement log now; nothing is rewritten when no
+// entry has changed since the last write. Quitting the app calls it so the
+// throttled tail of a session is never left behind.
 func (c *Store) PersistHistory() {
 	c.mu.Lock()
+	if !c.historyDirty {
+		c.mu.Unlock()
+		return
+	}
 	entries := make([]HistoryEntry, len(c.history))
 	copy(entries, c.history)
+	c.historyDirty = false
+	c.historyFlushed = time.Now()
 	c.mu.Unlock()
 
 	data, err := json.MarshalIndent(entries, "", "  ")
@@ -105,6 +134,7 @@ func (c *Store) ClearHistory() int {
 	c.mu.Lock()
 	n := len(c.history)
 	c.history = nil
+	c.historyDirty = true
 	c.mu.Unlock()
 	c.PersistHistory()
 	return n

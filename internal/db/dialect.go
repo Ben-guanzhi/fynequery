@@ -43,6 +43,14 @@ type dialect struct {
 	// tableSchema fills the engine's default table namespace for qualified
 	// names, independent of which database the session is in.
 	tableSchema func(schema string) string
+	// pageSQL renders a row window (offset rows skipped, then size rows) around
+	// a statement the caller has already checked is pageable.
+	pageSQL func(query string, offset, size int) string
+	// createTable renders the starter CREATE TABLE for "新建表": the smallest
+	// table this engine accepts, so the user edits a name and a column instead
+	// of recalling each dialect's identity syntax. It takes the node's schema
+	// and fills the engine's own default namespace.
+	createTable func(schema string) string
 }
 
 func dialectFor(dbType string) (*dialect, error) {
@@ -174,7 +182,11 @@ func scanSQLiteColumn(r *sql.Rows) (ColumnInfo, error) {
 		return col, err
 	}
 	col.Nullable = notnull == 0
-	col.IsPrimaryKey = pk == 1
+	// PRAGMA table_info numbers the primary-key columns 1..n and uses 0 for the
+	// rest, so a composite key must test for any non-zero position. Testing
+	// ==1 silently kept only the first column, which made a composite key's
+	// write-back WHERE clause under-constrain the row it updates.
+	col.IsPrimaryKey = pk > 0
 	if defaultValue.Valid {
 		col.DefaultValue = defaultValue.String
 	}
@@ -291,6 +303,8 @@ var mysqlDialect = &dialect{
 	tableSchema: func(schema string) string {
 		return schema
 	},
+	pageSQL:     limitOffset,
+	createTable: mysqlCreateTable,
 }
 
 var postgresDialect = &dialect{
@@ -420,6 +434,8 @@ var postgresDialect = &dialect{
 		}
 		return "public"
 	},
+	pageSQL:     limitOffset,
+	createTable: postgresCreateTable,
 }
 
 var sqliteDialect = &dialect{
@@ -543,6 +559,8 @@ var sqliteDialect = &dialect{
 	tableSchema: func(schema string) string {
 		return schema
 	},
+	pageSQL:     limitOffset,
+	createTable: sqliteCreateTable,
 }
 
 var sqlserverDialect = &dialect{
@@ -680,6 +698,15 @@ var sqlserverDialect = &dialect{
 		}
 		return "dbo"
 	},
+	// SQL Server only accepts the window clause after an ORDER BY, so a
+	// statement without its own sort gets a constant one.
+	pageSQL: func(query string, offset, size int) string {
+		if !outerOrderByRe.MatchString(query) {
+			query += " ORDER BY (SELECT NULL)"
+		}
+		return offsetFetch(query, offset, size)
+	},
+	createTable: sqlserverCreateTable,
 }
 
 var oracleDialect = &dialect{
@@ -753,4 +780,8 @@ var oracleDialect = &dialect{
 	tableSchema: func(schema string) string {
 		return schema
 	},
+	// Oracle 12c+ takes the ANSI window clause and, unlike SQL Server, does not
+	// require an ORDER BY in front of it.
+	pageSQL:     offsetFetch,
+	createTable: oracleCreateTable,
 }

@@ -47,6 +47,11 @@ func callCrypt32(proc *syscall.LazyProc, in []byte) ([]byte, error) {
 	return out, nil
 }
 
+// SecretsSealed reports that this platform stores a saved password in a form
+// only the current local user can undo, so the connection dialog has nothing to
+// warn about. The !windows build answers false, and the UI says so out loud.
+func SecretsSealed() bool { return true }
+
 // protectSecret seals a password with DPAPI, scoped to the current Windows user.
 func protectSecret(plaintext string) (string, error) {
 	if plaintext == "" {

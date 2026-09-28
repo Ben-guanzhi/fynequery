@@ -1,13 +1,21 @@
 package db
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
-// exeDirPath is the directory of the running executable; the app keeps all
-// of its state files (connections, history, ui layout) beside the binary.
+// stateDirEnv overrides the state directory. Tests point it at a temp folder so
+// a run can never rewrite the user's real saved connections, and a portable
+// install can aim it at the app folder.
+const stateDirEnv = "TABLEPRO_STATE_DIR"
+
+// exeDirPath is the directory of the running executable. Releases before the
+// config-directory layout kept all state files here, so it is also where the
+// one-time migration looks.
 func exeDirPath() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -16,14 +24,58 @@ func exeDirPath() string {
 	return filepath.Dir(exe)
 }
 
-// StateFilePath names one state file beside the executable. Exported so the
-// UI layer persists its own settings (ui.json) in the same directory.
+// stateDir is where the app keeps its state files (connections, history, ui
+// layout): the same config/TableProGo directory the Wails version writes, so
+// saved connections are shared between the two clients instead of credentials
+// sitting in a source tree beside the binary. Without an OS config directory
+// the old beside-the-exe layout is kept rather than refusing to run.
+func stateDir() string {
+	if dir := os.Getenv(stateDirEnv); dir != "" {
+		return dir
+	}
+	if cfg, err := os.UserConfigDir(); err == nil && cfg != "" {
+		return filepath.Join(cfg, "TableProGo")
+	}
+	return exeDirPath()
+}
+
+// StateFilePath names one state file. Exported so the UI layer persists its own
+// settings (ui.json) in the same directory.
 func StateFilePath(name string) string {
-	dir := exeDirPath()
+	return resolveStateFile(stateDir(), exeDirPath(), name)
+}
+
+// resolveStateFile answers where `name` lives for this launch and, on the first
+// launch after the layout change, copies the beside-the-exe file into dir.
+// The legacy copy stays put: deleting user data on startup is not this
+// program's call. dir is created because every caller writes the file back.
+func resolveStateFile(dir, exeDir, name string) string {
 	if dir == "" {
+		// No config directory and no executable directory: name the file
+		// relatively and let the caller's write report the problem.
 		return name
 	}
-	return filepath.Join(dir, name)
+	target := filepath.Join(dir, name)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return target
+	}
+	if _, err := os.Stat(target); err == nil {
+		return target
+	}
+	if exeDir == "" || exeDir == dir {
+		return target
+	}
+	legacy := filepath.Join(exeDir, name)
+	data, err := os.ReadFile(legacy)
+	if err != nil {
+		return target
+	}
+	if err := os.WriteFile(target, data, 0600); err != nil {
+		log.Printf("Failed to migrate %s: %v", legacy, err)
+		return target
+	}
+	log.Printf("Migrated %s to %s", legacy, target)
+	return target
 }
 
 // Store is the data-layer kernel: saved connection definitions, live
@@ -40,6 +92,10 @@ type Store struct {
 	history     []HistoryEntry
 	historySeq  int64
 	historyFile string
+	// historyDirty marks entries changed but not yet on disk; historyFlushed is
+	// when they last were, which is what the write delay is measured from.
+	historyDirty   bool
+	historyFlushed time.Time
 }
 
 // NewStore loads the persisted connections and history from beside the
@@ -92,6 +148,7 @@ func (c *Store) ReplaceHistory(entries []HistoryEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.history = append([]HistoryEntry(nil), entries...)
+	c.historyDirty = true
 	var max int64
 	for _, e := range c.history {
 		if e.ID > max {

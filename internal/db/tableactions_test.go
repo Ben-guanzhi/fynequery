@@ -147,4 +147,17 @@ func TestForeignKeyHelpers(t *testing.T) {
 	if got, err := fkTargetName("postgresql", "shop", "", "users"); err != nil || got != `"public"."users"` {
 		t.Errorf("fkTargetName postgres = %s, %v", got, err)
 	}
+
+	// RefName is what the structure dialog lists; it must agree with the name
+	// the picker queries, and an unknown engine must cost the qualification,
+	// not the row.
+	if got := RefName("postgresql", "shop", fks[0]); got != `"dbo"."users"` {
+		t.Errorf("RefName postgres = %s", got)
+	}
+	if got := RefName("mysql", "shop", ForeignKeyInfo{RefTable: "users"}); got != "`shop`.`users`" {
+		t.Errorf("RefName mysql should fall back to the database, got %s", got)
+	}
+	if got := RefName("nope", "shop", fks[0]); got != "users" {
+		t.Errorf("RefName on an unknown engine = %s, want the bare table", got)
+	}
 }

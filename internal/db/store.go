@@ -57,6 +57,13 @@ func (c *Store) persist() {
 	}
 	if err := os.WriteFile(c.connFile, data, 0600); err != nil {
 		log.Printf("Failed to write connections file: %v", err)
+		return
+	}
+	// WriteFile's mode only applies when it creates the file, so a
+	// connections.json that another tool left world-readable keeps that mode
+	// unless it is set again - the one protection a plain-text password has.
+	if err := os.Chmod(c.connFile, 0600); err != nil {
+		log.Printf("Failed to tighten permissions on %s: %v", c.connFile, err)
 	}
 }
 

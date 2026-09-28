@@ -192,7 +192,9 @@ func (c *Client) onConnect(cfg db.ConnConfig) {
 	var connErr error
 	c.runAsync(
 		func() {
-			connErr = c.connect(cfg)
+			// Only the store is touched here: the session fields belong to the
+			// UI thread, and its dispatched callback below sets them.
+			connErr = c.store.Connect(cfg)
 		},
 		func() {
 			if connErr != nil {

@@ -195,3 +195,57 @@ func TestDraftSaveRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("restored dirty title = %q, want a ● marker", c2.qItems[1].item.Text)
 	}
 }
+
+// TestNewTableTab drives the navigator's 「新建表」 from a branch node: the
+// draft opens in its own tab, titled and marked dirty, the session moves to the
+// node's database, and the tab that was already open is left alone.
+func TestNewTableTab(t *testing.T) {
+	a := test.NewApp()
+	w := a.NewWindow("t")
+	c := newTestClient(a, w)
+	dir := t.TempDir()
+	dbFile := filepath.Join(dir, "newtab.db")
+
+	sdb, err := sql.Open("sqlite3", dbFile)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := sdb.Exec(`CREATE TABLE users (name TEXT)`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	sdb.Close()
+
+	if err := c.connect(db.ConnConfig{ID: "c0", Name: "t", Type: db.DbTypeSQLite, Database: dbFile}); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { c.disconnect("c0") })
+	w.SetContent(c.buildQueryView())
+
+	first := c.queryEntry
+	first.setTextSilently("SELECT 1")
+
+	c.newTableTab(&nodeData{kind: "db", label: dbFile, db: dbFile, uid: "db:" + dbFile})
+
+	if len(c.qItems) != 2 {
+		t.Fatalf("tabs = %d, want the draft in a new one", len(c.qItems))
+	}
+	tab := c.qItems[1]
+	if tab.baseTitle != "新建表" || tab.item.Text != "新建表 ●" {
+		t.Fatalf("tab title = %q / %q, want 新建表 and its dirty marker", tab.baseTitle, tab.item.Text)
+	}
+	if !strings.HasPrefix(tab.entry.Text, `CREATE TABLE "new_table" (`) {
+		t.Fatalf("draft = %q", tab.entry.Text)
+	}
+	if !tab.dirty {
+		t.Error("an unexecuted draft must be dirty")
+	}
+	if c.queryEntry != tab.entry {
+		t.Fatal("the draft tab is not the active editor")
+	}
+	if first.Text != "SELECT 1" || c.qItems[0].dirty {
+		t.Fatalf("the tab that was open must be untouched, got %q dirty=%v", first.Text, c.qItems[0].dirty)
+	}
+	if c.currentDB != dbFile {
+		t.Fatalf("currentDB = %q, want the node's database %q", c.currentDB, dbFile)
+	}
+}

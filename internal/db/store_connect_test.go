@@ -8,16 +8,66 @@ import (
 // mssqlEncrypt must always return a value go-mssqldb's msdsn parser accepts
 // ("disable" case-insensitive, or a boolean). Empty / "require" previously
 // produced "invalid encrypt ...: strconv.ParseBool ... invalid syntax".
+// Encryption is the default, so only the two names for "off" turn it off.
 func TestMssqlEncryptValues(t *testing.T) {
-	valid := map[string]bool{
-		"disable": true,
-		"true":    true,
-		"false":   true,
+	cases := map[string]string{
+		"":            "true", // unset now means encrypted
+		"true":        "true",
+		"trust":       "true",
+		"require":     "true",
+		"verify-ca":   "true",
+		"verify-full": "true",
+		"strict":      "true", // not a value this driver parses, so it must map
+		"junk":        "true",
+		"false":       "disable",
+		"disable":     "disable",
+		"DISABLE":     "disable",
 	}
-	for _, mode := range []string{"", "false", "true", "disable", "require", "verify-ca", "verify-full", "strict", "junk"} {
-		got := mssqlEncrypt(mode)
-		if !valid[got] {
-			t.Errorf("mssqlEncrypt(%q) = %q, not a go-mssqldb-valid value", mode, got)
+	for mode, want := range cases {
+		if got := mssqlEncrypt(mode); got != want {
+			t.Errorf("mssqlEncrypt(%q) = %q, want %q", mode, got, want)
+		}
+	}
+}
+
+// TrustServerCertificate was hardcoded to true, which let TLS be stepped on by
+// anyone with a certificate the client would accept. It must now default to
+// verifying and only answer to the mode that says so by name.
+func TestMssqlTrustServerCertificate(t *testing.T) {
+	for _, mode := range []string{"", "true", "require", "verify-full", "disable", "false", "junk"} {
+		if got := mssqlTrustServerCertificate(mode); got != "false" {
+			t.Errorf("mssqlTrustServerCertificate(%q) = %q, want false", mode, got)
+		}
+	}
+	if got := mssqlTrustServerCertificate("trust"); got != "true" {
+		t.Errorf("the named trust mode = %q, want true", got)
+	}
+}
+
+// TestMssqlDSNReachesTheDialer is the guard the parser comment claims: sql.Open
+// defers parsing, so dial a port nothing listens on and require the failure to
+// be the TCP refusal. An "invalid encrypt" answer means we produced a value
+// go-mssqldb rejects, which is how the old mapping surfaced at connect time.
+func TestMssqlDSNReachesTheDialer(t *testing.T) {
+	for _, mode := range []string{"", "true", "trust", "false", "disable", "require", "strict"} {
+		cfg := ConnConfig{
+			Type: DbTypeSQLServer, Host: "127.0.0.1", Port: 14333,
+			Username: "sa", Password: "pw", Database: "master", SSLMode: mode,
+		}
+		db, err := createConnection(cfg)
+		if err != nil {
+			t.Fatalf("sslMode=%q: %v", mode, err)
+		}
+		err = db.Ping()
+		db.Close()
+		if err == nil {
+			t.Fatalf("sslMode=%q: expected the dial to fail, port 14333 is closed", mode)
+		}
+		if strings.Contains(err.Error(), "invalid encrypt") || strings.Contains(err.Error(), "ParseBool") {
+			t.Errorf("sslMode=%q: driver rejected our encrypt value: %v", mode, err)
+		}
+		if !strings.Contains(err.Error(), "tcp") {
+			t.Errorf("sslMode=%q: expected a TCP refusal, got %v", mode, err)
 		}
 	}
 }
@@ -46,8 +96,9 @@ func TestSqlServerDSNParses(t *testing.T) {
 	}
 }
 
-// Guard: the generated sqlserver DSN must carry a valid encrypt= value and
-// percent-encode credentials so special characters survive msdsn parsing.
+// Guard: the generated sqlserver DSN must carry a valid encrypt= value, must
+// encrypt by default, must not trust the server certificate unless asked, and
+// must percent-encode credentials so special characters survive msdsn parsing.
 func TestMssqlURLEscapesCredentials(t *testing.T) {
 	cfg := ConnConfig{
 		Type: DbTypeSQLServer, Host: "h", Port: 1433,
@@ -56,8 +107,8 @@ func TestMssqlURLEscapesCredentials(t *testing.T) {
 	dsn := mssqlURL(cfg)
 	for _, want := range []string{
 		"sqlserver://u%40x:p%2Fw%3A1@h:1433",
-		"encrypt=disable",
-		"TrustServerCertificate=true",
+		"encrypt=true",
+		"TrustServerCertificate=false",
 	} {
 		if !strings.Contains(dsn, want) {
 			t.Errorf("mssqlURL missing %q, got %q", want, dsn)
@@ -67,6 +118,15 @@ func TestMssqlURLEscapesCredentials(t *testing.T) {
 		t.Errorf("createConnection(sqlserver): %v", err)
 	} else if db != nil {
 		db.Close()
+	}
+
+	// The two named departures from the default.
+	if got := mssqlURL(ConnConfig{Type: DbTypeSQLServer, Host: "h", SSLMode: "disable"}); !strings.Contains(got, "encrypt=disable") {
+		t.Errorf("the off mode must really turn encryption off, got %q", got)
+	}
+	got := mssqlURL(ConnConfig{Type: DbTypeSQLServer, Host: "h", SSLMode: "trust"})
+	if !strings.Contains(got, "encrypt=true") || !strings.Contains(got, "TrustServerCertificate=true") {
+		t.Errorf("the trust mode must encrypt without verifying the chain, got %q", got)
 	}
 }
 

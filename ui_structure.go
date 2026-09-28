@@ -9,13 +9,16 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"tablepro-fyne/internal/db"
 )
 
 // showStructureDialog displays one table's columns and indexes — the metadata
 // the grid only implies. Both lists come from the dialect's catalog readers.
 func (c *Client) showStructureDialog(nd *nodeData) {
 	id := c.selectedOrLive()
-	if _, err := c.store.OpenConn(id); err != nil {
+	conn, err := c.store.OpenConn(id)
+	if err != nil {
 		dialog.ShowError(err, c.win)
 		return
 	}
@@ -68,9 +71,34 @@ func (c *Client) showStructureDialog(nd *nodeData) {
 	indexTable := newMetaTable(
 		[]string{"索引", "类型", "约束", "字段"}, indexRows)
 
+	// Foreign keys are the third thing a grid cannot show: which constraint
+	// points where, and what the engine does to the child rows on delete or
+	// update. Same rule as the index list - a catalog that refuses to answer
+	// costs this tab its rows, not the dialog.
+	fks, err := c.foreignKeys(id, nd.db, nd.schema, nd.name)
+	if err != nil {
+		fks = nil
+		c.setStatus("外键读取失败：" + err.Error())
+	} else {
+		c.setStatus("就绪")
+	}
+	fkRows := make([][]string, 0, len(fks))
+	for _, fk := range fks {
+		fkRows = append(fkRows, []string{
+			fk.Name,
+			strings.Join(fk.Columns, ", "),
+			db.RefName(conn.Config.Type, nd.db, fk),
+			strings.Join(fk.RefColumns, ", "),
+			fk.OnDelete, fk.OnUpdate,
+		})
+	}
+	fkTable := newMetaTable(
+		[]string{"约束", "本表字段", "引用表", "引用字段", "ON DELETE", "ON UPDATE"}, fkRows)
+
 	tabs := container.NewAppTabs(
 		container.NewTabItem(fmt.Sprintf("字段 (%d)", len(cols)), columnTable),
 		container.NewTabItem(fmt.Sprintf("索引 (%d)", len(indexes)), indexTable),
+		container.NewTabItem(fmt.Sprintf("外键 (%d)", len(fks)), fkTable),
 		container.NewTabItem("DDL", c.buildDDLTab(id, nd)),
 	)
 	d := dialog.NewCustom("结构 "+nd.name, "关闭", tabs, c.win)

@@ -152,6 +152,18 @@ func fkTargetName(dbType, database, refSchema, refTable string) (string, error) 
 	return TableName(dbType, database, DefaultSchema(dbType, refSchema), refTable)
 }
 
+// RefName renders a constraint's target the way this dialect addresses tables,
+// for listings that have to answer "which table does this point at". A name the
+// dialect cannot build (unknown engine) falls back to the bare table rather than
+// costing the caller the whole row.
+func RefName(dbType, database string, fk ForeignKeyInfo) string {
+	name, err := fkTargetName(dbType, database, fk.RefSchema, fk.RefTable)
+	if err != nil {
+		return fk.RefTable
+	}
+	return name
+}
+
 // isDescriptiveType reports whether a column holds something a person reads.
 // Numbers, dates and blobs describe a row only to whoever already knows it.
 func isDescriptiveType(colType string) bool {

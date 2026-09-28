@@ -21,6 +21,7 @@ type uiSettings struct {
 	SidebarRatio float32         `json:"sidebarRatio"`
 	EditorRatio  float32         `json:"editorRatio"`
 	ActiveTab    int             `json:"activeTab"`
+	PageSize     int             `json:"pageSize,omitempty"`
 	Tabs         []queryTabDraft `json:"tabs,omitempty"`
 }
 

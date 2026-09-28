@@ -75,6 +75,28 @@ func TestSchemaRowsModel(t *testing.T) {
 	}
 }
 
+// TestBranchRowsCarryMenu pins the affordance the navigator gained with
+// 「新建表」: a database or schema row is wrapped for right-click, a plain
+// status row is not.
+func TestBranchRowsCarryMenu(t *testing.T) {
+	test.NewApp()
+	c := &Client{store: db.NewStore(), treeNodes: make(map[string]*nodeData), expanded: make(map[string]bool)}
+	c.buildSchemaView()
+	c.treeNodes[treeRootUID] = &nodeData{kind: "root", label: "数据库", uid: treeRootUID}
+	c.treeNodes["db:a"] = &nodeData{kind: "db", label: "a", db: "a", uid: "db:a"}
+	c.treeNodes["db:a|s:pub"] = &nodeData{kind: "schema", label: "pub", db: "a", schema: "pub", uid: "db:a|s:pub"}
+	c.treeNodes["root|error"] = &nodeData{kind: "error", label: "加载失败", uid: "root|error"}
+
+	for _, uid := range []string{"db:a", "db:a|s:pub"} {
+		if _, ok := c.schemaRowWidget(c.treeNodes[uid], 0).(*tapMenuRow); !ok {
+			t.Errorf("%s row must carry the right-click menu", uid)
+		}
+	}
+	if _, ok := c.schemaRowWidget(c.treeNodes["root|error"], 0).(*tapMenuRow); ok {
+		t.Error("an error row has no node actions")
+	}
+}
+
 // TestSchemaRowCacheReuse pins the navigator memoization: a rebuild whose
 // rows are unchanged reuses the rendered widgets and the identical list
 // skips the re-layout, while any visual input change produces a new widget.
@@ -117,7 +139,7 @@ func TestSchemaRowCacheReuse(t *testing.T) {
 func schemaRowButtonOf(row fyne.CanvasObject) *widget.Button {
 	var box *fyne.Container
 	switch r := row.(type) {
-	case *tapMenuRow: // table rows carry the right-click menu wrapper
+	case *tapMenuRow: // rows with a right-click menu carry this wrapper
 		box = r.row
 	case *fyne.Container:
 		box = r
@@ -137,7 +159,7 @@ func schemaRowButton(t *testing.T, row fyne.CanvasObject) *widget.Button {
 	t.Helper()
 	var box *fyne.Container
 	switch r := row.(type) {
-	case *tapMenuRow: // table rows carry the right-click menu wrapper
+	case *tapMenuRow: // rows with a right-click menu carry this wrapper
 		box = r.row
 	case *fyne.Container:
 		box = r

@@ -169,22 +169,40 @@ func mssqlURL(cfg ConnConfig) string {
 	q := url.Values{
 		"database":               {cfg.Database},
 		"encrypt":                {mssqlEncrypt(cfg.SSLMode)},
-		"TrustServerCertificate": {"true"},
+		"TrustServerCertificate": {mssqlTrustServerCertificate(cfg.SSLMode)},
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }
 
-// mssqlEncrypt maps the GUI SSLMode field onto a value go-mssqldb can parse.
-// Its msdsn parser only accepts "disable" (case-insensitive) or a boolean
-// ("true"/"false"/"1"/"0"). Empty and "require" would fail ParseBool.
+// mssqlEncrypt maps the GUI 加密 choice onto a value go-mssqldb can parse. Its
+// msdsn parser accepts only "disable" or a boolean - "require", "strict" and
+// the empty string all fail ParseBool, which is what TestMssqlDSNReachesTheDialer
+// guards against.
+//
+// Encryption is the default: an unset or unrecognised mode encrypts, and
+// turning it off is a choice that has to be named ("false"/"disable"). That is
+// also the one-time migration for connections saved while the old mapping was
+// in force - their empty mode now means encrypt-and-verify, so a stored
+// connection silently travelling in cleartext is no longer possible.
 func mssqlEncrypt(mode string) string {
 	switch strings.ToLower(mode) {
-	case "true", "require", "verify-ca", "verify-full", "strict":
-		return "true"
-	default: // "", "false", "disable", anything unknown
+	case "false", "disable":
 		return "disable"
+	default: // "", "true", "trust", anything else
+		return "true"
 	}
+}
+
+// mssqlTrustServerCertificate is the verification knob this driver really
+// offers, and it defaults to verifying: only the mode named "trust" skips the
+// certificate chain, which is the choice for a server with a self-signed
+// certificate.
+func mssqlTrustServerCertificate(mode string) string {
+	if strings.ToLower(mode) == "trust" {
+		return "true"
+	}
+	return "false"
 }
 
 // normalizeSSL maps GUI-friendly values onto PostgreSQL sslmode values.

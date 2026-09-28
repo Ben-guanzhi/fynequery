@@ -1,8 +1,10 @@
 package main
 
-// Node action dialogs for the navigator: the right-click menu and the
-// drop/truncate/rename confirm-and-run flow. Statement rendering is the
-// data layer's job (db.TableActionStatement); this file only shows dialogs.
+// Node action dialogs for the navigator: the table menu (structure, drop,
+// truncate, rename) and the confirm-and-run flow behind those three. Statement
+// rendering is the data layer's job (db.TableActionStatement); this file only
+// shows dialogs. Branch nodes (database/schema) get the one action that needs
+// no catalog row: 新建表.
 
 import (
 	"fyne.io/fyne/v2"
@@ -30,6 +32,19 @@ func (c *Client) showTableNodeMenu(uid string, pos fyne.Position) {
 	}
 	items = append(items, fyne.NewMenuItem("重命名 (RENAME)", func() { c.renameNodeDialog(nd) }))
 	widget.NewPopUpMenu(fyne.NewMenu("", items...), c.win.Canvas()).ShowAtPosition(pos)
+}
+
+// showBranchNodeMenu pops the one action a database or schema branch has:
+// 新建表. Unlike the table actions it is not a statement the app fires off -
+// the name and the columns are the user's to decide - so it opens an editor
+// tab holding the engine's starter CREATE TABLE.
+func (c *Client) showBranchNodeMenu(uid string, pos fyne.Position) {
+	nd, ok := c.treeNodes[uid]
+	if !ok {
+		return
+	}
+	menu := fyne.NewMenu("", fyne.NewMenuItem("新建表", func() { c.newTableTab(nd) }))
+	widget.NewPopUpMenu(menu, c.win.Canvas()).ShowAtPosition(pos)
 }
 
 // confirmNodeAction renders the statement first, asks, then runs it.

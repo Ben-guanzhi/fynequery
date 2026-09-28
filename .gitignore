@@ -7,7 +7,11 @@
 # Windows editor swap files
 *.swp
 
-# runtime state files (created next to the executable)
+# Runtime state: saved connections (credentials), query history, UI layout.
+# These live in the OS config directory now, but releases built before that
+# change left them beside the executable, and a hand-pointed
+# TABLEPRO_STATE_DIR can put them anywhere - so they stay ignored either way.
 connections.json
 history.json
 ui.json
+settings.json

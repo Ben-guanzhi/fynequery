@@ -24,6 +24,23 @@ tasks:
     cmds:
       - go vet ./...
 
+  test:
+    desc: Run the whole suite under the race detector
+    cmds:
+      - go test -race -count=1 ./...
+
+  fmt:
+    desc: Format all Go files
+    cmds:
+      - gofmt -w .
+
+  check:
+    desc: The gate a commit should pass - formatting, vet, race tests
+    cmds:
+      - gofmt -l .
+      - task: vet
+      - task: test
+
   tidy:
     desc: Tidy module dependencies
     cmds:
