@@ -3,7 +3,6 @@ package db
 import (
 	"encoding/json"
 	"log"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -31,16 +30,16 @@ const historySQLChars = 4000
 
 // loadHistory reads the persisted statement log.
 func (c *Store) loadHistory() {
-	data, err := os.ReadFile(c.historyFile)
+	entries, ok, err := readJSONFile[HistoryEntry](c.historyFile)
 	if err != nil {
-		return
-	}
-	var entries []HistoryEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
 		log.Printf("Failed to load history: %v", err)
 		return
 	}
+	if !ok {
+		return
+	}
 	c.history = entries
+	c.histObserved = append([]HistoryEntry(nil), entries...)
 	for _, e := range entries {
 		if e.ID > c.historySeq {
 			c.historySeq = e.ID
@@ -106,12 +105,25 @@ func (c *Store) persistHistorySoon() {
 
 // PersistHistory writes the statement log now; nothing is rewritten when no
 // entry has changed since the last write. Quitting the app calls it so the
-// throttled tail of a session is never left behind.
+// throttled tail of a session is never left behind. Statements another client
+// recorded since the last write are folded in first, so neither side's log
+// loses entries.
 func (c *Store) PersistHistory() {
+	c.persistHistoryNow(true)
+}
+
+// persistHistoryNow writes the statement log. mergeDisk controls whether what
+// other clients appended to the shared file since the last write is folded in
+// first: a record wants that, a full clear does not - wiping the log is a
+// statement about every entry, wherever it was written.
+func (c *Store) persistHistoryNow(mergeDisk bool) {
 	c.mu.Lock()
-	if !c.historyDirty {
+	if !c.historyDirty || c.historyFile == "" {
 		c.mu.Unlock()
 		return
+	}
+	if mergeDisk {
+		c.mergeHistoryLocked()
 	}
 	entries := make([]HistoryEntry, len(c.history))
 	copy(entries, c.history)
@@ -124,9 +136,13 @@ func (c *Store) PersistHistory() {
 		log.Printf("Failed to encode history: %v", err)
 		return
 	}
-	if err := os.WriteFile(c.historyFile, data, 0600); err != nil {
+	if err := writeFileAtomic(c.historyFile, data); err != nil {
 		log.Printf("Failed to write history: %v", err)
+		return
 	}
+	c.mu.Lock()
+	c.histObserved = append([]HistoryEntry(nil), entries...)
+	c.mu.Unlock()
 }
 
 // clearHistory removes all recorded statements and persists the empty log.
@@ -136,7 +152,7 @@ func (c *Store) ClearHistory() int {
 	c.history = nil
 	c.historyDirty = true
 	c.mu.Unlock()
-	c.PersistHistory()
+	c.persistHistoryNow(false)
 	return n
 }
 

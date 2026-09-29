@@ -1,6 +1,8 @@
 package db
 
 import (
+	"tableprosql"
+
 	"fmt"
 	"sort"
 	"strings"
@@ -106,8 +108,7 @@ func (c *Store) SearchObjects(pattern string, limit int) ([]ObjectMatch, error) 
 // likePattern wraps the fragment for a LIKE test, escaping the wildcards the
 // user typed so "a_b" cannot stand for any three characters.
 func likePattern(fragment string) string {
-	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(fragment)
-	return "%" + escaped + "%"
+	return tableprosql.LikePattern(fragment)
 }
 
 func (c *Store) SearchInDatabase(conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {

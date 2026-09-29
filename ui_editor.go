@@ -59,6 +59,18 @@ func (c *Client) addQueryTab() {
 	c.syncTabMetrics(e)
 }
 
+// selectTab switches to the tab at index i. An index past the last tab does
+// nothing: Ctrl+5 on three tabs should not wrap around and steal a tab the
+// user did not ask for.
+func (c *Client) selectTab(i int) {
+	if i < 0 || i >= len(c.tabs.items) {
+		return
+	}
+	// SelectIndex fires OnSelected, which is what re-points c.tabs.entry.
+	c.tabs.bar.SelectIndex(i)
+	c.focusEditor()
+}
+
 // newTableTab opens the "新建表" draft: a fresh tab holding the engine's
 // starter CREATE TABLE, renamed from 查询 N so the strip says what it is, and
 // the session switched to the branch's database because the statement runs

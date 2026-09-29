@@ -4,19 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 )
 
 // loadConnections reads and unseals saved connections from disk.
 func (c *Store) loadConnections() {
-	data, err := os.ReadFile(c.connFile)
+	conns, ok, err := readJSONFile[ConnConfig](c.connFile)
 	if err != nil {
+		log.Printf("Failed to load connections: %v", err)
 		return
 	}
-	var conns []ConnConfig
-	if err := json.Unmarshal(data, &conns); err != nil {
-		log.Printf("Failed to load connections: %v", err)
+	if !ok {
 		return
 	}
 	needsSealing := false
@@ -32,6 +30,7 @@ func (c *Store) loadConnections() {
 		conns[i].Password = pw
 	}
 	c.saved = conns
+	c.connObserved = append([]ConnConfig(nil), conns...)
 	if needsSealing {
 		c.persist()
 	}
@@ -40,8 +39,18 @@ func (c *Store) loadConnections() {
 
 // persist seals passwords and writes saved connections to disk.
 func (c *Store) persist() {
+	if c.connFile == "" {
+		return // no state directory configured (tests build bare Stores)
+	}
+	c.mu.Lock()
 	sealed := make([]ConnConfig, len(c.saved))
 	copy(sealed, c.saved)
+	observed := make(map[string]bool, len(c.connObserved))
+	for _, cfg := range c.connObserved {
+		observed[connKey(cfg)] = true
+	}
+	c.mu.Unlock()
+
 	for i := range sealed {
 		pw, err := protectSecret(sealed[i].Password)
 		if err != nil {
@@ -50,21 +59,57 @@ func (c *Store) persist() {
 		}
 		sealed[i].Password = pw
 	}
+
+	// The parent client shares this file. Fold in the connections it saved
+	// since we last saw the file, so one client adding a connection no longer
+	// erases the other's. Entries this process already observed are owned by
+	// memory: their absence here is this save's deletion, not someone else's
+	// write, so they are not resurrected.
+	var adopt []ConnConfig
+	if disk, ok, err := readJSONFile[ConnConfig](c.connFile); err == nil && ok {
+		known := make(map[string]bool, len(sealed))
+		for _, cfg := range sealed {
+			known[connKey(cfg)] = true
+		}
+		for _, cfg := range disk {
+			key := connKey(cfg)
+			if known[key] || observed[key] {
+				continue
+			}
+			known[key] = true
+			sealed = append(sealed, cfg)
+			// Adopt the connection into memory too, so the next save treats
+			// it as this process's own instead of dropping it again. As at
+			// load time, a password that cannot be opened here (another
+			// Windows account sealed it) is left empty for the user to retype.
+			if pw, err := unprotectSecret(cfg.Password); err == nil {
+				cfg.Password = pw
+			} else {
+				log.Printf("Connection %s: %v", cfg.ID, err)
+				cfg.Password = ""
+			}
+			adopt = append(adopt, cfg)
+		}
+	} else if err != nil {
+		log.Printf("Failed to load connections for merging: %v", err)
+	}
+
 	data, err := json.MarshalIndent(sealed, "", "  ")
 	if err != nil {
 		log.Printf("Failed to serialize connections: %v", err)
 		return
 	}
-	if err := os.WriteFile(c.connFile, data, 0600); err != nil {
+	if err := writeFileAtomic(c.connFile, data); err != nil {
 		log.Printf("Failed to write connections file: %v", err)
 		return
 	}
-	// WriteFile's mode only applies when it creates the file, so a
-	// connections.json that another tool left world-readable keeps that mode
-	// unless it is set again - the one protection a plain-text password has.
-	if err := os.Chmod(c.connFile, 0600); err != nil {
-		log.Printf("Failed to tighten permissions on %s: %v", c.connFile, err)
-	}
+	// The temp file behind writeFileAtomic is created 0600, which also
+	// tightens the mode of a connections.json another tool left world-readable
+	// - the one protection a plain-text password has on non-Windows builds.
+	c.mu.Lock()
+	c.saved = append(c.saved, adopt...)
+	c.connObserved = append([]ConnConfig(nil), sealed...)
+	c.mu.Unlock()
 }
 
 // nextConnSeq returns one past the highest "c<n>" id in use. Seeding from

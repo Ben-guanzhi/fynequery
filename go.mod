@@ -57,3 +57,7 @@ require (
 	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+require tableprosql v0.0.0
+
+replace tableprosql => ../tableprosql

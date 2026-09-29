@@ -160,11 +160,15 @@ func TestKeyDialogDocumentsEveryBinding(t *testing.T) {
 		t.Fatalf("run action documented %d times, want 1", n)
 	}
 
-	// One line per documented combo plus the two canvas-level combos written by
-	// hand (Ctrl+C, and the search box's Enter / Shift+Enter). The dialog is the
-	// only place the keys are still spelled out, so a stale or doubled line is a
-	// real defect, not cosmetics.
-	if want := len(documented) + 2; len(c.keyDocs) != want {
+	// One line per documented combo plus the combos written by hand: Ctrl+C
+	// (canvas-level only), the search box's Enter / Shift+Enter, and the
+	// Ctrl+1…9 tab run, which nine table entries share instead of documenting
+	// nine near-identical lines. The dialog is the only place the keys are still
+	// spelled out, so a stale or missing line is a real defect.
+	if want := len(documented) + 3; len(c.keyDocs) != want {
 		t.Fatalf("dialog has %d lines, want %d: %q", len(c.keyDocs), want, c.keyDocs)
+	}
+	if !strings.Contains(text, "1 … 9") {
+		t.Fatalf("the tab-number run is not documented: %q", text)
 	}
 }

@@ -92,6 +92,12 @@ type Store struct {
 	history     []HistoryEntry
 	historySeq  int64
 	historyFile string
+	// histObserved is the history file as this process last read or wrote it;
+	// mergeHistoryLocked folds in only what other clients added since then.
+	histObserved []HistoryEntry
+	// connObserved is the connections file as this process last read or wrote
+	// it; persist folds in only what other clients added since then.
+	connObserved []ConnConfig
 	// historyDirty marks entries changed but not yet on disk; historyFlushed is
 	// when they last were, which is what the write delay is measured from.
 	historyDirty   bool

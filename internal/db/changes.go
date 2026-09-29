@@ -1,6 +1,8 @@
 package db
 
 import (
+	"tableprosql"
+
 	"database/sql"
 	"fmt"
 	"math"
@@ -149,29 +151,16 @@ func TableName(dbType, database, schema, table string) (string, error) {
 }
 
 // DefaultSchema fills the engine's default table namespace for qualified
-// names; the per-engine answers live on the dialect (dialect.go).
+// names; the per-engine answers live in the shared SQL text package.
 func DefaultSchema(dbType, schema string) string {
-	d, err := dialectFor(dbType)
-	if err != nil {
-		return schema
-	}
-	return d.tableSchema(schema)
+	return tableprosql.DefaultTableSchema(dbType, schema)
 }
 
-var numericTypes = map[string]bool{
-	"int": true, "integer": true, "int2": true, "int4": true, "int8": true,
-	"tinyint": true, "smallint": true, "mediumint": true, "bigint": true,
-	"serial": true, "bigserial": true, "smallserial": true,
-	"decimal": true, "dec": true, "numeric": true, "fixed": true,
-	"float": true, "float4": true, "float8": true, "double": true,
-	"double precision": true, "real": true, "money": true, "smallmoney": true,
-	"number": true, "binary_float": true, "binary_double": true, "year": true,
-}
-
+// isNumericColumn keeps the grid's historical name; the type knowledge lives
+// in the shared SQL text package, so the Fyne client, the root client and the
+// web filter bar all answer "does this column hold numbers" the same way.
 func isNumericColumn(colType string) bool {
-	base := strings.ToLower(strings.TrimSpace(strings.Split(colType, "(")[0]))
-	base = strings.TrimSuffix(base, " unsigned")
-	return numericTypes[base]
+	return tableprosql.IsNumericColumnType(colType)
 }
 
 func numberLiteral(value float64) string {

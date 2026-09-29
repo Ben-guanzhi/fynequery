@@ -1,6 +1,8 @@
 package db
 
 import (
+	"tableprosql"
+
 	"context"
 	"fmt"
 	"strings"
@@ -23,46 +25,33 @@ type ForeignKeyInfo struct {
 	OnUpdate   string
 }
 
-type fkRow struct {
-	name      string
-	column    string
-	refSchema string
-	refTable  string
-	refColumn string
-	onDelete  string
-	onUpdate  string
-}
+// The flat FK row is shared as tableprosql.FKRow; the catalog readers in
+// dialect.go scan into it and aggregateForeignKeys folds it into ForeignKeyInfo.
 
-func aggregateForeignKeys(rows []fkRow) []ForeignKeyInfo {
+func aggregateForeignKeys(rows []tableprosql.FKRow) []ForeignKeyInfo {
 	foreignKeys := []ForeignKeyInfo{}
 	byName := map[string]int{}
 	for _, row := range rows {
-		i, ok := byName[row.name]
+		i, ok := byName[row.Name]
 		if !ok {
-			byName[row.name] = len(foreignKeys)
+			byName[row.Name] = len(foreignKeys)
 			foreignKeys = append(foreignKeys, ForeignKeyInfo{
-				Name:      row.name,
-				RefSchema: row.refSchema,
-				RefTable:  row.refTable,
-				OnDelete:  row.onDelete,
-				OnUpdate:  row.onUpdate,
+				Name:      row.Name,
+				RefSchema: row.RefSchema,
+				RefTable:  row.RefTable,
+				OnDelete:  row.OnDelete,
+				OnUpdate:  row.OnUpdate,
 			})
 			i = len(foreignKeys) - 1
 		}
-		foreignKeys[i].Columns = append(foreignKeys[i].Columns, row.column)
-		foreignKeys[i].RefColumns = append(foreignKeys[i].RefColumns, row.refColumn)
+		foreignKeys[i].Columns = append(foreignKeys[i].Columns, row.Column)
+		foreignKeys[i].RefColumns = append(foreignKeys[i].RefColumns, row.RefColumn)
 	}
 	for i := range foreignKeys {
-		foreignKeys[i].OnDelete = referenceAction(foreignKeys[i].OnDelete)
-		foreignKeys[i].OnUpdate = referenceAction(foreignKeys[i].OnUpdate)
+		foreignKeys[i].OnDelete = tableprosql.ReferenceAction(foreignKeys[i].OnDelete)
+		foreignKeys[i].OnUpdate = tableprosql.ReferenceAction(foreignKeys[i].OnUpdate)
 	}
 	return foreignKeys
-}
-
-// referenceAction renders a catalog action ("no_action", "CASCADE", "RESTRICT")
-// the way it is written in DDL.
-func referenceAction(raw string) string {
-	return strings.ReplaceAll(strings.ToUpper(strings.TrimSpace(raw)), "_", " ")
 }
 
 func oraLiteral(value string) string {
@@ -204,26 +193,11 @@ func fkValuesQuery(dbType, name, refColumn, labelColumn string, limit int) (stri
 	return d.fkValuesSQL(name, refColumn, labelColumn, limit)
 }
 
-// fkValuesQueryLimit splices the engine's row limiter into the shared shape.
-// Ordering on the key is what makes consecutive reads agree, and DISTINCT only
-// allows it because the key is in the select list.
-func fkValuesQueryLimit(dbType, name, refColumn, labelColumn string, limit int, rowLimit string) (string, error) {
-	if limit <= 0 {
-		return "", fmt.Errorf("invalid limit %d", limit)
-	}
-	key, err := quoteIdent(dbType, refColumn)
-	if err != nil {
-		return "", err
-	}
-	selected := key
-	if labelColumn != "" {
-		label, err := quoteIdent(dbType, labelColumn)
-		if err != nil {
-			return "", err
-		}
-		selected += ", " + label
-	}
-	return fmt.Sprintf("SELECT DISTINCT %s FROM %s ORDER BY %s "+rowLimit, selected, name, key, limit), nil
+// fkValuesQueryLimit renders the candidate-keys query; the shapes live in the
+// shared SQL text package. Ordering on the key is what makes consecutive reads
+// agree, and DISTINCT only allows it because the key is in the select list.
+func fkValuesQueryLimit(dbType, name, refColumn, labelColumn string, limit int, _ string) (string, error) {
+	return tableprosql.FKValuesQuery(dbType, name, refColumn, labelColumn, limit)
 }
 
 // candidateText renders a key the way the grid shows it, so the text picked from

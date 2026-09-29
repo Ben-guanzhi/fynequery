@@ -46,7 +46,8 @@ func TestShortcutsClaimedByEveryEntry(t *testing.T) {
 		{"tree filter", c.tree.filterEntry},
 		{"history filter", c.hist.filterEntry},
 	}
-	keys := []fyne.KeyName{fyne.KeyP, fyne.KeyN, fyne.KeyReturn, fyne.KeyEnter, fyne.KeyO, fyne.KeyS}
+	keys := []fyne.KeyName{fyne.KeyP, fyne.KeyN, fyne.KeyW, fyne.KeyReturn, fyne.KeyEnter, fyne.KeyO, fyne.KeyS,
+		fyne.Key1, fyne.Key2, fyne.Key3, fyne.Key4, fyne.Key5, fyne.Key6, fyne.Key7, fyne.Key8, fyne.Key9}
 	mods := []fyne.KeyModifier{fyne.KeyModifierControl, fyne.KeyModifierSuper}
 
 	for _, tg := range targets {

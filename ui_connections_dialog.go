@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -25,8 +26,14 @@ func (c *Client) showConnDialog(edit *db.ConnConfig) {
 	save := func() {
 		cfg := f.config()
 		cfg.Options = map[string]string{}
+		refilter := false
 		if edit != nil {
 			cfg.ID = edit.ID
+			// A filter only shows up in the navigator, so reloading the tree is what
+			// separates "applies as soon as you save" from a change that looks inert
+			// until the next reconnect. Other edits leave the tree alone - fixing a
+			// typo in a name should not collapse one the user carefully expanded.
+			refilter = filtersDiffer(edit.DatabaseFilter, cfg.DatabaseFilter) && c.store.ConnectionStatus(cfg.ID)
 			if err := c.store.UpdateConnection(cfg); err != nil {
 				dialog.ShowError(err, c.win)
 				return
@@ -35,6 +42,10 @@ func (c *Client) showConnDialog(edit *db.ConnConfig) {
 			c.store.AddConnection(cfg)
 		}
 		c.refreshConnections()
+		if refilter {
+			c.refreshSchema()
+			c.dbSelRefresh()
+		}
 		if d != nil {
 			d.Hide()
 		}
@@ -48,25 +59,52 @@ func (c *Client) showConnDialog(edit *db.ConnConfig) {
 	testBtn := widget.NewButtonWithIcon("测试", theme.MailComposeIcon(), test)
 	buttons := container.NewHBox(testBtn, layout.NewSpacer(), saveBtn)
 
-	// On a platform that cannot seal a password, the form says so rather than
-	// letting the user assume 保存 encrypts it.
-	var bottom fyne.CanvasObject = buttons
-	if note := secretStorageNote(db.SecretsSealed()); note != "" {
-		label := widget.NewLabel(note)
-		label.Wrapping = fyne.TextWrapWord
-		label.Importance = widget.HighImportance
-		bottom = container.NewVBox(label, buttons)
-	}
-
+	// What the form cannot show by itself gets said out loud at the bottom.
 	title := "新建连接"
 	if edit != nil {
 		title = "编辑连接"
 	}
-	content := container.NewBorder(nil, bottom, nil, nil, f.form())
+	content := connDialogContent(f, connNotes(db.SecretsSealed()), buttons)
 	d = dialog.NewCustom(title, "取消", content, c.win)
-	d.Resize(fyne.NewSize(460, 440))
+	d.Resize(connDialogSize)
 	d.Show()
 }
+
+// connDialogContent stacks the form over its notes and button row. It is a
+// function rather than a few inline lines so the size assertion in
+// TestConnDialogShowsAll measures the object the dialog actually shows.
+func connDialogContent(f *connFields, notes []fyne.CanvasObject, buttons fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewBorder(nil, container.NewVBox(append(notes, buttons)...), nil, nil, f.form())
+}
+
+// connDialogSize is the create/edit dialog's opening size. A custom dialog does
+// not grow to its content, so this number has to clear the form plus the notes
+// and buttons stacked under it - TestConnDialogShowsAll keeps it honest.
+var connDialogSize = fyne.NewSize(470, 600)
+
+// connNotes lists what the form cannot show by itself: a platform that cannot
+// seal a password must not let the user assume 保存 encrypts it, and the
+// filter's mask syntax is not guessable.
+func connNotes(sealed bool) []fyne.CanvasObject {
+	notes := []fyne.CanvasObject{}
+	if note := secretStorageNote(sealed); note != "" {
+		notes = append(notes, noteLabel(note))
+	}
+	return append(notes, noteLabel(filterNote))
+}
+
+// noteLabel is one of the connection dialog's word-wrapped warnings.
+func noteLabel(text string) *widget.Label {
+	l := widget.NewLabel(text)
+	l.Wrapping = fyne.TextWrapWord
+	l.Importance = widget.HighImportance
+	return l
+}
+
+// filterNote is the one place the mask vocabulary is spelled out for the user.
+const filterNote = "库过滤：每行（或逗号分隔）一个模式，% 和 * 匹配任意串、_ 匹配单个字符、不分大小写；" +
+	"排除优先于包含，包含留空＝显示所有没被排除的库，两栏都空＝显示全部。" +
+	"过滤只影响左侧结构树，SQL 仍然打得到整台服务器；SQLite 只有一个库，这项无效。"
 
 // connFields bundles the create/edit form's controls. It is passed around by
 // pointer because the engine-switch and 加密 closures mutate sslStored, so the
@@ -74,6 +112,9 @@ func (c *Client) showConnDialog(edit *db.ConnConfig) {
 type connFields struct {
 	nameE, hostE, portE, userE, passE, dbE *widget.Entry
 	typeSel, sslSel                        *widget.Select
+	// includeE and excludeE hold the navigator's database filter, one pattern per
+	// line; they are disabled for SQLite, whose single database cannot be hidden.
+	includeE, excludeE *widget.Entry
 	// filePicker opens an existing database file; it only shows for SQLite.
 	filePicker *widget.Button
 	// sslStored is the mode string the 加密 dropdown currently stands for.
@@ -95,7 +136,16 @@ func (c *Client) newConnFields(edit *db.ConnConfig) *connFields {
 		// vocabulary, and offering a mode the driver ignores is how a connection
 		// ends up unencrypted while the form says otherwise.
 		sslSel: widget.NewSelect(nil, nil),
+		// Two multi-line boxes rather than a pattern-list widget: the lists are
+		// short, they round-trip to one line per pattern, and a box you can paste
+		// into beats clicking an Add button once per database.
+		includeE: widget.NewMultiLineEntry(),
+		excludeE: widget.NewMultiLineEntry(),
 	}
+	f.includeE.PlaceHolder = "只显示这些库，如 APP*  /  *_env"
+	f.excludeE.PlaceHolder = "隐藏这些库，如 tempdb  /  *_backup"
+	f.includeE.SetMinRowsVisible(filterRows)
+	f.excludeE.SetMinRowsVisible(filterRows)
 	f.filePicker = widget.NewButtonWithIcon("", theme.FolderOpenIcon(), func() {
 		c.pickDatabaseFile(f.dbE)
 	})
@@ -115,6 +165,8 @@ func (c *Client) newConnFields(edit *db.ConnConfig) *connFields {
 		f.userE.SetText(edit.Username)
 		f.passE.SetText(edit.Password)
 		f.dbE.SetText(edit.Database)
+		f.includeE.SetText(renderPatterns(edit.DatabaseFilter.Include))
+		f.excludeE.SetText(renderPatterns(edit.DatabaseFilter.Exclude))
 		f.applyEngineSSL(edit.SSLMode)
 	} else {
 		f.typeSel.SetSelected("MySQL")
@@ -146,8 +198,11 @@ func (f *connFields) form() *widget.Form {
 		widget.NewFormItem("端口", f.portE),
 		widget.NewFormItem("用户名", f.userE),
 		widget.NewFormItem("密码", f.passE),
+
 		widget.NewFormItem("数据库", dbRow),
 		widget.NewFormItem("加密", f.sslSel),
+		widget.NewFormItem("库过滤(包含)", f.includeE),
+		widget.NewFormItem("库过滤(排除)", f.excludeE),
 	)
 }
 
@@ -164,13 +219,23 @@ func (f *connFields) applyEngineSSL(carry string) {
 	f.sslStored = carry
 }
 
-// updatePicker shows the file picker only while the engine reads a file.
+// updatePicker adjusts the rows whose meaning depends on the engine: the file
+// picker only exists while one is being read, and a filter has nothing to hide
+// for SQLite, whose sole database is the file itself.
 func (f *connFields) updatePicker() {
-	if engineType(f.typeSel.Selected) == db.DbTypeSQLite {
+	sqlite := engineType(f.typeSel.Selected) == db.DbTypeSQLite
+	if sqlite {
 		f.filePicker.Show()
-		return
+	} else {
+		f.filePicker.Hide()
 	}
-	f.filePicker.Hide()
+	for _, e := range []*widget.Entry{f.includeE, f.excludeE} {
+		if sqlite {
+			e.Disable()
+		} else {
+			e.Enable()
+		}
+	}
 }
 
 // config reads the form controls into a db.ConnConfig.
@@ -188,11 +253,49 @@ func (f *connFields) config() db.ConnConfig {
 		// The dropdown shows labels; the connection stores the mode string
 		// each engine's driver expects.
 		SSLMode: sslValueFor(sslChoicesFor(engine), f.sslSel.Selected),
+		// The two boxes are text; the config keeps a list per side.
+		DatabaseFilter: db.DatabaseFilter{
+			Include: parsePatterns(f.includeE.Text),
+			Exclude: parsePatterns(f.excludeE.Text),
+		},
 	}
 	if cfg.Name == "" {
 		cfg.Name = fmt.Sprintf("%s@%s", cfg.Username, cfg.Host)
 	}
 	return cfg
+}
+
+// filterRows is how tall the two filter boxes stand in the form. Two lines is
+// enough to read back a short list without turning the dialog into a scroll.
+const filterRows = 2
+
+// parsePatterns reads a filter box into the patterns it lists. A line break or a
+// comma separates two patterns - people type both, and a comma cannot appear in
+// the kind of name these masks are written for. Blanks are dropped and the order
+// typed is kept, so the box reads back the same way it was written.
+func parsePatterns(text string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range strings.FieldsFunc(text, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ','
+	}) {
+		if p = strings.TrimSpace(p); p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// renderPatterns is parsePatterns' inverse: one pattern per line.
+func renderPatterns(list []string) string {
+	return strings.Join(list, "\n")
+}
+
+// filtersDiffer answers whether a saved connection's visible databases change.
+func filtersDiffer(a, b db.DatabaseFilter) bool {
+	return renderPatterns(a.Include) != renderPatterns(b.Include) ||
+		renderPatterns(a.Exclude) != renderPatterns(b.Exclude)
 }
 
 // defaultPortFor answers the port an engine listens on by default. SQLite has

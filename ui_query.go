@@ -363,14 +363,13 @@ func (c *Client) querySession() (connID, database string, pageSize int) {
 	return c.currentID, c.resolveDB(), c.page.size
 }
 
-// runCurrent evaluates the editor text: a single statement runs directly, a
-// multi-statement script runs in order and stops at the first failure, with
-// every statement recorded in the history. While 分页浏览 is on and the editor
-// holds one pageable SELECT, that statement runs as page 1 of the chosen row
-// window instead of the 行数上限-capped whole result. The query executes on a
-// background goroutine so the window stays responsive; a cancel button aborts
-// it, and the result is marshalled back to the UI thread before the grid
-// updates.
+// runCurrent checks the session and the editor text, then evaluates it: a
+// single statement runs directly, a multi-statement script runs in order and
+// stops at the first failure, with every statement recorded in the history.
+// While 分页浏览 is on and the editor holds one pageable SELECT, that statement
+// runs as page 1 of the chosen row window instead of the 行数上限-capped whole
+// result. Pending grid changes are confirmed away first; the execution itself
+// lives in runStatements.
 func (c *Client) runCurrent() {
 	if c.currentID == "" {
 		dialog.ShowInformation("未连接", "请先在左侧选择一个连接并点击「连接」。", c.win)
@@ -389,6 +388,28 @@ func (c *Client) runCurrent() {
 		c.setStatus("没有可执行的语句（只有注释或空白）")
 		return
 	}
+	// A new result replaces the grid and setEditContext resets the edit queue
+	// along with it, so unsaved cell changes would vanish without a trace.
+	// Paging and sorting already refuse to move while changes are pending;
+	// execution is the one path that could still drop them, so it asks first.
+	if c.grid.edits.any() {
+		dialog.ShowConfirm("有未保存的更改",
+			"结果表上有未保存的更改，执行新查询会把它们丢弃。仍要执行吗？",
+			func(ok bool) {
+				if ok {
+					c.runStatements(stmts)
+				}
+			}, c.win)
+		return
+	}
+	c.runStatements(stmts)
+}
+
+// runStatements executes the parsed statements and renders what they end with.
+// The query runs on a background goroutine so the window stays responsive; a
+// cancel button aborts it, and the result is marshalled back to the UI thread
+// before the grid updates.
+func (c *Client) runStatements(stmts []string) {
 	connID, dbName, pageSize := c.querySession()
 	conn, err := c.store.OpenConn(connID)
 	if err != nil {

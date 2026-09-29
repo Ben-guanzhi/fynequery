@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"tableprosql"
 )
 
 func isSelectQuery(query string) bool {
@@ -18,36 +20,14 @@ func isSelectQuery(query string) bool {
 		strings.HasPrefix(q, "EXPLAIN")
 }
 
-// ownLimitRe spots SQL that already caps its own rows.
+// ownLimitRe spots SQL that already caps its own rows; paging's pageability
+// guard uses the same notion of "capped" as the shared RowLimit.
 var ownLimitRe = regexp.MustCompile(`(?i)\b(top|limit|offset|fetch|rownum)\b`)
 
 // withRowLimit caps a plain SELECT (or a WITH ... SELECT CTE) so grids stay
-// responsive.
+// responsive; the shapes live in the shared SQL text package.
 func withRowLimit(query, dbType string, limit int) string {
-	if limit <= 0 {
-		return query
-	}
-	trimmed := strings.TrimRight(strings.TrimSpace(query), ";")
-	upper := strings.ToUpper(trimmed)
-	if !strings.HasPrefix(upper, "SELECT") && !strings.HasPrefix(upper, "WITH") {
-		return query
-	}
-	if ownLimitRe.MatchString(trimmed) {
-		return query
-	}
-	switch dbType {
-	case DbTypeSQLServer:
-		// TOP can only be injected into a bare SELECT; a CTE keeps whatever
-		// limit it declared itself.
-		if !strings.HasPrefix(upper, "SELECT") {
-			return query
-		}
-		return fmt.Sprintf("SELECT TOP (%d)%s", limit, trimmed[len("SELECT"):])
-	case DbTypeOracle: // ROWNUM wrap is valid around a CTE too
-		return fmt.Sprintf("SELECT * FROM (%s) WHERE ROWNUM <= %d", trimmed, limit)
-	default: // mysql, postgresql, sqlite — trailing LIMIT binds the whole statement
-		return fmt.Sprintf("%s LIMIT %d", trimmed, limit)
-	}
+	return tableprosql.RowLimit(dbType, query, limit)
 }
 
 // runSelect scans a resultset into a QueryResult. A cancelled context aborts
@@ -180,31 +160,14 @@ func (c *Store) OpenConn(id string) (*Conn, error) {
 	return conn, nil
 }
 
-// quoteIdent safely quotes an identifier for each engine.
+// quoteIdent safely quotes an identifier for each engine; the shapes live in
+// the shared SQL text package.
 func quoteIdent(dbType, name string) (string, error) {
-	if name == "" || len(name) > 256 || strings.ContainsAny(name, "\x00\r\n") {
-		return "", fmt.Errorf("invalid identifier: %q", name)
-	}
-	switch dbType {
-	case DbTypeMySQL:
-		return "`" + strings.ReplaceAll(name, "`", "``") + "`", nil
-	case DbTypeSQLServer:
-		return "[" + strings.ReplaceAll(name, "]", "]]") + "]", nil
-	default:
-		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`, nil
-	}
+	return tableprosql.QuoteIdent(dbType, name)
 }
 
 func QualifiedName(dbType string, parts ...string) (string, error) {
-	quoted := make([]string, 0, len(parts))
-	for _, part := range parts {
-		q, err := quoteIdent(dbType, part)
-		if err != nil {
-			return "", err
-		}
-		quoted = append(quoted, q)
-	}
-	return strings.Join(quoted, "."), nil
+	return tableprosql.QualifiedName(dbType, parts...)
 }
 
 func sqlLiteral(value string) string {

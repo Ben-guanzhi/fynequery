@@ -1,6 +1,8 @@
 package db
 
 import (
+	"tableprosql"
+
 	"database/sql"
 	"fmt"
 	"strings"
@@ -193,10 +195,10 @@ func scanSQLiteColumn(r *sql.Rows) (ColumnInfo, error) {
 	return col, nil
 }
 
-func scanFkRow(r *sql.Rows) (fkRow, error) {
-	var row fkRow
-	err := r.Scan(&row.name, &row.column, &row.refSchema, &row.refTable, &row.refColumn,
-		&row.onDelete, &row.onUpdate)
+func scanFkRow(r *sql.Rows) (tableprosql.FKRow, error) {
+	var row tableprosql.FKRow
+	err := r.Scan(&row.Name, &row.Column, &row.RefSchema, &row.RefTable, &row.RefColumn,
+		&row.OnDelete, &row.OnUpdate)
 	return row, err
 }
 
@@ -472,16 +474,16 @@ var sqliteDialect = &dialect{
 			return nil, err
 		}
 		rows, err := collectRows(conn.DB, fmt.Sprintf("PRAGMA foreign_key_list(%s)", name), nil,
-			func(r *sql.Rows) (fkRow, error) {
+			func(r *sql.Rows) (tableprosql.FKRow, error) {
 				var id, seq int
-				var row fkRow
+				var row tableprosql.FKRow
 				var onUpdate, onDelete, match string
-				if err := r.Scan(&id, &seq, &row.refTable, &row.column, &row.refColumn,
+				if err := r.Scan(&id, &seq, &row.RefTable, &row.Column, &row.RefColumn,
 					&onUpdate, &onDelete, &match); err != nil {
 					return row, err
 				}
-				row.name = fmt.Sprintf("fk_%d", id)
-				row.onUpdate, row.onDelete = onUpdate, onDelete
+				row.Name = fmt.Sprintf("fk_%d", id)
+				row.OnUpdate, row.OnDelete = onUpdate, onDelete
 				return row, nil
 			})
 		if err != nil {

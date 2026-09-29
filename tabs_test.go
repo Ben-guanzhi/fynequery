@@ -246,3 +246,56 @@ func TestNewTableTab(t *testing.T) {
 		t.Fatalf("currentDB = %q, want the node's database %q", c.currentDB, dbFile)
 	}
 }
+
+// TestSelectTabByNumber drives what Ctrl+1…9 calls: switching by index
+// re-points the active editor, and an index past the last tab leaves the
+// selection alone rather than wrapping onto a tab nobody asked for.
+func TestSelectTabByNumber(t *testing.T) {
+	a := test.NewApp()
+	w := a.NewWindow("t")
+	c := newTestClient(a, w)
+	w.SetContent(c.buildQueryView())
+
+	c.addQueryTab()
+	c.tabs.items[0].entry.setTextSilently("SELECT 1")
+	c.tabs.items[1].entry.setTextSilently("SELECT 2")
+
+	c.selectTab(1)
+	if c.tabs.entry != c.tabs.items[1].entry {
+		t.Fatalf("selectTab(1) left the alias on %q, want the second tab", c.tabs.entry.Text)
+	}
+	c.selectTab(9)
+	if c.tabs.entry != c.tabs.items[1].entry {
+		t.Fatal("an out-of-range index changed the active tab")
+	}
+	if len(c.tabs.items) != 2 {
+		t.Fatalf("tabs = %d, want the 2 built", len(c.tabs.items))
+	}
+}
+
+// TestRunCurrentAsksBeforeDiscardingGridEdits pins the guard: rendering a new
+// result resets the edit queue (setEditContext), so executing while changes are
+// pending has to stop and ask instead of overwriting the grid.
+func TestRunCurrentAsksBeforeDiscardingGridEdits(t *testing.T) {
+	c := newPagingClient(t, 3, false, "100")
+	c.tabs.entry.setTextSilently("SELECT id, name FROM items")
+	c.runCurrent()
+	ran := len(c.store.History())
+	if ran == 0 {
+		t.Fatal("the first run recorded no history")
+	}
+
+	c.grid.edits.setUpdate(0, "name", "edited")
+	overlays := len(c.win.Canvas().Overlays().List())
+	c.runCurrent()
+
+	if len(c.store.History()) != ran {
+		t.Fatalf("history grew to %d while changes were pending", len(c.store.History()))
+	}
+	if len(c.win.Canvas().Overlays().List()) <= overlays {
+		t.Fatal("runCurrent overwrote the pending edits without asking")
+	}
+	if !c.grid.edits.any() {
+		t.Fatal("the edit queue was reset even though nothing executed")
+	}
+}

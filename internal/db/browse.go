@@ -23,14 +23,32 @@ func (c *Store) Databases(id string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	filter := conn.Config.DatabaseFilter
+	return c.filterNames(id, names), nil
+}
+
+// filterNames hides the databases the saved filter rejects.
+//
+// The filter comes back from the saved config rather than from the live
+// connection: editing a connection rewrites the saved copy while the live Conn
+// keeps the config it opened with (its fields are read without a lock, so nobody
+// may change them underneath a running query). Reading the saved copy is what
+// makes a filter edit land on the next refresh instead of the next reconnect -
+// the same choice the parent app makes in savedDatabaseFilter.
+func (c *Store) filterNames(id string, names []string) []string {
+	cfg, ok := c.FindConnection(id)
+	if !ok {
+		out := make([]string, len(names))
+		copy(out, names)
+		return out
+	}
+	mask := cfg.DatabaseFilter
 	out := make([]string, 0, len(names))
 	for _, name := range names {
-		if filter.allows(name) {
+		if mask.allows(name) {
 			out = append(out, name)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // schemas lists schemas for engines that have them (PostgreSQL, SQL Server).

@@ -1,6 +1,8 @@
 package db
 
 import (
+	"tableprosql"
+
 	"context"
 	"fmt"
 	"strings"
@@ -38,11 +40,7 @@ func (o ObjectNames) next() (string, error) {
 // sqlstring renders a name for a place SQL expects text rather than an
 // identifier, which is what sp_rename does.
 func sqlstring(dbType, value string) string {
-	escaped := strings.ReplaceAll(value, "'", "''")
-	if dbType == DbTypeSQLServer {
-		return "N'" + escaped + "'"
-	}
-	return "'" + escaped + "'"
+	return tableprosql.QuotedLiteral(dbType, value)
 }
 
 // TableActionStatement renders one action against one object. schema is already
@@ -66,15 +64,7 @@ func TableActionStatement(o ObjectNames, action string) (string, error) {
 		if view {
 			return "", fmt.Errorf("视图没有数据可清空")
 		}
-		switch o.DbType {
-		case DbTypeMySQL, DbTypePostgres, DbTypeSQLServer, DbTypeOracle:
-			return "TRUNCATE TABLE " + current, nil
-		case DbTypeSQLite:
-			// SQLite has no TRUNCATE; deleting every row is what its own
-			// CLI does, and it keeps the sqlite_sequence counter alone.
-			return "DELETE FROM " + current, nil
-		}
-		return "", fmt.Errorf("unsupported type: %s", o.DbType)
+		return tableprosql.TruncateStatement(o.DbType, current)
 
 	case ActionRename:
 		if !isIdentifierLike(o.NewName) {
@@ -83,29 +73,17 @@ func TableActionStatement(o ObjectNames, action string) (string, error) {
 		if o.NewName == o.Table {
 			return "", fmt.Errorf("新名字和原来一样")
 		}
-		quotedNew, err := quoteIdent(o.DbType, o.NewName)
-		if err != nil {
-			return "", err
-		}
-		switch o.DbType {
-		case DbTypeMySQL:
+		next := ""
+		if o.DbType == DbTypeMySQL {
 			// MySQL's rename names both sides in full, so the table cannot
 			// drift into another database on the way.
-			next, err := o.next()
+			var err error
+			next, err = o.next()
 			if err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("RENAME TABLE %s TO %s", current, next), nil
-		case DbTypeSQLServer:
-			// sp_rename takes text, not identifiers: brackets in the string
-			// mean an escaped name rather than a quoted one.
-			return fmt.Sprintf("EXEC sp_rename %s, %s",
-				sqlstring(o.DbType, DefaultSchema(o.DbType, o.Schema)+"."+o.Table),
-				sqlstring(o.DbType, o.NewName)), nil
-		case DbTypePostgres, DbTypeOracle, DbTypeSQLite:
-			return fmt.Sprintf("ALTER TABLE %s RENAME TO %s", current, quotedNew), nil
 		}
-		return "", fmt.Errorf("unsupported type: %s", o.DbType)
+		return tableprosql.RenameStatement(o.DbType, current, next, o.Schema, o.Table, o.NewName)
 	}
 	return "", fmt.Errorf("unknown table action %q", action)
 }

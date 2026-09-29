@@ -290,6 +290,15 @@ func (c *Client) buildUI() fyne.CanvasObject {
 	// fyne.KeyReturn and the numpad Enter is fyne.KeyEnter, so both bind.
 	c.bindKey(fyne.KeyP, "快速打开：按表名片段搜表/视图", func() { c.showSearchDialog() })
 	c.bindKey(fyne.KeyN, "新建查询标签", func() { c.addQueryTab() })
+	c.bindKey(fyne.KeyW, "关闭当前查询标签", func() { c.closeActiveTab() })
+	// Ctrl+1…9 jumps between tabs; one doc line covers the whole run so the
+	// 快捷键 dialog stays short instead of listing nine near-identical rows.
+	for i, key := range []fyne.KeyName{fyne.Key1, fyne.Key2, fyne.Key3, fyne.Key4, fyne.Key5,
+		fyne.Key6, fyne.Key7, fyne.Key8, fyne.Key9} {
+		idx := i
+		c.bindKey(key, "", func() { c.selectTab(idx) })
+	}
+	c.docKey("Ctrl / Cmd + 1 … 9    切到第 1-9 个查询标签")
 	c.bindKey(fyne.KeyReturn, "执行编辑器中的 SQL", func() { c.runCurrent() })
 	c.bindKey(fyne.KeyEnter, "", func() { c.runCurrent() }) // same action, numpad Enter
 	c.bindKey(fyne.KeyO, "打开 .sql 脚本到当前标签", func() { c.showOpenScriptDialog() })
