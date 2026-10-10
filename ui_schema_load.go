@@ -80,7 +80,7 @@ func plainIdent(name string) string {
 // demand when their row is tapped.
 func (c *Client) refreshSchema() {
 	c.mu.Lock()
-	c.tree.nodes = map[string]*nodeData{treeRootUID: {kind: "root", label: "数据库"}}
+	c.tree.nodes = map[string]*nodeData{treeRootUID: {kind: "root", label: "数据库", lower: "数据库"}}
 	c.mu.Unlock()
 	c.tree.expanded = make(map[string]bool)
 	c.tree.selected = ""
@@ -89,7 +89,9 @@ func (c *Client) refreshSchema() {
 	id := c.selectedOrLive()
 	if id == "" || !c.store.ConnectionStatus(id) {
 		c.mu.Lock()
-		c.tree.nodes[treeRootUID].label = "未连接"
+		root := c.tree.nodes[treeRootUID]
+		root.label = "未连接"
+		root.lower = "未连接"
 		c.mu.Unlock()
 		c.rebuildSchemaRows()
 		return
@@ -99,7 +101,9 @@ func (c *Client) refreshSchema() {
 	dbs, err := c.store.Databases(id)
 	if err != nil {
 		c.mu.Lock()
-		c.tree.nodes[treeRootUID].label = "加载失败：" + err.Error()
+		root := c.tree.nodes[treeRootUID]
+		root.label = "加载失败：" + err.Error()
+		root.lower = strings.ToLower(root.label)
 		c.mu.Unlock()
 		c.rebuildSchemaRows()
 		return
@@ -109,10 +113,11 @@ func (c *Client) refreshSchema() {
 	root := c.tree.nodes[treeRootUID]
 	for _, dbName := range dbs {
 		dbUID := "db:" + dbName
-		c.tree.nodes[dbUID] = &nodeData{kind: "db", label: dbName, db: dbName, uid: dbUID}
+		c.tree.nodes[dbUID] = &nodeData{kind: "db", label: dbName, lower: strings.ToLower(dbName), db: dbName, uid: dbUID}
 		root.children = append(root.children, dbUID)
 	}
 	root.label = fmt.Sprintf("数据库 (%d)", len(dbs))
+	root.lower = strings.ToLower(root.label)
 	c.mu.Unlock()
 
 	// Open the connection's own database right away, all the way down to its
@@ -202,7 +207,7 @@ func (c *Client) attachSchemas(nd *nodeData, schemas []string) {
 	for _, sch := range schemas {
 		schUID := nd.uid + "|s:" + sch
 		c.mu.Lock()
-		c.tree.nodes[schUID] = &nodeData{kind: "schema", label: sch, db: nd.db, schema: sch, uid: schUID}
+		c.tree.nodes[schUID] = &nodeData{kind: "schema", label: sch, lower: strings.ToLower(sch), db: nd.db, schema: sch, uid: schUID}
 		nd.children = append(nd.children, schUID)
 		c.mu.Unlock()
 	}
@@ -217,6 +222,7 @@ func (c *Client) attachTables(nd *nodeData, tables []db.TableInfo) {
 		c.tree.nodes[uid] = &nodeData{
 			kind:   "empty",
 			label:  "（没有可见的表：登录可能无权限，或该库为空）",
+			lower:  "（没有可见的表：登录可能无权限，或该库为空）",
 			uid:    uid,
 			parent: nd.uid,
 		}
@@ -240,6 +246,7 @@ func (c *Client) attachTables(nd *nodeData, tables []db.TableInfo) {
 		c.tree.nodes[tUID] = &nodeData{
 			kind:   "table",
 			label:  label,
+			lower:  strings.ToLower(label),
 			db:     nd.db,
 			schema: tSchema,
 			name:   t.Name,
@@ -254,10 +261,12 @@ func (c *Client) attachTables(nd *nodeData, tables []db.TableInfo) {
 // children (a failed load produces none anyway).
 func (c *Client) addErrorNode(nd *nodeData, err error) {
 	uid := nd.uid + "|error"
+	label := "⚠ 加载失败：" + err.Error()
 	c.mu.Lock()
 	c.tree.nodes[uid] = &nodeData{
 		kind:   "error",
-		label:  "⚠ 加载失败：" + err.Error(),
+		label:  label,
+		lower:  strings.ToLower(label),
 		uid:    uid,
 		parent: nd.uid,
 	}

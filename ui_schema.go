@@ -136,7 +136,11 @@ func (c *Client) markFilteredSubtree(uid string, marks map[string]bool) bool {
 	if !ok {
 		return false
 	}
-	match := strings.Contains(strings.ToLower(nd.label), c.tree.term)
+	lower := nd.lower
+	if lower == "" {
+		lower = strings.ToLower(nd.label) // 防御：漏填 lower 时退化为旧行为
+	}
+	match := strings.Contains(lower, c.tree.term)
 	for _, child := range nd.children {
 		if c.markFilteredSubtree(child, marks) {
 			match = true

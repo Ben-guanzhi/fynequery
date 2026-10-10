@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"testing"
@@ -30,9 +30,10 @@ func TestSchemaRowsModel(t *testing.T) {
 	// hidden once there is content, matching the reference navigator.
 	root := c.tree.nodes[treeRootUID]
 	root.label = "数据库 (2)"
+	root.lower = "数据库 (2)"
 	root.children = []string{"db:a", "db:b"}
-	c.tree.nodes["db:a"] = &nodeData{kind: "db", label: "a", db: "a", uid: "db:a"}
-	c.tree.nodes["db:b"] = &nodeData{kind: "db", label: "b", db: "b", uid: "db:b"}
+	c.tree.nodes["db:a"] = &nodeData{kind: "db", label: "a", lower: "a", db: "a", uid: "db:a"}
+	c.tree.nodes["db:b"] = &nodeData{kind: "db", label: "b", lower: "b", db: "b", uid: "db:b"}
 	c.rebuildSchemaRows()
 	if got := len(c.tree.rows.Objects); got != 2 {
 		t.Fatalf("rows with 2 dbs = %d, want 2 (root hidden)", got)
@@ -40,7 +41,7 @@ func TestSchemaRowsModel(t *testing.T) {
 
 	c.tree.nodes["db:a"].loaded = true
 	c.tree.nodes["db:a"].children = []string{"db:a|t:ta"}
-	c.tree.nodes["db:a|t:ta"] = &nodeData{kind: "table", label: "ta", name: "ta", db: "a", uid: "db:a|t:ta"}
+	c.tree.nodes["db:a|t:ta"] = &nodeData{kind: "table", label: "ta", lower: "ta", name: "ta", db: "a", uid: "db:a|t:ta"}
 	c.tree.expanded["db:a"] = true
 	c.rebuildSchemaRows()
 	if got := len(c.tree.rows.Objects); got != 3 {
@@ -82,10 +83,10 @@ func TestBranchRowsCarryMenu(t *testing.T) {
 	test.NewApp()
 	c := &Client{store: db.NewStore(), tree: treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool)}}
 	c.buildSchemaView()
-	c.tree.nodes[treeRootUID] = &nodeData{kind: "root", label: "数据库", uid: treeRootUID}
-	c.tree.nodes["db:a"] = &nodeData{kind: "db", label: "a", db: "a", uid: "db:a"}
-	c.tree.nodes["db:a|s:pub"] = &nodeData{kind: "schema", label: "pub", db: "a", schema: "pub", uid: "db:a|s:pub"}
-	c.tree.nodes["root|error"] = &nodeData{kind: "error", label: "加载失败", uid: "root|error"}
+	c.tree.nodes[treeRootUID] = &nodeData{kind: "root", label: "数据库", lower: "数据库", uid: treeRootUID}
+	c.tree.nodes["db:a"] = &nodeData{kind: "db", label: "a", lower: "a", db: "a", uid: "db:a"}
+	c.tree.nodes["db:a|s:pub"] = &nodeData{kind: "schema", label: "pub", lower: "pub", db: "a", schema: "pub", uid: "db:a|s:pub"}
+	c.tree.nodes["root|error"] = &nodeData{kind: "error", label: "加载失败", lower: "加载失败", uid: "root|error"}
 
 	for _, uid := range []string{"db:a", "db:a|s:pub"} {
 		if _, ok := c.schemaRowWidget(c.tree.nodes[uid], 0).(*tapMenuRow); !ok {
@@ -104,14 +105,15 @@ func TestSchemaRowCacheReuse(t *testing.T) {
 	test.NewApp()
 	c := &Client{store: db.NewStore(), tree: treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool)}}
 	c.buildSchemaView()
-	c.tree.nodes[treeRootUID] = &nodeData{kind: "root", label: "数据库", uid: treeRootUID}
+	c.tree.nodes[treeRootUID] = &nodeData{kind: "root", label: "数据库", lower: "数据库", uid: treeRootUID}
 	root := c.tree.nodes[treeRootUID]
 	root.label = "数据库 (1)"
+	root.lower = "数据库 (1)"
 	root.children = []string{"db:a"}
-	c.tree.nodes["db:a"] = &nodeData{kind: "db", label: "a", db: "a", uid: "db:a"}
+	c.tree.nodes["db:a"] = &nodeData{kind: "db", label: "a", lower: "a", db: "a", uid: "db:a"}
 	c.tree.nodes["db:a"].loaded = true
 	c.tree.nodes["db:a"].children = []string{"db:a|t:ta"}
-	c.tree.nodes["db:a|t:ta"] = &nodeData{kind: "table", label: "ta", name: "ta", db: "a", uid: "db:a|t:ta"}
+	c.tree.nodes["db:a|t:ta"] = &nodeData{kind: "table", label: "ta", lower: "ta", name: "ta", db: "a", uid: "db:a|t:ta"}
 	c.tree.expanded["db:a"] = true
 	c.rebuildSchemaRows()
 
@@ -129,6 +131,7 @@ func TestSchemaRowCacheReuse(t *testing.T) {
 
 	c.tree.selected = ""
 	c.tree.nodes["db:a|t:ta"].label = "ta [table]"
+	c.tree.nodes["db:a|t:ta"].lower = "ta [table]"
 	c.rebuildSchemaRows()
 	if len(c.tree.rows.Objects) != 2 || c.tree.rows.Objects[1] == first[1] {
 		t.Fatal("relabeled node must render a new widget")

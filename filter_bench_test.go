@@ -13,21 +13,23 @@ import (
 // buildWideTree fills a root>db>8 schemas>250 tables tree (2009 nodes) and
 // returns the node count.
 func buildWideTree(c *Client, schemas, perSchema int) int {
-	root := &nodeData{kind: "root", label: "数据库", uid: treeRootUID}
+	root := &nodeData{kind: "root", label: "数据库", lower: "数据库", uid: treeRootUID}
 	c.tree.nodes[treeRootUID] = root
 	visited := 1
 	dbUID := "db:d"
 	root.children = append(root.children, dbUID)
-	c.tree.nodes[dbUID] = &nodeData{kind: "db", label: "d", db: "d", uid: dbUID}
+	c.tree.nodes[dbUID] = &nodeData{kind: "db", label: "d", lower: "d", db: "d", uid: dbUID}
 	visited++
 	for s := 0; s < schemas; s++ {
 		schUID := fmt.Sprintf("%s|s:s%d", dbUID, s)
 		c.tree.nodes[dbUID].children = append(c.tree.nodes[dbUID].children, schUID)
-		c.tree.nodes[schUID] = &nodeData{kind: "schema", label: fmt.Sprintf("s%d", s), db: "d", schema: fmt.Sprintf("s%d", s), uid: schUID}
+		schLabel := fmt.Sprintf("s%d", s)
+		c.tree.nodes[schUID] = &nodeData{kind: "schema", label: schLabel, lower: schLabel, db: "d", schema: schLabel, uid: schUID}
 		visited++
 		for t := 0; t < perSchema; t++ {
 			tUID := fmt.Sprintf("%s|t:tbl%d", schUID, t)
-			c.tree.nodes[tUID] = &nodeData{kind: "table", label: fmt.Sprintf("tbl%d", t), db: "d", schema: fmt.Sprintf("s%d", s), name: fmt.Sprintf("tbl%d", t), uid: tUID}
+			tblLabel := fmt.Sprintf("tbl%d", t)
+			c.tree.nodes[tUID] = &nodeData{kind: "table", label: tblLabel, lower: tblLabel, db: "d", schema: schLabel, name: tblLabel, uid: tUID}
 			c.tree.nodes[schUID].children = append(c.tree.nodes[schUID].children, tUID)
 			visited++
 		}

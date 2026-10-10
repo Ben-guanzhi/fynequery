@@ -220,6 +220,7 @@ const treeRootUID = "-"
 type nodeData struct {
 	kind             string // "root" | "db" | "schema" | "table"
 	label            string
+	lower            string // 预计算的小写标签，避免过滤时重复 ToLower（CLRS ch3 预处理）
 	db, schema, name string
 	uid              string
 	loaded           bool
