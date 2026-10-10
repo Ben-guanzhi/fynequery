@@ -117,10 +117,7 @@ func (c *Client) rebuildHistoryView() {
 	view := make([]db.HistoryEntry, 0, len(entries))
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
-		if c.hist.filter == "" ||
-			strings.Contains(strings.ToLower(e.SQL), c.hist.filter) ||
-			strings.Contains(strings.ToLower(e.Table), c.hist.filter) ||
-			strings.Contains(strings.ToLower(e.Database), c.hist.filter) {
+		if c.hist.filter == "" || e.MatchesFilter(c.hist.filter) {
 			view = append(view, e)
 		}
 	}

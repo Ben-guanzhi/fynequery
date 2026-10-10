@@ -20,6 +20,26 @@ type HistoryEntry struct {
 	Affected      int64   `json:"affectedRows"`
 	ExecutionTime float64 `json:"executionTime"`
 	Error         string  `json:"error,omitempty"`
+
+	// 过滤用小写缓存（json:"-" 不入盘）：加载/追加时各 ToLower 一次，
+	// 历史框每击键的过滤从「3×ToLower + 3×Contains 每记录」降为「3×Contains」（SICP ch3 记忆化）。
+	lowerSQL, lowerTable, lowerDatabase string
+}
+
+// fillLowerCache 填充过滤用小写缓存；每条记录只在加载/追加时调用一次。
+func (e *HistoryEntry) fillLowerCache() {
+	e.lowerSQL = strings.ToLower(e.SQL)
+	e.lowerTable = strings.ToLower(e.Table)
+	e.lowerDatabase = strings.ToLower(e.Database)
+}
+
+// MatchesFilter reports whether the entry matches the (already-lowercased)
+// filter across SQL/Table/Database, using the precomputed lowercase cache.
+// 未匹配的 ToLower 分配被摊到加载/追加一次（SICP ch3 记忆化）。
+func (e *HistoryEntry) MatchesFilter(lowerFilter string) bool {
+	return strings.Contains(e.lowerSQL, lowerFilter) ||
+		strings.Contains(e.lowerTable, lowerFilter) ||
+		strings.Contains(e.lowerDatabase, lowerFilter)
 }
 
 // historyLimit keeps the on-disk log bounded.
@@ -40,10 +60,12 @@ func (c *Store) loadHistory() {
 	}
 	c.history = entries
 	c.histObserved = append([]HistoryEntry(nil), entries...)
-	for _, e := range entries {
+	for i := range entries {
+		e := &entries[i]
 		if e.ID > c.historySeq {
 			c.historySeq = e.ID
 		}
+		e.fillLowerCache()
 	}
 	log.Printf("Loaded %d history entries from %s", len(entries), c.historyFile)
 }
@@ -70,6 +92,7 @@ func (c *Store) RecordStatement(connID, database, query string, res QueryResult)
 		Affected:      res.AffectedRows,
 		ExecutionTime: res.ExecutionTime,
 	}
+	entry.fillLowerCache()
 
 	c.mu.Lock()
 	c.historySeq++

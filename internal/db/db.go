@@ -156,10 +156,12 @@ func (c *Store) ReplaceHistory(entries []HistoryEntry) {
 	c.history = append([]HistoryEntry(nil), entries...)
 	c.historyDirty = true
 	var max int64
-	for _, e := range c.history {
+	for i := range c.history {
+		e := &c.history[i]
 		if e.ID > max {
 			max = e.ID
 		}
+		e.fillLowerCache()
 	}
 	c.historySeq = max
 }
