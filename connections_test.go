@@ -13,16 +13,18 @@ import (
 	"tablepro-fyne/internal/db"
 )
 
-// TestSecretStorageWarning pins the dialog's honesty about saved passwords: the
-// platform that seals secrets with a per-user key says nothing, the one that
-// cannot says so and names the risk instead of implying encryption.
+// TestSecretStorageWarning pins the dialog's honesty about saved passwords:
+// the data layer answers whether passwords are actually sealed — always on
+// Windows, probed from the system keyring elsewhere — and the note names the
+// clear-text risk exactly when they are not, never claiming encryption that
+// did not happen.
 func TestSecretStorageWarning(t *testing.T) {
-	// The data layer's answer must match the build tag it came from.
-	if got := db.SecretsSealed(); got != (runtime.GOOS == "windows") {
-		t.Fatalf("SecretsSealed() = %v on %s, want it to track the platform", got, runtime.GOOS)
+	// Windows seals with DPAPI unconditionally; a probe could never say false.
+	if runtime.GOOS == "windows" && !db.SecretsSealed() {
+		t.Fatal("Windows must report sealed passwords")
 	}
 	if note := secretStorageNote(true); note != "" {
-		t.Errorf("sealed platform should stay quiet, got %q", note)
+		t.Errorf("sealed platforms should stay quiet, got %q", note)
 	}
 	note := secretStorageNote(false)
 	if !strings.Contains(note, "明文") {

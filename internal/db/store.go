@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 )
 
 // loadConnections reads and unseals saved connections from disk.
@@ -19,7 +18,7 @@ func (c *Store) loadConnections() {
 	}
 	needsSealing := false
 	for i := range conns {
-		if conns[i].Password != "" && !strings.HasPrefix(conns[i].Password, secretPrefix) {
+		if conns[i].Password != "" && !isSealedValue(conns[i].Password) {
 			needsSealing = true
 		}
 		pw, err := unprotectSecret(conns[i].Password)
@@ -66,7 +65,11 @@ func (c *Store) persist() {
 	// memory: their absence here is this save's deletion, not someone else's
 	// write, so they are not resurrected.
 	var adopt []ConnConfig
-	if disk, ok, err := readJSONFile[ConnConfig](c.connFile); err == nil && ok {
+	disk, diskOK, diskErr := readJSONFile[ConnConfig](c.connFile)
+	if diskErr != nil {
+		log.Printf("Failed to load connections for merging: %v", diskErr)
+	}
+	if diskOK {
 		known := make(map[string]bool, len(sealed))
 		for _, cfg := range sealed {
 			known[connKey(cfg)] = true
@@ -80,8 +83,8 @@ func (c *Store) persist() {
 			sealed = append(sealed, cfg)
 			// Adopt the connection into memory too, so the next save treats
 			// it as this process's own instead of dropping it again. As at
-			// load time, a password that cannot be opened here (another
-			// Windows account sealed it) is left empty for the user to retype.
+			// load time, a password that cannot be opened here (sealed on
+			// another machine or account) is left empty for the user to retype.
 			if pw, err := unprotectSecret(cfg.Password); err == nil {
 				cfg.Password = pw
 			} else {
@@ -90,8 +93,6 @@ func (c *Store) persist() {
 			}
 			adopt = append(adopt, cfg)
 		}
-	} else if err != nil {
-		log.Printf("Failed to load connections for merging: %v", err)
 	}
 
 	data, err := json.MarshalIndent(sealed, "", "  ")
@@ -102,6 +103,11 @@ func (c *Store) persist() {
 	if err := writeFileAtomic(c.connFile, data); err != nil {
 		log.Printf("Failed to write connections file: %v", err)
 		return
+	}
+	// The keyring entries the previous file pointed at that this save dropped
+	// (deleted connection, changed or cleared password) are now orphans.
+	if diskOK {
+		secretsGC(passwordsOf(disk), passwordsOf(sealed))
 	}
 	// The temp file behind writeFileAtomic is created 0600, which also
 	// tightens the mode of a connections.json another tool left world-readable

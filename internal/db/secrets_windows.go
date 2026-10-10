@@ -48,8 +48,8 @@ func callCrypt32(proc *syscall.LazyProc, in []byte) ([]byte, error) {
 }
 
 // SecretsSealed reports that this platform stores a saved password in a form
-// only the current local user can undo, so the connection dialog has nothing to
-// warn about. The !windows build answers false, and the UI says so out loud.
+// only the current local user can undo, so the connection dialog has nothing
+// to warn about. The !windows build answers from a keyring probe instead.
 func SecretsSealed() bool { return true }
 
 // protectSecret seals a password with DPAPI, scoped to the current Windows user.
@@ -64,11 +64,10 @@ func protectSecret(plaintext string) (string, error) {
 	return secretPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// unprotectSecret opens a sealed password; plain-text legacy values pass through.
-func unprotectSecret(stored string) (string, error) {
-	if !strings.HasPrefix(stored, secretPrefix) {
-		return stored, nil
-	}
+// unsealDPAPI opens a "dpapi:" value; unprotectSecret only calls it when the
+// prefix is present. A value sealed by another Windows account or machine
+// fails here — the caller clears the password and asks the user to retype it.
+func unsealDPAPI(stored string) (string, error) {
 	ciphertext, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, secretPrefix))
 	if err != nil {
 		return "", fmt.Errorf("decode password: %w", err)

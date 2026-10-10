@@ -20,10 +20,6 @@ const (
 	DbTypeOracle    = "oracle"
 )
 
-// secretPrefix marks a password sealed with DPAPI on Windows. Values without
-// it are legacy plain text and pass through, matching the parent project.
-const secretPrefix = "dpapi:"
-
 // ConnConfig is a saved connection definition, persisted as connections.json.
 type ConnConfig struct {
 	ID             string            `json:"id"`

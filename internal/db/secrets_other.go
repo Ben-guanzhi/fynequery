@@ -2,20 +2,38 @@
 
 package db
 
-// Without DPAPI there is no local key to hide a password behind, so non-Windows
-// builds keep the legacy plain-text store instead of pretending to encrypt.
-// Hardening this properly needs the platform keychain (macOS) or libsecret over
-// D-Bus (Linux); neither can be exercised from the Windows development box, so
-// the store stays honest about what it is and the connection dialog warns.
+import (
+	"fmt"
+	"sync"
+)
+
+// protectSecret stores the password in the OS keyring (macOS Keychain, Linux
+// Secret Service). A machine with no usable keyring falls back to the legacy
+// plain-text store; the fallback and its warning live in protectViaKeyringOrPlain.
 func protectSecret(plaintext string) (string, error) {
-	return plaintext, nil
+	if plaintext == "" {
+		return "", nil
+	}
+	return protectViaKeyringOrPlain(plaintext)
 }
 
-func unprotectSecret(stored string) (string, error) {
-	return stored, nil
+// unsealDPAPI refuses a Windows-sealed value: the key that opens it lives in
+// another machine's DPAPI, so the password has to be retyped here.
+func unsealDPAPI(stored string) (string, error) {
+	return "", fmt.Errorf("password was sealed with Windows DPAPI; retype it")
 }
 
-// SecretsSealed reports that this platform cannot seal a saved password: the
-// connection dialog shows the user that the password file holds it in clear
-// text, protected only by the file's 0600 permission.
-func SecretsSealed() bool { return false }
+var (
+	secretsOnce sync.Once
+	secretsOK   bool
+)
+
+// SecretsSealed reports whether a saved password is stored sealed rather than
+// in clear text. Off Windows that cannot be known at build time — it depends
+// on whether this machine has a reachable keyring — so the answer comes from a
+// one-time probe: keyring present, secrets are sealed there; keyring absent,
+// the legacy plain-text store is in use and the dialog says so.
+func SecretsSealed() bool {
+	secretsOnce.Do(func() { secretsOK = keyringWorks() })
+	return secretsOK
+}
