@@ -92,3 +92,21 @@ func (c *Store) Tables(id, database, schema string) ([]TableInfo, error) {
 	}
 	return d.tables(c, conn, database, schema)
 }
+
+// CompletionObjects names the catalog objects SQL completion should offer
+// beyond tables and views: the Code Assistant list. Engines without one answer
+// with nil so the caller just appends nothing.
+func (c *Store) CompletionObjects(id, database string) ([]string, error) {
+	conn, err := c.OpenConn(id)
+	if err != nil {
+		return nil, err
+	}
+	d, err := dialectFor(conn.Config.Type)
+	if err != nil {
+		return nil, err
+	}
+	if d.completionObjects == nil {
+		return nil, nil
+	}
+	return d.completionObjects(c, conn, database)
+}

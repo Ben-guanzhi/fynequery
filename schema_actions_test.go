@@ -33,7 +33,7 @@ func TestBuildCreateTableSQLite(t *testing.T) {
 	c := &Client{
 		store: db.NewStore(),
 		tree:  treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool)},
-		cache: memoCache{tables: make(map[string][]string), loading: make(map[string]bool), fks: make(map[string][]db.ForeignKeyInfo)},
+		cache: memoCache{tables: make(map[string][]string), objects: make(map[string][]string), loading: make(map[string]bool), loadingObjects: make(map[string]bool), fks: make(map[string][]db.ForeignKeyInfo)},
 		grid:  gridState{edits: newGridEditState(), sortCol: -1},
 	}
 	if err := c.connect(db.ConnConfig{ID: "c0", Name: "t", Type: db.DbTypeSQLite, Database: dbFile}); err != nil {

@@ -25,6 +25,9 @@ type dialect struct {
 	schemas func(c *Store, conn *Conn, database string) ([]string, error)
 	// tables lists tables and views of one database/schema pair.
 	tables func(c *Store, conn *Conn, database, schema string) ([]TableInfo, error)
+	// completionObjects names the catalog objects a SQL completion list should
+	// offer beyond tables and views; nil means the engine has no such list.
+	completionObjects func(c *Store, conn *Conn, database string) ([]string, error)
 	// columns reads one table's column metadata.
 	columns func(c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error)
 	// search matches table/view names by fragment inside one database.
@@ -711,6 +714,24 @@ var sqlserverDialect = &dialect{
 	createTable: sqlserverCreateTable,
 }
 
+// oracleCompletionObjectsSQL is PL/SQL Developer's CANames.sql - the Code
+// Assistant's name list - folded into one round trip. CANames.sql ships three
+// statements and returns name+type pairs; completion needs only the name, and a
+// UNION ALL answers in one query instead of three. Only the alias is returned
+// for a synonym: the join keeps CANames' filter (a synonym is listed only when
+// it resolves to one of the object types below), but the alias is what you
+// type in SQL.
+const oracleCompletionObjectsSQL = `SELECT OBJECT_NAME FROM ALL_OBJECTS
+	WHERE OWNER = USER
+		AND OBJECT_TYPE IN ('TABLE', 'VIEW', 'PACKAGE', 'TYPE', 'PROCEDURE', 'FUNCTION', 'SEQUENCE')
+	UNION ALL
+	SELECT s.SYNONYM_NAME FROM ALL_SYNONYMS s
+	JOIN ALL_OBJECTS o ON o.OWNER = s.TABLE_OWNER AND o.OBJECT_NAME = s.TABLE_NAME
+	WHERE s.OWNER IN ('PUBLIC', USER)
+		AND o.OBJECT_TYPE IN ('TABLE', 'VIEW', 'PACKAGE', 'TYPE', 'PROCEDURE', 'FUNCTION', 'SEQUENCE')
+	UNION ALL
+	SELECT DB_LINK FROM ALL_DB_LINKS WHERE OWNER = USER OR OWNER = 'PUBLIC'`
+
 var oracleDialect = &dialect{
 	databases: func(c *Store, conn *Conn) ([]string, error) {
 		return collectRows(conn.DB, "SELECT name FROM v$database ORDER BY name", nil, scanString)
@@ -720,6 +741,9 @@ var oracleDialect = &dialect{
 		return collectRows(conn.DB, `SELECT OBJECT_NAME, OBJECT_TYPE, '' FROM ALL_OBJECTS
 			WHERE OBJECT_TYPE IN ('TABLE','VIEW') AND OWNER = USER ORDER BY OBJECT_NAME`,
 			nil, tableScanner(schema))
+	},
+	completionObjects: func(c *Store, conn *Conn, database string) ([]string, error) {
+		return collectRows(conn.DB, oracleCompletionObjectsSQL, nil, scanString)
 	},
 	columns: func(c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error) {
 		return collectRows(conn.DB, `SELECT column_name, data_type, nullable, data_default, 0, comments

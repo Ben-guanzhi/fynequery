@@ -295,14 +295,42 @@ func (c *Client) suggestionPool() []string {
 			if !ok && !loading {
 				c.cache.loading[key] = true
 			}
+			objects, okObjects := c.cache.objects[key]
+			loadingObjects := c.cache.loadingObjects[key]
+			if !okObjects && !loadingObjects {
+				c.cache.loadingObjects[key] = true
+			}
 			c.mu.Unlock()
 			if !ok && !loading {
 				go c.loadSuggestTables(c.currentID, dbName, key)
 			}
+			if !okObjects && !loadingObjects {
+				go c.loadSuggestObjects(c.currentID, dbName, key)
+			}
 			pool = append(pool, tables...)
+			pool = append(pool, objects...)
 		}
 	}
 	return pool
+}
+
+// loadSuggestObjects adds the engine's non-table catalog names: PL/SQL
+// Developer's Code Assistant list (Oracle packages, types, procedures,
+// functions, sequences, synonyms, database links). Tables already come from
+// loadSuggestTables. A failed load is NOT memoized, so the next keystroke
+// retries instead of leaving completion empty for the session.
+func (c *Client) loadSuggestObjects(connID, db, key string) {
+	var objects []string
+	names, err := c.store.CompletionObjects(connID, db)
+	if err == nil {
+		objects = names
+	}
+	c.mu.Lock()
+	if err == nil {
+		c.cache.objects[key] = objects
+	}
+	delete(c.cache.loadingObjects, key)
+	c.mu.Unlock()
 }
 
 // loadSuggestTables reads the table names for SQL completion off the UI

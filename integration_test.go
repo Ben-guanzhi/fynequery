@@ -170,7 +170,7 @@ func TestForeignKeyMemoAndPicker(t *testing.T) {
 	}
 	sdb.Close()
 
-	c := &Client{store: db.NewStore(), cache: memoCache{fks: make(map[string][]db.ForeignKeyInfo)}}
+	c := &Client{store: db.NewStore(), cache: memoCache{tables: make(map[string][]string), objects: make(map[string][]string), loading: make(map[string]bool), loadingObjects: make(map[string]bool), fks: make(map[string][]db.ForeignKeyInfo)}}
 	if err := c.connect(db.ConnConfig{ID: "c0", Name: "t", Type: db.DbTypeSQLite, Database: dbFile}); err != nil {
 		t.Fatalf("connect: %v", err)
 	}

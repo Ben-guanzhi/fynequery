@@ -22,7 +22,7 @@ func TestSidebarTreeFillsHeight(t *testing.T) {
 		win:   w,
 		store: db.NewStore(),
 		tree:  treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool)},
-		cache: memoCache{tables: make(map[string][]string), loading: make(map[string]bool), fks: make(map[string][]db.ForeignKeyInfo)},
+		cache: memoCache{tables: make(map[string][]string), objects: make(map[string][]string), loading: make(map[string]bool), loadingObjects: make(map[string]bool), fks: make(map[string][]db.ForeignKeyInfo)},
 		grid:  gridState{edits: newGridEditState(), sortCol: -1},
 	}
 	content := c.buildUI()
@@ -49,7 +49,7 @@ func TestEditorReceivesTypedText(t *testing.T) {
 		win:   w,
 		store: db.NewStore(),
 		tree:  treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool)},
-		cache: memoCache{tables: make(map[string][]string), loading: make(map[string]bool), fks: make(map[string][]db.ForeignKeyInfo)},
+		cache: memoCache{tables: make(map[string][]string), objects: make(map[string][]string), loading: make(map[string]bool), loadingObjects: make(map[string]bool), fks: make(map[string][]db.ForeignKeyInfo)},
 		grid:  gridState{edits: newGridEditState(), sortCol: -1},
 	}
 	w.SetContent(c.buildUI())

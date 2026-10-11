@@ -96,9 +96,12 @@ type rowActions struct {
 // them off the UI thread, so every access holds c.mu.
 type memoCache struct {
 	// tables is the per-connection+database table-name list SQL completion
-	// reads; loading marks the keys whose fetch is in flight.
-	tables  map[string][]string
-	loading map[string]bool
+	// reads; objects adds the engine's non-table names (Oracle: routines,
+	// sequences, synonyms, database links); loading marks the in-flight fetch.
+	tables         map[string][]string
+	objects        map[string][]string
+	loading        map[string]bool
+	loadingObjects map[string]bool
 	// fks memoizes each table's foreign keys for the cell editor's value
 	// picker, which opens on every edit while the catalog rarely changes.
 	fks map[string][]db.ForeignKeyInfo
@@ -248,7 +251,7 @@ func newClient(a fyne.App, w fyne.Window) *Client {
 		win:   w,
 		store: db.NewStore(),
 		tree:  treeState{nodes: make(map[string]*nodeData), expanded: make(map[string]bool), cache: make(map[rowCacheKey]fyne.CanvasObject)},
-		cache: memoCache{tables: make(map[string][]string), loading: make(map[string]bool), fks: make(map[string][]db.ForeignKeyInfo)},
+		cache: memoCache{tables: make(map[string][]string), objects: make(map[string][]string), loading: make(map[string]bool), loadingObjects: make(map[string]bool), fks: make(map[string][]db.ForeignKeyInfo)},
 		grid:  gridState{edits: newGridEditState(), sortCol: -1},
 	}
 	// The layout + editor drafts are read once here; the only writer is

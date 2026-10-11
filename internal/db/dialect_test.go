@@ -1,6 +1,9 @@
 package db
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestCatalogDialectsComplete guards the op-and-type table: every known engine
 // tag must have a dialect row, and every row must implement every catalog
@@ -65,6 +68,51 @@ func TestQualifiedTableDispatch(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Errorf("TableName(%s) = %s, want %s", tc.dbType, got, tc.want)
+		}
+	}
+}
+
+// TestCompletionObjectsIsOracleOnly pins the dispatch: only Oracle has a
+// non-table object list, so the suggest pool appends nothing on the other
+// engines instead of guessing one.
+func TestCompletionObjectsIsOracleOnly(t *testing.T) {
+	oracle, err := dialectFor(DbTypeOracle)
+	if err != nil {
+		t.Fatalf("dialectFor(oracle): %v", err)
+	}
+	if oracle.completionObjects == nil {
+		t.Error("oracle must offer completion objects")
+	}
+	for _, typ := range []string{DbTypeMySQL, DbTypePostgres, DbTypeSQLite, DbTypeSQLServer} {
+		d, err := dialectFor(typ)
+		if err != nil {
+			t.Errorf("dialectFor(%s): %v", typ, err)
+			continue
+		}
+		if d.completionObjects != nil {
+			t.Errorf("%s has a completion object list, want none", typ)
+		}
+	}
+}
+
+// TestOracleCompletionObjectsListCoversCANames pins PL/SQL Developer's Code
+// Assistant list so a tidy-up cannot silently narrow what completion offers.
+func TestOracleCompletionObjectsListCoversCANames(t *testing.T) {
+	for _, typ := range []string{"TABLE", "VIEW", "PACKAGE", "TYPE", "PROCEDURE", "FUNCTION", "SEQUENCE"} {
+		if !strings.Contains(oracleCompletionObjectsSQL, "'"+typ+"'") {
+			t.Errorf("completion objects SQL does not list %s", typ)
+		}
+	}
+	for _, view := range []string{"ALL_OBJECTS", "ALL_SYNONYMS", "ALL_DB_LINKS"} {
+		if !strings.Contains(oracleCompletionObjectsSQL, view) {
+			t.Errorf("completion objects SQL is missing the %s branch", view)
+		}
+	}
+	// PUBLIC synonyms and PUBLIC database links are everyone's, so both owner
+	// branches must stay.
+	for _, want := range []string{"'PUBLIC'", "USER"} {
+		if !strings.Contains(oracleCompletionObjectsSQL, want) {
+			t.Errorf("completion objects SQL is missing %s", want)
 		}
 	}
 }
