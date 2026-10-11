@@ -128,6 +128,9 @@ func (s *suggestEntry) TypedKey(k *fyne.KeyEvent) {
 			return
 		}
 	}
+	if (k.Name == fyne.KeyEnter || k.Name == fyne.KeyReturn) && s.enter() {
+		return
+	}
 	s.Entry.TypedKey(k)
 }
 
@@ -253,4 +256,72 @@ func matchSuggestions(pool []string, word string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// smartIndentWords is PL/SQL Developer's Smart AutoIndent list (Tools >
+// Preferences > Editor, shipped as SmartIndent.txt): Enter on a line whose
+// first word is one of these starts the next line one level in.
+var smartIndentWords = map[string]bool{
+	"BEGIN": true, "IF": true, "THEN": true, "ELSE": true, "ELSIF": true,
+	"PROCEDURE": true, "FUNCTION": true, "CASE": true, "WHEN": true,
+	"LOOP": true, "WHILE": true, "FOR": true, "EXCEPTION": true,
+}
+
+// smartIndentStep is one indent level, two spaces to match the SQL this app
+// generates itself (see tableprosql.CreateTableTemplate).
+const smartIndentStep = "  "
+
+// firstCodeWord returns the first token of line as SQL would see it, skipping
+// leading whitespace. A line that opens with a comment or a string literal is
+// not a statement, so it reports the empty string.
+func firstCodeWord(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	w := strings.ToUpper(fields[0])
+	if w == "--" || strings.HasPrefix(w, "/*") || strings.HasPrefix(w, "'") || strings.HasPrefix(w, "`") {
+		return ""
+	}
+	return w
+}
+
+// splitLineForEnter is what Enter does at (row, col): break the line there and
+// carry one indent level onto the new line when the broken line's first word is
+// a smartIndentWord. It returns the replacement text, the caret column of the
+// new line, and ok - false when the caret is outside the text and the key must
+// keep its default behaviour.
+func splitLineForEnter(text string, row, col int) (string, int, bool) {
+	lines := strings.Split(text, "\n")
+	if row < 0 || row >= len(lines) {
+		return "", 0, false
+	}
+	line := []rune(lines[row])
+	if col < 0 || col > len(line) {
+		return "", 0, false
+	}
+	indent := ""
+	caretCol := 0
+	if smartIndentWords[firstCodeWord(lines[row])] {
+		indent = smartIndentStep
+		caretCol = len(smartIndentStep)
+	}
+	head := append([]string{}, lines[:row]...)
+	tail := append([]string{}, lines[row+1:]...)
+	head = append(head, string(line[:col]))
+	tail = append([]string{indent + string(line[col:])}, tail...)
+	return strings.Join(head, "\n") + "\n" + strings.Join(tail, "\n"), caretCol, true
+}
+
+// enter types the newline itself, so a line that is not a smart-indent trigger
+// gets Enter's default meaning untouched. OnChanged stays attached: a typed
+// newline must re-run completion on the empty new line.
+func (s *suggestEntry) enter() bool {
+	newText, caretCol, ok := splitLineForEnter(s.Entry.Text, s.CursorRow, s.CursorColumn)
+	if !ok {
+		return false
+	}
+	s.Entry.SetText(newText)
+	s.Entry.CursorRow, s.Entry.CursorColumn = s.CursorRow+1, caretCol
+	return true
 }
