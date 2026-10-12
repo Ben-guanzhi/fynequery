@@ -100,25 +100,21 @@ func workbookCellKind(colType string) cellKind {
 	return kindText
 }
 
-// setWorkbookCell writes one value with the kind its column asks for. Numbers
-// and dates become real cells; everything else goes in as text, which also
-// keeps a value like "=1+1" or "007" from being reinterpreted by Excel.
-func setWorkbookCell(
-	f *excelize.File,
-	sheet, cell string,
-	kind cellKind,
-	value interface{},
-	styles workbookStyles,
-) error {
+// workbookCellValue is what one grid value becomes in the sheet. Numbers and
+// dates become real cells; everything else goes in as text, which also keeps a
+// value like "=1+1" or "007" from being reinterpreted by Excel. A nil comes
+// back as nil so the row writer leaves a genuinely empty cell behind instead of
+// spelling out "null".
+func workbookCellValue(kind cellKind, value interface{}, styles workbookStyles) interface{} {
 	switch v := value.(type) {
 	case nil:
 		return nil
 	case bool:
-		return f.SetCellValue(sheet, cell, v)
+		return v
 	case float64:
-		return f.SetCellValue(sheet, cell, v)
+		return v
 	case int64:
-		return f.SetCellValue(sheet, cell, v)
+		return v
 	case string:
 		switch kind {
 		case kindNumber:
@@ -127,28 +123,35 @@ func setWorkbookCell(
 				return nil
 			}
 			if number, err := strconv.ParseFloat(trimmed, 64); err == nil {
-				return f.SetCellValue(sheet, cell, number)
+				return number
 			}
 			// Text in a numeric column is a display problem, not a reason to
 			// refuse the whole file: keep it visible as it is.
-			return f.SetCellStr(sheet, cell, v)
+			return v
 		case kindDate:
 			parsed, ok := parseWorkbookTime(v)
 			if !ok {
-				return f.SetCellStr(sheet, cell, v)
+				return v
 			}
-			if err := f.SetCellValue(sheet, cell, parsed); err != nil {
-				return err
-			}
-			format := styles.dateTime
+			style := styles.dateTime
 			if parsed.Hour()|parsed.Minute()|parsed.Second() == 0 {
-				format = styles.dateOnly
+				style = styles.dateOnly
 			}
-			return f.SetCellStyle(sheet, cell, cell, format)
+			return excelize.Cell{Value: parsed, StyleID: style}
 		}
-		return f.SetCellStr(sheet, cell, v)
+		return v
 	}
-	return f.SetCellStr(sheet, cell, fmt.Sprint(value))
+	return excelize.Cell{Value: fmt.Sprint(value)}
+}
+
+// workbookRow is one grid row in the shape the stream writer wants: a value per
+// cell, in column order, so a whole row leaves memory with a single call.
+func workbookRow(kinds []cellKind, row []interface{}, styles workbookStyles) []interface{} {
+	cells := make([]interface{}, len(row))
+	for i, value := range row {
+		cells[i] = workbookCellValue(kinds[i], value, styles)
+	}
+	return cells
 }
 
 // displayUnits is how wide a value looks in a column, counted in the ASCII
@@ -238,54 +241,62 @@ func BuildWorkbook(columns []WorkbookColumn, rows [][]interface{}) ([]byte, erro
 	}
 	sheet = workbookSheetName
 
-	// The column letters are needed four times over - header, style range,
-	// every data cell, the widths - so work them out once.
-	letters := make([]string, len(columns))
 	kinds := make([]cellKind, len(columns))
 	widths := make([]int, len(columns))
 	for i, col := range columns {
-		letter, err := excelize.ColumnNumberToName(i + 1)
-		if err != nil {
-			return nil, err
-		}
-		letters[i] = letter
 		kinds[i] = workbookCellKind(col.Type)
 		// Seeded with the header so a short column of long names still fits.
 		widths[i] = displayUnits(col.Name)
-		if err := f.SetCellStr(sheet, letter+"1", col.Name); err != nil {
-			return nil, err
-		}
-	}
-	if err := f.SetCellStyle(sheet, "A1", letters[len(columns)-1]+"1", styles.header); err != nil {
-		return nil, err
-	}
-	if err := f.SetPanes(sheet, &excelize.Panes{
-		Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft",
-	}); err != nil {
-		return nil, err
 	}
 
+	// The stream writer refuses a column width once the first row has been
+	// written, so the widths are measured over the values first. A short row is
+	// refused here too: it would otherwise write a shifted record.
 	for r, row := range rows {
 		if len(row) != len(columns) {
 			return nil, fmt.Errorf("第 %d 行有 %d 个值，和 %d 列对不上", r+1, len(row), len(columns))
 		}
-		rowNumber := strconv.Itoa(r + 2)
-		for i, col := range columns {
-			if err := setWorkbookCell(f, sheet, letters[i]+rowNumber, kinds[i], row[i], styles); err != nil {
-				return nil, fmt.Errorf("第 %d 行的 %s：%w", r+1, col.Name, err)
-			}
-			if w := cellDisplayUnits(row[i]); w > widths[i] {
+		for i, value := range row {
+			if w := cellDisplayUnits(value); w > widths[i] {
 				widths[i] = w
 			}
 		}
 	}
-	for i, letter := range letters {
+
+	// Rows stream to disk as they are made instead of being held in the workbook
+	// in memory, so a big result does not carry its own size twice.
+	sw, err := f.NewStreamWriter(sheet)
+	if err != nil {
+		return nil, err
+	}
+	if err := sw.SetPanes(&excelize.Panes{
+		Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft",
+	}); err != nil {
+		return nil, err
+	}
+	for i, width := range widths {
 		// A cell is drawn with a little padding, and a width is only a guess
 		// at how wide the value looks in the reader's font.
-		width := min(max(float64(widths[i]+2), workbookMinColWidth), workbookMaxColWidth)
-		if err := f.SetColWidth(sheet, letter, letter, width); err != nil {
+		size := min(max(float64(width+2), workbookMinColWidth), workbookMaxColWidth)
+		if err := sw.SetColWidth(i+1, i+1, size); err != nil {
 			return nil, err
 		}
+	}
+
+	header := make([]interface{}, len(columns))
+	for i, col := range columns {
+		header[i] = excelize.Cell{Value: col.Name, StyleID: styles.header}
+	}
+	if err := sw.SetRow("A1", header); err != nil {
+		return nil, err
+	}
+	for r, row := range rows {
+		if err := sw.SetRow("A"+strconv.Itoa(r+2), workbookRow(kinds, row, styles)); err != nil {
+			return nil, fmt.Errorf("第 %d 行：%w", r+1, err)
+		}
+	}
+	if err := sw.Flush(); err != nil {
+		return nil, err
 	}
 
 	var buf bytes.Buffer
