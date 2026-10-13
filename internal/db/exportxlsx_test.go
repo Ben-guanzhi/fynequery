@@ -1,8 +1,12 @@
 package db
 
 import (
+	"archive/zip"
 	"bytes"
+	"io"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +65,61 @@ func TestBuildWorkbookRoundTrip(t *testing.T) {
 	if v, _ := f.GetCellValue(sheet, "D2"); v != "1.5" {
 		t.Errorf("D2 = %q, want 1.5", v)
 	}
+}
+
+// GetCellValue only reports what a cell shows, so a number that is really an
+// inline string passes the round trip above. It would keep passing if the int64
+// arm were removed and every integer column went out as text, so the kind is
+// asserted straight from the worksheet XML.
+func TestBuildWorkbookKeepsIntegersAsNumbers(t *testing.T) {
+	data, err := BuildWorkbook(
+		[]WorkbookColumn{{Name: "id", Type: "int"}},
+		[][]interface{}{{int64(7)}, {int64(1000000)}})
+	if err != nil {
+		t.Fatalf("BuildWorkbook: %v", err)
+	}
+	xml := worksheetXML(t, data)
+	for _, ref := range []string{"A2", "A3"} {
+		if got := cellElement(t, xml, ref); strings.Contains(got, `t="`) {
+			t.Errorf("%s written as %s, want a number cell with no t= attribute", ref, got)
+		}
+	}
+}
+
+// worksheetXML returns the worksheet part of a rendered workbook.
+func worksheetXML(t *testing.T, data []byte) string {
+	t.Helper()
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	for _, part := range zr.File {
+		if !strings.Contains(part.Name, "worksheets/") || !strings.HasSuffix(part.Name, ".xml") {
+			continue
+		}
+		rc, err := part.Open()
+		if err != nil {
+			t.Fatalf("open sheet: %v", err)
+		}
+		defer rc.Close()
+		body, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatalf("read sheet: %v", err)
+		}
+		return string(body)
+	}
+	t.Fatal("no worksheet in the export")
+	return ""
+}
+
+// cellElement is one cell's whole element.
+func cellElement(t *testing.T, xml, ref string) string {
+	t.Helper()
+	got := regexp.MustCompile(`<c r="` + ref + `"(?:[^/>]*/>|[^>]*>.*?</c>)`).FindString(xml)
+	if got == "" {
+		t.Fatalf("cell %s not found in the export", ref)
+	}
+	return got
 }
 
 func TestWorkbookRefusals(t *testing.T) {
