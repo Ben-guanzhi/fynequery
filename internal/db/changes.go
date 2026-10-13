@@ -160,7 +160,7 @@ func DefaultSchema(dbType, schema string) string {
 // in the shared SQL text package, so the Fyne client, the root client and the
 // web filter bar all answer "does this column hold numbers" the same way.
 func isNumericColumn(colType string) bool {
-	return tableprosql.IsNumericColumnType(colType)
+	return tableprosql.NewColumnType(colType).IsNumeric()
 }
 
 func numberLiteral(value float64) string {

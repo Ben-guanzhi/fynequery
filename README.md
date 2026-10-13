@@ -124,7 +124,6 @@ fynequery/
     ├── changes.go          # 网格编辑引擎：UPDATE/INSERT/DELETE 生成与事务提交
     ├── exportsql.go        # 导出 INSERT 脚本
     ├── export.go           # CSV/JSON 导出
-    ├── exportxlsx.go       # Excel 工作簿渲染（excelize，纯字节输出）
     ├── filters.go          # 列过滤条件 → WHERE 渲染
     ├── tableactions.go     # 表操作（DROP/TRUNCATE/RENAME）
     ├── fk.go               # 外键目录读取与引用表候选值
@@ -144,18 +143,27 @@ fynequery/
 
 要求：Go 1.22+、具备 CGO 的编译器（Windows 上可用 MinGW/TDM-gcc 等）。
 
+本仓库依赖两个住在兄弟仓 `TableProGo` 里的模块：`tableprosql`（各方言 SQL
+文本与 `ColumnType` 判定）和 `tableproxlsx`（Excel 渲染）。`go.mod` 用相对
+`replace` 指向 `../tableprosql` 与 `../tableproxlsx`，所以**单独 clone 本仓**
+时那两个目录不存在，`go build` 会报
+`replacement directory ... does not exist`。先跑一次初始化脚本把父仓克隆到
+`../TableProGo`：
+
 ```bash
 cd fynequery
+./setup.sh          # 或 Windows 下 powershell -File setup.ps1
 go mod tidy
 go build -o fynequery.exe .
 ./fynequery.exe
 ```
 
+脚本只补依赖、不改本仓内容；父仓已在旁边时它会直接跳过 clone。要放到别的
+位置，设 `TABLEPRO_PARENT`（Windows 下同名环境变量）。
+
 提交前的门（装了 [Task](https://task.dev/) 时）：`task check`，即
 `gofmt -l .` + `go vet ./...` + `go test -race ./...`。测试跑在
 `TABLEPRO_STATE_DIR` 指向的临时目录里，不会写你真实的连接与历史。
-本仓库没有配 Git 远端，所以放 GitHub Actions 工作流没有东西会执行它；
-等真有远端再加。
 
 ## 使用说明
 
@@ -195,8 +203,11 @@ go build -o fynequery.exe .
 
 ## 说明
 
-- 本模块为独立子模块，与根目录的 Wails 版本（`TableProGo`）互不影响，
-  可并存于同一仓库。
+- 本模块为独立子模块，与根目录的 Wails 版本（`TableProGo`）可并存于同一
+  仓库。共享逻辑已经下沉成两个独立模块——`tableprosql` 管各方言 SQL 文本与
+  `ColumnType` 判定，`tableproxlsx` 管 Excel 渲染——两个客户端各自 `replace`
+  过去，改共享代码不再需要改两处各一份（这正是整型列曾在根仓导出成文本、
+  Fyne 侧正常的原因）。
 - **状态文件位置**：`connections.json`、`history.json`、`ui.json` 放在
   `os.UserConfigDir()/TableProGo`（Windows 即 `%AppData%\TableProGo`），
   与根版本同一目录、同一格式，因此保存的连接两边共享；代价是历史文件也

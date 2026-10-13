@@ -8,10 +8,11 @@ import (
 // Ported from the parent TableProGo project's exportsql.go: render the grid
 // back out as INSERT statements.
 
-// insertExportMaxRows bounds what one export may render. The grid only ever
-// holds a page of the table, so hitting this means the caller sent something
-// it should not have - refusing is better than a script that quietly misses
-// rows.
+// insertExportMaxRows bounds what one INSERT-script export may render. The grid
+// holds at most a page - paging tops out at 5000 rows - so this is two pages of
+// headroom. The xlsx export allows ten times as many because a workbook is a
+// compressed archive and a script is plain text that grows with the row count.
+// The caps differ on purpose; each refusal names its own format.
 const insertExportMaxRows = 10000
 
 // InsertScript renders one INSERT per row, with every literal written the way
@@ -55,7 +56,7 @@ func InsertScript(
 			return "", fmt.Errorf("第 %d 行有 %d 个值，和 %d 列对不上", i+1, len(row), len(resultColumns))
 		}
 		if len(statements) >= insertExportMaxRows {
-			return "", fmt.Errorf("结果超过 %d 行，请先缩小查询范围再导出", insertExportMaxRows)
+			return "", fmt.Errorf("一次最多导出 %d 行（INSERT 脚本），请翻页或缩小范围", insertExportMaxRows)
 		}
 		literals := make([]string, len(row))
 		for j, value := range row {
