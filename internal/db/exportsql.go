@@ -58,25 +58,33 @@ func InsertScript(
 		colTypes[i] = colType
 	}
 
-	statements := make([]string, 0, len(rows))
+	// The head is the same text in every row: joining the column list per row
+	// is one throwaway string per row for a constant, and rendering into one
+	// grown builder instead of a slice of statements plus a final Join drops
+	// the second full copy of the script. Mirrored from the root client's
+	// exportsql.go so both exports render byte-identical text.
+	head := "INSERT INTO " + name + " (" + strings.Join(idents, ", ") + ") VALUES ("
+	var script strings.Builder
+	script.Grow(len(rows) * (len(head) + 32))
 	for i, row := range rows {
 		if len(row) != len(resultColumns) {
 			return "", fmt.Errorf("第 %d 行有 %d 个值，和 %d 列对不上", i+1, len(row), len(resultColumns))
 		}
-		literals := make([]string, len(row))
+		script.WriteString(head)
 		for j, value := range row {
 			literal, err := valueLiteral(dbType, colTypes[j], value)
 			if err != nil {
 				return "", fmt.Errorf("第 %d 行 %s: %w", i+1, idents[j], err)
 			}
-			literals[j] = literal
+			if j > 0 {
+				script.WriteString(", ")
+			}
+			script.WriteString(literal)
 		}
-		statements = append(statements, fmt.Sprintf(
-			"INSERT INTO %s (%s) VALUES (%s);",
-			name, strings.Join(idents, ", "), strings.Join(literals, ", ")))
+		script.WriteString(");\n")
 	}
-	if len(statements) == 0 {
+	if len(rows) == 0 {
 		return "", fmt.Errorf("没有可导出的行")
 	}
-	return strings.Join(statements, "\n") + "\n", nil
+	return script.String(), nil
 }
