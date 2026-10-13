@@ -9,7 +9,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/sijms/go-ora/v2 v2.9.0
-	github.com/xuri/excelize/v2 v2.11.0
+	github.com/xuri/excelize/v2 v2.11.0 // indirect
 )
 
 require (
@@ -62,6 +62,9 @@ require (
 require (
 	github.com/zalando/go-keyring v0.2.8
 	tableprosql v0.0.0
+	tableproxlsx v0.0.0
 )
+
+replace tableproxlsx => ../tableproxlsx
 
 replace tableprosql => ../tableprosql

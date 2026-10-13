@@ -5,6 +5,8 @@ import (
 
 	"fyne.io/fyne/v2"
 
+	"tableproxlsx"
+
 	"tablepro-fyne/internal/db"
 )
 
@@ -83,8 +85,8 @@ func (c *Client) foreignKeyValues(connID, database, schema, table, column string
 
 // writeWorkbookFile renders the current raw result as an xlsx file. Unlike
 // the INSERT export this works for any result - a view or a custom query has
-// cells too. The rendering itself lives in db.BuildWorkbook; only the fyne
-// file target belongs to this side of the barrier.
+// cells too. The rendering lives in the shared tableproxlsx package; only the
+// fyne file target belongs to this side of the barrier.
 func (c *Client) writeWorkbookFile(f fyne.URIWriteCloser) error {
 	if len(c.grid.header) == 0 {
 		return fmt.Errorf("当前结果没有列，无法导出 XLSX")
@@ -92,18 +94,15 @@ func (c *Client) writeWorkbookFile(f fyne.URIWriteCloser) error {
 	if len(c.grid.lastRows) == 0 {
 		return fmt.Errorf("当前结果为空，没有可导出的行")
 	}
-	if len(c.grid.lastRows) > db.WorkbookMaxRows {
-		return fmt.Errorf("一次最多导出 %d 行，请翻页或缩小范围", db.WorkbookMaxRows)
-	}
-	columns := make([]db.WorkbookColumn, len(c.grid.header))
+	columns := make([]tableproxlsx.Column, len(c.grid.header))
 	for i, h := range c.grid.header {
 		typ := ""
 		if i < len(c.grid.colTypes) {
 			typ = c.grid.colTypes[i]
 		}
-		columns[i] = db.WorkbookColumn{Name: db.StripTypeSuffix(h), Type: typ}
+		columns[i] = tableproxlsx.Column{Name: db.StripTypeSuffix(h), Type: typ}
 	}
-	data, err := db.BuildWorkbook(columns, c.grid.lastRows)
+	data, err := tableproxlsx.BuildWorkbook(columns, c.grid.lastRows)
 	if err != nil {
 		return err
 	}
