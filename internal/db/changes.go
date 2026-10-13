@@ -1,7 +1,7 @@
 package db
 
 import (
-	"tableprosql"
+	"github.com/Ben-guanzhi/TableProGo/tableprosql"
 
 	"database/sql"
 	"fmt"

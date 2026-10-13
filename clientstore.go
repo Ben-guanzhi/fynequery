@@ -5,7 +5,7 @@ import (
 
 	"fyne.io/fyne/v2"
 
-	"tableproxlsx"
+	"github.com/Ben-guanzhi/TableProGo/tableproxlsx"
 
 	"tablepro-fyne/internal/db"
 )

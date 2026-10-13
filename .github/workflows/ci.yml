@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # tableprosql and tableproxlsx come from the tableprosql/v* and
+      # tableproxlsx/v* tags on github.com/Ben-guanzhi/TableProGo - there is no
+      # replace to a sibling checkout, which is the point: this workflow proves
+      # that a bare `git clone` + `go build` produces the app from tags alone.
+      # It also needs network access to that repo, so a private fork breaks here
+      # unless a token is wired in via git's insteadOf rewrite.
+      - name: tablepro-fyne
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 ./...
+
+      - name: go build
+        run: go build -o fynequery .
+
+      - name: go.mod stays tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"tableprosql"
+	"github.com/Ben-guanzhi/TableProGo/tableprosql"
 )
 
 func isSelectQuery(query string) bool {

@@ -143,27 +143,31 @@ fynequery/
 
 要求：Go 1.22+、具备 CGO 的编译器（Windows 上可用 MinGW/TDM-gcc 等）。
 
-本仓库依赖两个住在兄弟仓 `TableProGo` 里的模块：`tableprosql`（各方言 SQL
-文本与 `ColumnType` 判定）和 `tableproxlsx`（Excel 渲染）。`go.mod` 用相对
-`replace` 指向 `../tableprosql` 与 `../tableproxlsx`，所以**单独 clone 本仓**
-时那两个目录不存在，`go build` 会报
-`replacement directory ... does not exist`。先跑一次初始化脚本把父仓克隆到
-`../TableProGo`：
-
 ```bash
+git clone <本仓地址>
 cd fynequery
-./setup.sh          # 或 Windows 下 powershell -File setup.ps1
 go mod tidy
 go build -o fynequery.exe .
 ./fynequery.exe
 ```
 
-脚本只补依赖、不改本仓内容；父仓已在旁边时它会直接跳过 clone。要放到别的
-位置，设 `TABLEPRO_PARENT`（Windows 下同名环境变量）。
+不需要初始化脚本。共享逻辑住在兄弟仓 `TableProGo` 里，已下沉成两个独立模块并
+打了 tag：`github.com/Ben-guanzhi/TableProGo/tableprosql`（各方言 SQL 文本与
+`ColumnType` 判定）和 `github.com/Ben-guanzhi/TableProGo/tableproxlsx`（Excel
+渲染）。本仓 `go.mod` 直接 `require` 它们的版本，**不带 `replace`**，所以单独
+clone 就能构建。早先这里用相对 `replace` 指 `../tableprosql`，单独 clone 会因
+目录不存在而失败，得靠 `setup.sh` 先把父仓克隆到旁边——那套脚本已随 tag 化删除。
+
+代价是共享代码的改动要发 tag 才轮得到这里：改完 `tableprosql`/`tableproxlsx`
+在父仓打 tag（tag 名必须带子目录前缀，如 `tableprosql/v0.1.0`，这是 Go 对
+子目录模块的要求），本仓再 `go get` 升到那一版。`go list -m all` 随时能看到本
+仓实际吃的是哪一版，所以两个客户端不会静默漂移到各不一样的共享代码。
 
 提交前的门（装了 [Task](https://task.dev/) 时）：`task check`，即
 `gofmt -l .` + `go vet ./...` + `go test -race ./...`。测试跑在
 `TABLEPRO_STATE_DIR` 指向的临时目录里，不会写你真实的连接与历史。
+`.github/workflows/ci.yml` 跑同一套门，另加 `go mod tidy` 无差异校验与一次
+`go build`——它同时就是「tag 分发可用」的持续证明。
 
 ## 使用说明
 
@@ -205,8 +209,8 @@ go build -o fynequery.exe .
 
 - 本模块为独立子模块，与根目录的 Wails 版本（`TableProGo`）可并存于同一
   仓库。共享逻辑已经下沉成两个独立模块——`tableprosql` 管各方言 SQL 文本与
-  `ColumnType` 判定，`tableproxlsx` 管 Excel 渲染——两个客户端各自 `replace`
-  过去，改共享代码不再需要改两处各一份（这正是整型列曾在根仓导出成文本、
+  `ColumnType` 判定，`tableproxlsx` 管 Excel 渲染——两个客户端 pin 到同一组
+  tag，改共享代码不再需要改两处各一份（这正是整型列曾在根仓导出成文本、
   Fyne 侧正常的原因）。
 - **状态文件位置**：`connections.json`、`history.json`、`ui.json` 放在
   `os.UserConfigDir()/TableProGo`（Windows 即 `%AppData%\TableProGo`），

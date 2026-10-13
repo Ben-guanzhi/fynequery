@@ -200,3 +200,23 @@ func TestInsertScriptExport(t *testing.T) {
 		t.Error("a result column that is not a table field must be refused")
 	}
 }
+
+// TestInsertScriptMaxRows pins the export cap boundary: exactly
+// insertExportMaxRows rows are accepted and one past it is refused. The check
+// sits on the rows slice before rendering, so the refusal is instant rather than
+// arriving after the work of rendering nine thousand nine hundred and ninety-nine
+// statements.
+func TestInsertScriptMaxRows(t *testing.T) {
+	cols := []string{"id"}
+	rows := make([][]interface{}, insertExportMaxRows+1)
+	for i := range rows {
+		rows[i] = []interface{}{float64(i)}
+	}
+	if _, err := InsertScript(DbTypeSQLite, "t", "t", cols, planTypes(),
+		rows[:insertExportMaxRows]); err != nil {
+		t.Fatalf("exactly %d rows must export: %v", insertExportMaxRows, err)
+	}
+	if _, err := InsertScript(DbTypeSQLite, "t", "t", cols, planTypes(), rows); err == nil {
+		t.Fatal("one row past the cap must be refused")
+	}
+}

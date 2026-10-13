@@ -59,12 +59,12 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
+// These resolve from the tableprosql/v* and tableproxlsx/v* tags on
+// github.com/Ben-guanzhi/TableProGo, deliberately with no replace: this repo is
+// a separate clone, so a relative replace would silently break here. That is
+// what makes `git clone` + `go build` work from nothing.
 require (
+	github.com/Ben-guanzhi/TableProGo/tableprosql v0.1.0
+	github.com/Ben-guanzhi/TableProGo/tableproxlsx v0.1.0
 	github.com/zalando/go-keyring v0.2.8
-	tableprosql v0.0.0
-	tableproxlsx v0.0.0
 )
-
-replace tableproxlsx => ../tableproxlsx
-
-replace tableprosql => ../tableprosql

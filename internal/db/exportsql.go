@@ -28,6 +28,14 @@ func InsertScript(
 	types map[string]string,
 	rows [][]interface{},
 ) (string, error) {
+	// Checked up front, not inside the render loop: the root app checks the same
+	// bound on the same rows slice before rendering, and a refusal that costs the
+	// work of rendering nine thousand nine hundred and ninety-nine rows first is
+	// not a refusal, it is a slow answer. len(rows) > max keeps exactly max rows
+	// allowed, same as the root's comparison.
+	if len(rows) > insertExportMaxRows {
+		return "", fmt.Errorf("一次最多导出 %d 行（INSERT 脚本），请翻页或缩小范围", insertExportMaxRows)
+	}
 	idents := make([]string, len(resultColumns))
 	colTypes := make([]string, len(resultColumns))
 	seen := make(map[string]bool, len(resultColumns))
@@ -54,9 +62,6 @@ func InsertScript(
 	for i, row := range rows {
 		if len(row) != len(resultColumns) {
 			return "", fmt.Errorf("第 %d 行有 %d 个值，和 %d 列对不上", i+1, len(row), len(resultColumns))
-		}
-		if len(statements) >= insertExportMaxRows {
-			return "", fmt.Errorf("一次最多导出 %d 行（INSERT 脚本），请翻页或缩小范围", insertExportMaxRows)
 		}
 		literals := make([]string, len(row))
 		for j, value := range row {
