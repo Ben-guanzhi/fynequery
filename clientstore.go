@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"fyne.io/fyne/v2"
@@ -41,7 +42,9 @@ func (c *Client) disconnect(id string) {
 
 // foreignKeys lists the constraints a table has, memoized per table for the
 // session: the cell dialog opens on every edit and the catalog rarely changes.
-func (c *Client) foreignKeys(connID, database, schema, table string) ([]db.ForeignKeyInfo, error) {
+// The memo means a canceled or repeated caller costs one round trip, not one
+// per dialog.
+func (c *Client) foreignKeys(ctx context.Context, connID, database, schema, table string) ([]db.ForeignKeyInfo, error) {
 	conn, err := c.store.OpenConn(connID)
 	if err != nil {
 		return nil, err
@@ -56,7 +59,7 @@ func (c *Client) foreignKeys(connID, database, schema, table string) ([]db.Forei
 	if ok {
 		return cached, nil
 	}
-	fks, err := c.store.TableForeignKeys(conn, database, schema, table)
+	fks, err := c.store.TableForeignKeys(ctx, conn, database, schema, table)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +71,7 @@ func (c *Client) foreignKeys(connID, database, schema, table string) ([]db.Forei
 
 // foreignKeyValues answers "what could this cell hold", reusing the memoized
 // constraint list so the picker does not re-read the catalog every time.
-func (c *Client) foreignKeyValues(connID, database, schema, table, column string, limit int) (db.ForeignKeyCandidates, error) {
+func (c *Client) foreignKeyValues(ctx context.Context, connID, database, schema, table, column string, limit int) (db.ForeignKeyCandidates, error) {
 	conn, err := c.store.OpenConn(connID)
 	if err != nil {
 		return db.ForeignKeyCandidates{}, err
@@ -76,11 +79,11 @@ func (c *Client) foreignKeyValues(connID, database, schema, table, column string
 	if schema == "" {
 		schema = db.ResolveSchema(conn.Config.Type, database, schema)
 	}
-	fks, err := c.foreignKeys(connID, database, schema, table)
+	fks, err := c.foreignKeys(ctx, connID, database, schema, table)
 	if err != nil {
 		return db.ForeignKeyCandidates{}, err
 	}
-	return c.store.ForeignKeyValues(connID, database, schema, table, column, fks, limit)
+	return c.store.ForeignKeyValues(ctx, connID, database, schema, table, column, fks, limit)
 }
 
 // writeWorkbookFile renders the current raw result as an xlsx file. Unlike

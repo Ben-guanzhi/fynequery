@@ -115,7 +115,7 @@ func (c *Store) ExecutePage(ctx context.Context, conn *Conn, database, query str
 	if err != nil {
 		return QueryResult{Error: err.Error()}
 	}
-	pool, err := c.queryPool(conn, database)
+	pool, err := c.queryPool(ctx, conn, database)
 	if err != nil {
 		return QueryResult{Error: err.Error()}
 	}

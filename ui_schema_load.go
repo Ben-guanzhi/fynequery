@@ -6,6 +6,7 @@ package main
 // ui_schema_actions.go.
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -78,7 +79,14 @@ func plainIdent(name string) string {
 
 // refreshSchema reloads the top level (databases); deeper levels load on
 // demand when their row is tapped.
-func (c *Client) refreshSchema() {
+func (c *Client) refreshSchema() { c.refreshSchemaThen(nil) }
+
+// refreshSchemaThen reloads the top level and runs onDone (which may be nil)
+// once the tree is filled. The database list is a round trip like any other
+// query, so it no longer runs on the event thread; that means a caller which
+// wants to find a particular node in the result has to ask for it after the
+// load, which is what onDone is for.
+func (c *Client) refreshSchemaThen(onDone func()) {
 	c.mu.Lock()
 	c.tree.nodes = map[string]*nodeData{treeRootUID: {kind: "root", label: "数据库", lower: "数据库"}}
 	c.mu.Unlock()
@@ -87,6 +95,11 @@ func (c *Client) refreshSchema() {
 	c.tree.cache = make(map[rowCacheKey]fyne.CanvasObject) // the old tree is gone; drop its rendered rows
 
 	id := c.selectedOrLive()
+	finish := func() {
+		if onDone != nil {
+			onDone()
+		}
+	}
 	if id == "" || !c.store.ConnectionStatus(id) {
 		c.mu.Lock()
 		root := c.tree.nodes[treeRootUID]
@@ -94,11 +107,26 @@ func (c *Client) refreshSchema() {
 		root.lower = "未连接"
 		c.mu.Unlock()
 		c.rebuildSchemaRows()
+		finish()
 		return
 	}
 
 	c.setStatus("加载数据库 ...")
-	dbs, err := c.store.Databases(id)
+	var (
+		dbs    []string
+		dbsErr error
+	)
+	c.background(func(ctx context.Context) {
+		dbs, dbsErr = c.store.Databases(ctx, id)
+	}, func() {
+		c.applySchemaDatabases(id, dbs, dbsErr)
+		finish()
+	})
+}
+
+// applySchemaDatabases fills the navigator root with the fetched database names
+// and opens the connection's own database down to its tables. UI thread only.
+func (c *Client) applySchemaDatabases(id string, dbs []string, err error) {
 	if err != nil {
 		c.mu.Lock()
 		root := c.tree.nodes[treeRootUID]
@@ -154,26 +182,28 @@ func (c *Client) loadChildren(nd *nodeData) {
 		nd.loading = false
 		return
 	}
-	fetch := func() (schemas []string, tables []db.TableInfo, err error) {
+	fetch := func(ctx context.Context) (schemas []string, tables []db.TableInfo, err error) {
 		switch nd.kind {
 		case "db":
-			schemas, err = c.store.Schemas(id, nd.db)
+			schemas, err = c.store.Schemas(ctx, id, nd.db)
 			if err == nil && len(schemas) == 0 {
-				tables, err = c.store.Tables(id, nd.db, "")
+				tables, err = c.store.Tables(ctx, id, nd.db, "")
 			}
 		case "schema":
-			tables, err = c.store.Tables(id, nd.db, nd.schema)
+			tables, err = c.store.Tables(ctx, id, nd.db, nd.schema)
 		}
 		return
 	}
+	// Nothing waits on a navigator expansion, so the round trip has no owner to
+	// give up on it: it runs to an answer or an error, off the event thread.
 	if c.asyncRun {
 		go func() {
-			schemas, tables, err := fetch()
+			schemas, tables, err := fetch(context.Background())
 			c.dispatch(func() { c.applyChildren(nd, schemas, tables, err) })
 		}()
 		return
 	}
-	schemas, tables, err := fetch()
+	schemas, tables, err := fetch(context.Background())
 	c.applyChildren(nd, schemas, tables, err)
 }
 

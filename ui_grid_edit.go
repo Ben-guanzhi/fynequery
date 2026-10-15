@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -240,29 +241,11 @@ func (c *Client) editSelectedCell() {
 	valueEntry.TextStyle = fyne.TextStyle{Monospace: true}
 	nullCheck := widget.NewCheck("写入 NULL（勾选后忽略输入）", nil)
 
-	// A single-column foreign key gets a picker fed by the referenced table,
-	// so "7" and "12" can be told apart without opening it.
+	// The picker row is not here yet: its candidates come from another table,
+	// so they are read after the dialog is up (see below).
 	formItems := []*widget.FormItem{
 		widget.NewFormItem("值", valueEntry),
 		widget.NewFormItem("", nullCheck),
-	}
-	if cands, err := c.foreignKeyValues(c.currentID, c.grid.src.Database,
-		c.grid.src.Schema, c.grid.src.Table, column, 0); err == nil && len(cands.Values) > 0 {
-		keyOf := make(map[string]string, len(cands.Values))
-		options := make([]string, 0, len(cands.Values))
-		for _, v := range cands.Values {
-			opt := v.Value
-			if v.Label != "" && v.Label != v.Value {
-				opt = v.Value + " · " + v.Label
-			}
-			keyOf[opt] = v.Value
-			options = append(options, opt)
-		}
-		fkSelect := widget.NewSelect(options, func(chosen string) {
-			valueEntry.SetText(keyOf[chosen])
-		})
-		fkSelect.PlaceHolder = "从 " + cands.RefTable + " 选择"
-		formItems = append(formItems, widget.NewFormItem("", fkSelect))
 	}
 
 	var d *dialog.CustomDialog
@@ -288,6 +271,43 @@ func (c *Client) editSelectedCell() {
 	d = dialog.NewCustom(fmt.Sprintf("编辑 %s", column), "取消", form, c.win)
 	d.Resize(fyne.NewSize(380, 220))
 	d.Show()
+
+	// A single-column foreign key gets a picker fed by the referenced table,
+	// so "7" and "12" can be told apart without opening it. That list is a SELECT
+	// on another table, so the dialog opens without waiting for it and the row is
+	// appended when the server answers - a remote box used to freeze the window
+	// before the user could type anything. Closing the dialog gives up on the
+	// read; no candidates or an error means no picker, which is what the entry
+	// was always there for.
+	src := c.grid.src
+	connID := c.currentID
+	var (
+		cands db.ForeignKeyCandidates
+		fkErr error
+	)
+	giveUp := c.background(func(ctx context.Context) {
+		cands, fkErr = c.foreignKeyValues(ctx, connID, src.Database, src.Schema, src.Table, column, 0)
+	}, func() {
+		if fkErr != nil || len(cands.Values) == 0 {
+			return
+		}
+		keyOf := make(map[string]string, len(cands.Values))
+		options := make([]string, 0, len(cands.Values))
+		for _, v := range cands.Values {
+			opt := v.Value
+			if v.Label != "" && v.Label != v.Value {
+				opt = v.Value + " · " + v.Label
+			}
+			keyOf[opt] = v.Value
+			options = append(options, opt)
+		}
+		fkSelect := widget.NewSelect(options, func(chosen string) {
+			valueEntry.SetText(keyOf[chosen])
+		})
+		fkSelect.PlaceHolder = "从 " + cands.RefTable + " 选择"
+		form.AppendItem(widget.NewFormItem("", fkSelect))
+	})
+	d.SetOnClosed(giveUp)
 }
 
 // afterEditQueued refreshes the grid, counters and buttons after a change.
@@ -360,6 +380,11 @@ func (c *Client) discardChanges() {
 
 // saveChanges previews the rendered statements and, on confirmation, applies
 // them in one transaction, then re-runs the query to show the stored state.
+// Both halves talk to the server - the preview reads the table's keys and types
+// out of the catalog, the apply is the transaction itself - so neither runs on
+// the event thread: on a remote box the old synchronous version froze the window
+// before the preview even appeared. Closing the dialog gives up on whichever
+// round trip is out.
 func (c *Client) saveChanges() {
 	set := db.ChangeSet{
 		ConnID:   c.currentID,
@@ -369,9 +394,22 @@ func (c *Client) saveChanges() {
 		Columns:  c.grid.cols,
 		Changes:  c.collectChanges(),
 	}
-	statements, err := c.store.BuildChanges(set)
+	c.setStatus("生成语句 ...")
+	var (
+		statements []string
+		buildErr   error
+	)
+	c.background(func(ctx context.Context) {
+		statements, buildErr = c.store.BuildChanges(ctx, set)
+	}, func() { c.showChangePreview(set, statements, buildErr) })
+}
+
+// showChangePreview puts the rendered statements in front of the user with the
+// one button that can write them. UI thread only.
+func (c *Client) showChangePreview(set db.ChangeSet, statements []string, err error) {
 	if err != nil {
 		dialog.ShowError(err, c.win)
+		c.setStatus("就绪")
 		return
 	}
 
@@ -381,23 +419,52 @@ func (c *Client) saveChanges() {
 	preview.Disable()
 	preview.SetText(strings.Join(statements, "\n\n") + ";")
 
-	var d *dialog.CustomDialog
-	apply := func() {
-		applied, err := c.store.ApplyChanges(set)
-		if err != nil {
-			dialog.ShowError(err, c.win)
+	var (
+		d      *dialog.CustomDialog
+		giveUp func()
+		apply  func()
+	)
+	// Applying is a transaction, not a keystroke: a second round on the same
+	// queue would run the statements twice. The button is the only way in, so it
+	// goes away for the duration of the round trip.
+	applying := false
+	applyBtn := widget.NewButtonWithIcon("执行", theme.ConfirmIcon(), func() { apply() })
+	applyBtn.Importance = widget.HighImportance
+	apply = func() {
+		if applying {
 			return
 		}
-		c.setStatus(fmt.Sprintf("已提交 %d 行更改，正在刷新 ...", applied))
-		d.Hide()
-		c.runCurrent() // re-reads the table and resets the queue
+		applying = true
+		applyBtn.Disable()
+		c.setStatus("提交中 ...")
+		var (
+			applied int64
+			appErr  error
+		)
+		giveUp = c.background(func(ctx context.Context) {
+			applied, appErr = c.store.ApplyChanges(ctx, set)
+		}, func() {
+			applying = false
+			if appErr != nil {
+				applyBtn.Enable()
+				c.setStatus("就绪")
+				dialog.ShowError(appErr, c.win)
+				return
+			}
+			c.setStatus(fmt.Sprintf("已提交 %d 行更改，正在刷新 ...", applied))
+			d.Hide()
+			c.runCurrent() // re-reads the table and resets the queue
+		})
 	}
-	applyBtn := widget.NewButtonWithIcon("执行", theme.ConfirmIcon(), apply)
-	applyBtn.Importance = widget.HighImportance
 	buttons := container.NewHBox(applyBtn)
 
 	content := container.NewBorder(nil, buttons, nil, nil, container.NewScroll(preview))
 	d = dialog.NewCustom("将执行以下语句", "取消", content, c.win)
+	d.SetOnClosed(func() {
+		if giveUp != nil {
+			giveUp()
+		}
+	})
 	d.Resize(fyne.NewSize(640, 420))
 	d.Show()
 }

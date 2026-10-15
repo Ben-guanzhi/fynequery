@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -31,7 +32,7 @@ func TestTableIndexesSQLite(t *testing.T) {
 	}
 	t.Cleanup(func() { c.Disconnect("c0") })
 
-	indexes, err := c.TableIndexes("c0", dbFile, "", "users")
+	indexes, err := c.TableIndexes(context.Background(), "c0", dbFile, "", "users")
 	if err != nil {
 		t.Fatalf("tableIndexes: %v", err)
 	}

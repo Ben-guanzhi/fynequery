@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
@@ -70,7 +71,7 @@ func TestBuildCreateTableSQLite(t *testing.T) {
 		t.Fatal("retry did not reload tables")
 	}
 
-	ddl, err := c.store.TableDDL("c0", dbFile, "", "users")
+	ddl, err := c.store.TableDDL(context.Background(), "c0", dbFile, "", "users")
 	if err != nil {
 		t.Fatalf("tableDDL: %v", err)
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -54,25 +55,42 @@ func (c *Client) showSearchDialog() {
 		c.openObjectMatch(match)
 	}
 
+	// The walk spans every connected server, so it runs off the event thread and
+	// a new fragment gives up on the previous walk instead of queueing a second
+	// one behind it. GiveUp belongs to the dialog as much as to the next search:
+	// closing the box stops the server-side read.
+	var giveUp func()
 	runSearch := func() {
-		hits, err := c.store.SearchObjects(entry.Text, 0)
-		if err != nil {
-			c.searchResults = nil
-			hint.SetText("搜索失败：" + err.Error())
-			results.Refresh()
-			return
+		if giveUp != nil {
+			giveUp()
 		}
-		c.searchResults = hits
-		if len(hits) == 0 {
-			hint.SetText("没有匹配的对象")
-		} else {
-			extra := ""
-			if len(hits) >= db.SearchDefaultLimit {
-				extra = "（已达上限，输入更长的片段可缩小范围）"
+		hint.SetText("搜索中 ...")
+		pattern := entry.Text
+		var (
+			hits []db.ObjectMatch
+			sErr error
+		)
+		giveUp = c.background(func(ctx context.Context) {
+			hits, sErr = c.store.SearchObjects(ctx, pattern, 0)
+		}, func() {
+			if sErr != nil {
+				c.searchResults = nil
+				hint.SetText("搜索失败：" + sErr.Error())
+				results.Refresh()
+				return
 			}
-			hint.SetText(fmt.Sprintf("找到 %d 个对象%s", len(hits), extra))
-		}
-		results.Refresh()
+			c.searchResults = hits
+			if len(hits) == 0 {
+				hint.SetText("没有匹配的对象")
+			} else {
+				extra := ""
+				if len(hits) >= db.SearchDefaultLimit {
+					extra = "（已达上限，输入更长的片段可缩小范围）"
+				}
+				hint.SetText(fmt.Sprintf("找到 %d 个对象%s", len(hits), extra))
+			}
+			results.Refresh()
+		})
 	}
 	entry.OnSubmitted = func(string) { runSearch() }
 
@@ -84,6 +102,11 @@ func (c *Client) showSearchDialog() {
 		container.NewVBox(entry, hint), buttons, nil, nil, results,
 	)
 	d = dialog.NewCustom("快速打开（Ctrl+P）", "关闭", content, c.win)
+	d.SetOnClosed(func() {
+		if giveUp != nil {
+			giveUp()
+		}
+	})
 	d.Resize(fyne.NewSize(520, 420))
 	d.Show()
 }
@@ -110,8 +133,14 @@ func (c *Client) searchResultText(m db.ObjectMatch, showConn bool) string {
 func (c *Client) openObjectMatch(m db.ObjectMatch) {
 	c.currentID = m.ConnID
 	c.currentDB = m.Database
-	c.refreshSchema()
+	// The hit is found in the navigator, and filling the navigator is a round
+	// trip, so the jump happens once its callback has the tree in hand.
+	c.refreshSchemaThen(func() { c.jumpToSearchMatch(m) })
+}
 
+// jumpToSearchMatch expands the navigator down to one hit and selects it. UI
+// thread only, and only after the tree is loaded.
+func (c *Client) jumpToSearchMatch(m db.ObjectMatch) {
 	tableUID := ""
 	if _, ok := c.tree.nodes["db:"+m.Database]; ok {
 		c.toggleSchemaNode("db:" + m.Database)

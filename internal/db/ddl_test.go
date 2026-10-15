@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -64,15 +65,15 @@ func TestSQLiteCreateTableTemplateRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openConn: %v", err)
 	}
-	if _, err := conn.DB.Exec(stmt); err != nil {
-		t.Fatalf("the starter statement must run: %v\n%s", err, stmt)
+	if res := c.Execute(context.Background(), conn, dbFile, stmt, 0); res.Error != "" {
+		t.Fatalf("the starter statement must run: %s\n%s", res.Error, stmt)
 	}
 	// An insert that names no id is what AUTOINCREMENT is for.
-	if _, err := conn.DB.Exec(`INSERT INTO new_table (name) VALUES ('first')`); err != nil {
-		t.Fatalf("identity column: %v", err)
+	if res := c.Execute(context.Background(), conn, dbFile, `INSERT INTO new_table (name) VALUES ('first')`, 0); res.Error != "" {
+		t.Fatalf("identity column: %s", res.Error)
 	}
 
-	cols, err := c.Columns("c0", dbFile, "", "new_table")
+	cols, err := c.Columns(context.Background(), "c0", dbFile, "", "new_table")
 	if err != nil {
 		t.Fatalf("columns: %v", err)
 	}

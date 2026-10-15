@@ -118,7 +118,7 @@ func (c *Client) pageEligible(stmt string, res db.QueryResult, singleStatement b
 // aggregate is only reported as unstable - inventing a sort there would change
 // what the query means. It returns the statement to page plus what the bar
 // should say about it, and reads the catalog, so it runs off the UI thread.
-func (c *Client) stablePageQuery(conn *db.Conn, database, stmt string) (string, string) {
+func (c *Client) stablePageQuery(ctx context.Context, conn *db.Conn, database, stmt string) (string, string) {
 	const unstable = " · ⚠ 排序不稳定，翻页可能重复或漏行"
 	if !db.PageNeedsStableOrder(stmt) {
 		return stmt, ""
@@ -128,7 +128,7 @@ func (c *Client) stablePageQuery(conn *db.Conn, database, stmt string) (string, 
 		return stmt, unstable
 	}
 	schema := db.DefaultSchema(conn.Config.Type, ref.Schema)
-	cols, err := c.store.Columns(ref.ConnID, ref.Database, schema, ref.Table)
+	cols, err := c.store.Columns(ctx, ref.ConnID, ref.Database, schema, ref.Table)
 	if err != nil {
 		return stmt, unstable + "（读不到主键）"
 	}

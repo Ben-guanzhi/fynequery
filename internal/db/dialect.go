@@ -3,6 +3,7 @@ package db
 import (
 	"github.com/Ben-guanzhi/TableProGo/tableprosql"
 
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -17,30 +18,34 @@ import (
 // dialect bundles one engine's catalog operations. Every field must be set
 // (guarded by TestCatalogDialectsComplete); operations a dialect does not
 // have return their engine's "nothing" convention directly.
+//
+// The operations that reach the server take the caller's context first: a
+// catalog read is a query like any other, and one that cannot be interrupted is
+// how a remote server froze the whole window.
 type dialect struct {
 	// databases lists the database names visible on the connection.
-	databases func(c *Store, conn *Conn) ([]string, error)
+	databases func(ctx context.Context, c *Store, conn *Conn) ([]string, error)
 	// schemas lists schema names inside one database; returning nil means the
 	// engine has no schema layer and the caller goes straight to tables.
-	schemas func(c *Store, conn *Conn, database string) ([]string, error)
+	schemas func(ctx context.Context, c *Store, conn *Conn, database string) ([]string, error)
 	// tables lists tables and views of one database/schema pair.
-	tables func(c *Store, conn *Conn, database, schema string) ([]TableInfo, error)
+	tables func(ctx context.Context, c *Store, conn *Conn, database, schema string) ([]TableInfo, error)
 	// completionObjects names the catalog objects a SQL completion list should
 	// offer beyond tables and views; nil means the engine has no such list.
-	completionObjects func(c *Store, conn *Conn, database string) ([]string, error)
+	completionObjects func(ctx context.Context, c *Store, conn *Conn, database string) ([]string, error)
 	// columns reads one table's column metadata.
-	columns func(c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error)
+	columns func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error)
 	// search matches table/view names by fragment inside one database.
-	search func(c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error)
+	search func(ctx context.Context, c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error)
 	// foreignKeys reads one table's foreign-key constraints.
-	foreignKeys func(c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error)
+	foreignKeys func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error)
 	// fkValuesSQL renders the DISTINCT-keys query over a referenced table.
 	fkValuesSQL func(name, refColumn, labelColumn string, limit int) (string, error)
 	// qualifiedTable renders database.schema.table the way the engine
 	// addresses tables.
 	qualifiedTable func(database, schema, table string) (string, error)
 	// indexes reads one table's index list.
-	indexes func(c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error)
+	indexes func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error)
 	// catalogSchema names the namespace catalog queries run against inside one
 	// database. Engines without a schema layer answer with the database
 	// itself; callers only ask while the schema is still empty.
@@ -96,11 +101,20 @@ var catalogDialects = map[string]*dialect{
 
 // ---- shared scan helpers ----
 
-// collectRows runs query and folds every row through scan: the higher-order
-// loop every catalog reader shares - open, scan into a T, close, report the
-// cursor's own error.
-func collectRows[T any](db *sql.DB, query string, args []interface{}, scan func(*sql.Rows) (T, error)) ([]T, error) {
-	rows, err := db.Query(query, args...)
+// collectRows runs query on the connection's pool and folds every row through
+// scan: the higher-order loop every catalog reader shares - open, scan into a T,
+// close, report the cursor's own error.
+func collectRows[T any](ctx context.Context, conn *Conn, query string, args []interface{}, scan func(*sql.Rows) (T, error)) ([]T, error) {
+	if conn.DB == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+	return collectRowsOn(ctx, conn.DB, query, args, scan)
+}
+
+// collectRowsOn is collectRows for a pool the caller has already chosen: the
+// per-database sessions poolFor hands out.
+func collectRowsOn[T any](ctx context.Context, db *sql.DB, query string, args []interface{}, scan func(*sql.Rows) (T, error)) ([]T, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -244,31 +258,31 @@ func aggregateIndexes(rows []indexRow) []IndexInfo {
 // ---- per-engine dialects ----
 
 var mysqlDialect = &dialect{
-	databases: func(c *Store, conn *Conn) ([]string, error) {
-		return collectRows(conn.DB, "SHOW DATABASES", nil, scanString)
+	databases: func(ctx context.Context, c *Store, conn *Conn) ([]string, error) {
+		return collectRows(ctx, conn, "SHOW DATABASES", nil, scanString)
 	},
 	schemas: nil, // the database is the schema
-	tables: func(c *Store, conn *Conn, database, schema string) ([]TableInfo, error) {
-		return collectRows(conn.DB, `SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT FROM information_schema.TABLES
+	tables: func(ctx context.Context, c *Store, conn *Conn, database, schema string) ([]TableInfo, error) {
+		return collectRows(ctx, conn, `SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT FROM information_schema.TABLES
 			WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME`,
 			[]interface{}{database}, tableScanner(schema))
 	},
-	columns: func(c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error) {
-		return collectRows(conn.DB, `SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT,
+	columns: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error) {
+		return collectRows(ctx, conn, `SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT,
 			CASE WHEN COLUMN_KEY='PRI' THEN 1 ELSE 0 END, COLUMN_COMMENT
 			FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?
 			ORDER BY ORDINAL_POSITION`,
 			[]interface{}{schema, table}, scanStandardColumn)
 	},
-	search: func(c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
+	search: func(ctx context.Context, c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
 		query := fmt.Sprintf(`SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
 			FROM information_schema.TABLES
 			WHERE TABLE_SCHEMA = ? AND TABLE_NAME LIKE ? ORDER BY TABLE_NAME LIMIT %d`, limit)
-		return collectRows(conn.DB, query, []interface{}{database, likePattern(fragment)},
+		return collectRows(ctx, conn, query, []interface{}{database, likePattern(fragment)},
 			matchScanner(conn, database))
 	},
-	foreignKeys: func(c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
-		rows, err := collectRows(conn.DB, `SELECT k.CONSTRAINT_NAME, k.COLUMN_NAME, k.REFERENCED_TABLE_SCHEMA,
+	foreignKeys: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
+		rows, err := collectRows(ctx, conn, `SELECT k.CONSTRAINT_NAME, k.COLUMN_NAME, k.REFERENCED_TABLE_SCHEMA,
 			k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME,
 			IFNULL(r.DELETE_RULE, ''), IFNULL(r.UPDATE_RULE, '')
 			FROM information_schema.KEY_COLUMN_USAGE k
@@ -288,7 +302,7 @@ var mysqlDialect = &dialect{
 	qualifiedTable: func(database, schema, table string) (string, error) {
 		return QualifiedName(DbTypeMySQL, database, table)
 	},
-	indexes: func(c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
+	indexes: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
 		// The same statement the root client sends, so one engine has one index
 		// catalog SQL. Both flags come back derived: STATISTICS has no is-primary
 		// column (MySQL marks the key by naming it PRIMARY) and NON_UNIQUE holds
@@ -298,7 +312,7 @@ var mysqlDialect = &dialect{
 		if err != nil {
 			return nil, err
 		}
-		flat, err := collectRows(conn.DB, query, args, scanIndexRow)
+		flat, err := collectRows(ctx, conn, query, args, scanIndexRow)
 		if err != nil {
 			return nil, err
 		}
@@ -315,20 +329,20 @@ var mysqlDialect = &dialect{
 }
 
 var postgresDialect = &dialect{
-	databases: func(c *Store, conn *Conn) ([]string, error) {
-		return collectRows(conn.DB, "SELECT datname FROM pg_database WHERE datistemplate = false", nil, scanString)
+	databases: func(ctx context.Context, c *Store, conn *Conn) ([]string, error) {
+		return collectRows(ctx, conn, "SELECT datname FROM pg_database WHERE datistemplate = false", nil, scanString)
 	},
-	schemas: func(c *Store, conn *Conn, database string) ([]string, error) {
-		return scanStrings(conn.DB, `SELECT nspname FROM pg_namespace
+	schemas: func(ctx context.Context, c *Store, conn *Conn, database string) ([]string, error) {
+		return scanStrings(ctx, conn, `SELECT nspname FROM pg_namespace
 			WHERE nspname NOT LIKE 'pg\_%' AND nspname <> 'information_schema'
 			ORDER BY nspname`)
 	},
-	tables: func(c *Store, conn *Conn, database, schema string) ([]TableInfo, error) {
-		db, err := c.poolFor(conn, database)
+	tables: func(ctx context.Context, c *Store, conn *Conn, database, schema string) ([]TableInfo, error) {
+		db, err := c.poolFor(ctx, conn, database)
 		if err != nil {
 			return nil, err
 		}
-		tables, err := collectRows(db, `SELECT tablename, 'BASE TABLE', '' FROM pg_tables WHERE schemaname = $1
+		tables, err := collectRowsOn(ctx, db, `SELECT tablename, 'BASE TABLE', '' FROM pg_tables WHERE schemaname = $1
 			UNION ALL
 			SELECT viewname, 'VIEW', '' FROM pg_views WHERE schemaname = $1
 			ORDER BY 1`,
@@ -342,14 +356,14 @@ var postgresDialect = &dialect{
 			WHERE c.relkind IN ('r', 'v', 'm', 'p')
 				AND n.nspname NOT IN ('pg_catalog', 'information_schema')
 			ORDER BY 1, 2`
-		return collectRows(db, fallback, nil, scanCrossSchemaTable)
+		return collectRowsOn(ctx, db, fallback, nil, scanCrossSchemaTable)
 	},
-	columns: func(c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error) {
-		db, err := c.poolFor(conn, database)
+	columns: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error) {
+		db, err := c.poolFor(ctx, conn, database)
 		if err != nil {
 			return nil, err
 		}
-		return collectRows(db, `SELECT a.attname, format_type(a.atttypid, a.atttypmod),
+		return collectRowsOn(ctx, db, `SELECT a.attname, format_type(a.atttypid, a.atttypmod),
 			CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END,
 			COALESCE(pg_get_expr(d.adbin, d.adrelid), ''),
 			CASE WHEN i.indisprimary THEN 1 ELSE 0 END,
@@ -363,8 +377,8 @@ var postgresDialect = &dialect{
 			ORDER BY a.attnum`,
 			[]interface{}{schema, table}, scanStandardColumn)
 	},
-	search: func(c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
-		db, err := c.poolFor(conn, database)
+	search: func(ctx context.Context, c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
+		db, err := c.poolFor(ctx, conn, database)
 		if err != nil {
 			return nil, err
 		}
@@ -375,14 +389,14 @@ var postgresDialect = &dialect{
 				AND n.nspname NOT IN ('pg_catalog', 'information_schema')
 				AND c.relname ILIKE $1
 			ORDER BY 1, 2 LIMIT %d`, limit)
-		return collectRows(db, query, []interface{}{likePattern(fragment)}, matchScanner(conn, database))
+		return collectRowsOn(ctx, db, query, []interface{}{likePattern(fragment)}, matchScanner(conn, database))
 	},
-	foreignKeys: func(c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
-		db, err := c.poolFor(conn, database)
+	foreignKeys: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
+		db, err := c.poolFor(ctx, conn, database)
 		if err != nil {
 			return nil, err
 		}
-		rows, err := collectRows(db, `SELECT con.conname, xg.attname, confnsp.nspname, confcls.relname, yg.attname,
+		rows, err := collectRowsOn(ctx, db, `SELECT con.conname, xg.attname, confnsp.nspname, confcls.relname, yg.attname,
 			COALESCE(CASE con.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT'
 				WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END, ''),
 			COALESCE(CASE con.confupdtype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT'
@@ -410,12 +424,12 @@ var postgresDialect = &dialect{
 	qualifiedTable: func(database, schema, table string) (string, error) {
 		return QualifiedName(DbTypePostgres, schema, table)
 	},
-	indexes: func(c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
-		db, err := c.poolFor(conn, database)
+	indexes: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
+		db, err := c.poolFor(ctx, conn, database)
 		if err != nil {
 			return nil, err
 		}
-		flat, err := collectRows(db, `SELECT c.relname, am.amname, CASE WHEN i.indisunique THEN 1 ELSE 0 END,
+		flat, err := collectRowsOn(ctx, db, `SELECT c.relname, am.amname, CASE WHEN i.indisunique THEN 1 ELSE 0 END,
 			CASE WHEN i.indisprimary THEN 1 ELSE 0 END, x.attname
 			FROM pg_index i
 			JOIN pg_class c ON c.oid = i.indexrelid
@@ -446,23 +460,23 @@ var postgresDialect = &dialect{
 }
 
 var sqliteDialect = &dialect{
-	databases: func(c *Store, conn *Conn) ([]string, error) {
+	databases: func(ctx context.Context, c *Store, conn *Conn) ([]string, error) {
 		return []string{conn.Config.Database}, nil
 	},
 	schemas: nil, // one main schema
-	tables: func(c *Store, conn *Conn, database, schema string) ([]TableInfo, error) {
-		return collectRows(conn.DB, `SELECT name, type, '' FROM sqlite_master
+	tables: func(ctx context.Context, c *Store, conn *Conn, database, schema string) ([]TableInfo, error) {
+		return collectRows(ctx, conn, `SELECT name, type, '' FROM sqlite_master
 			WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name`,
 			nil, tableScanner(schema))
 	},
-	columns: func(c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error) {
+	columns: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error) {
 		name, err := quoteIdent(DbTypeSQLite, table)
 		if err != nil {
 			return nil, err
 		}
-		return collectRows(conn.DB, fmt.Sprintf("PRAGMA table_info(%s)", name), nil, scanSQLiteColumn)
+		return collectRows(ctx, conn, fmt.Sprintf("PRAGMA table_info(%s)", name), nil, scanSQLiteColumn)
 	},
-	search: func(c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
+	search: func(ctx context.Context, c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
 		// The literal 'sqlite_%' needs its percent doubled: this whole string
 		// is a Sprintf format, and a bare % would corrupt the query. Unlike
 		// the other engines SQLite has no default LIKE escape, so one is
@@ -470,15 +484,15 @@ var sqliteDialect = &dialect{
 		query := fmt.Sprintf(`SELECT '', name, UPPER(type) FROM sqlite_master
 			WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%%' AND name LIKE ? ESCAPE '\'
 			ORDER BY name LIMIT %d`, limit)
-		return collectRows(conn.DB, query, []interface{}{likePattern(fragment)},
+		return collectRows(ctx, conn, query, []interface{}{likePattern(fragment)},
 			matchScanner(conn, database))
 	},
-	foreignKeys: func(c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
+	foreignKeys: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
 		name, err := quoteIdent(DbTypeSQLite, table)
 		if err != nil {
 			return nil, err
 		}
-		rows, err := collectRows(conn.DB, fmt.Sprintf("PRAGMA foreign_key_list(%s)", name), nil,
+		rows, err := collectRows(ctx, conn, fmt.Sprintf("PRAGMA foreign_key_list(%s)", name), nil,
 			func(r *sql.Rows) (tableprosql.FKRow, error) {
 				var id, seq int
 				var row tableprosql.FKRow
@@ -502,7 +516,7 @@ var sqliteDialect = &dialect{
 	qualifiedTable: func(database, schema, table string) (string, error) {
 		return QualifiedName(DbTypeSQLite, table)
 	},
-	indexes: func(c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
+	indexes: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
 		name, err := quoteIdent(DbTypeSQLite, table)
 		if err != nil {
 			return nil, err
@@ -512,7 +526,7 @@ var sqliteDialect = &dialect{
 			origin string
 			unique bool
 		}
-		entries, err := collectRows(conn.DB, fmt.Sprintf("PRAGMA index_list(%s)", name), nil,
+		entries, err := collectRows(ctx, conn, fmt.Sprintf("PRAGMA index_list(%s)", name), nil,
 			func(r *sql.Rows) (entry, error) {
 				var seq int
 				var e entry
@@ -538,7 +552,7 @@ var sqliteDialect = &dialect{
 			if err != nil {
 				return nil, err
 			}
-			columns, err := collectRows(conn.DB, fmt.Sprintf("PRAGMA index_info(%s)", idxName), nil,
+			columns, err := collectRows(ctx, conn, fmt.Sprintf("PRAGMA index_info(%s)", idxName), nil,
 				func(r *sql.Rows) (string, error) {
 					var seqno, cid int
 					var col string
@@ -571,26 +585,26 @@ var sqliteDialect = &dialect{
 }
 
 var sqlserverDialect = &dialect{
-	databases: func(c *Store, conn *Conn) ([]string, error) {
-		return collectRows(conn.DB, "SELECT name FROM sys.databases ORDER BY name", nil, scanString)
+	databases: func(ctx context.Context, c *Store, conn *Conn) ([]string, error) {
+		return collectRows(ctx, conn, "SELECT name FROM sys.databases ORDER BY name", nil, scanString)
 	},
-	schemas: func(c *Store, conn *Conn, database string) ([]string, error) {
+	schemas: func(ctx context.Context, c *Store, conn *Conn, database string) ([]string, error) {
 		name, err := quoteIdent(DbTypeSQLServer, database)
 		if err != nil {
 			return nil, err
 		}
-		return scanStrings(conn.DB, fmt.Sprintf(`SELECT s.name FROM %s.sys.schemas s
+		return scanStrings(ctx, conn, fmt.Sprintf(`SELECT s.name FROM %s.sys.schemas s
 			WHERE s.name NOT LIKE 'db[_]%%' AND s.name NOT IN ('sys','INFORMATION_SCHEMA','guest')
 			ORDER BY s.name`, name))
 	},
-	tables: func(c *Store, conn *Conn, database, schema string) ([]TableInfo, error) {
+	tables: func(ctx context.Context, c *Store, conn *Conn, database, schema string) ([]TableInfo, error) {
 		name, err := quoteIdent(DbTypeSQLServer, database)
 		if err != nil {
 			return nil, err
 		}
 		query := fmt.Sprintf(`SELECT TABLE_NAME, TABLE_TYPE, '' FROM %s.INFORMATION_SCHEMA.TABLES
 			WHERE TABLE_SCHEMA = %s ORDER BY TABLE_NAME`, name, sqlLiteral(schema))
-		tables, err := collectRows(conn.DB, query, nil, tableScanner(schema))
+		tables, err := collectRows(ctx, conn, query, nil, tableScanner(schema))
 		if err != nil || len(tables) > 0 {
 			return tables, err
 		}
@@ -598,9 +612,9 @@ var sqlserverDialect = &dialect{
 		// under another schema would look empty. List them all, labeled with
 		// their real one.
 		fallback := fmt.Sprintf(`SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM %s.INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA, TABLE_NAME`, name)
-		return collectRows(conn.DB, fallback, nil, scanCrossSchemaTable)
+		return collectRows(ctx, conn, fallback, nil, scanCrossSchemaTable)
 	},
-	columns: func(c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error) {
+	columns: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error) {
 		name, err := quoteIdent(DbTypeSQLServer, database)
 		if err != nil {
 			return nil, err
@@ -618,9 +632,9 @@ var sqlserverDialect = &dialect{
 			) pk ON pk.TABLE_SCHEMA=c.TABLE_SCHEMA AND pk.TABLE_NAME=c.TABLE_NAME AND pk.COLUMN_NAME=c.COLUMN_NAME
 			WHERE c.TABLE_NAME=%s AND c.TABLE_SCHEMA=%s ORDER BY c.ORDINAL_POSITION`,
 			name, name, name, sqlLiteral(table), sqlLiteral(schema))
-		return collectRows(conn.DB, query, nil, scanStandardColumn)
+		return collectRows(ctx, conn, query, nil, scanStandardColumn)
 	},
-	search: func(c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
+	search: func(ctx context.Context, c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
 		name, err := quoteIdent(DbTypeSQLServer, database)
 		if err != nil {
 			return nil, err
@@ -631,9 +645,9 @@ var sqlserverDialect = &dialect{
 			FROM %s.INFORMATION_SCHEMA.TABLES
 			WHERE TABLE_NAME LIKE %s ESCAPE '\' ORDER BY TABLE_NAME`,
 			limit, name, sqlLiteral(likePattern(fragment)))
-		return collectRows(conn.DB, query, nil, matchScanner(conn, database))
+		return collectRows(ctx, conn, query, nil, matchScanner(conn, database))
 	},
-	foreignKeys: func(c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
+	foreignKeys: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
 		quoted, err := quoteIdent(DbTypeSQLServer, database)
 		if err != nil {
 			return nil, err
@@ -659,7 +673,7 @@ var sqlserverDialect = &dialect{
 			WHERE fk.parent_object_id = OBJECT_ID(%s)
 			ORDER BY fk.name, fkc.constraint_column_id`,
 			quoted, quoted, quoted, quoted, quoted, quoted, literal)
-		rows, err := collectRows(conn.DB, query, nil, scanFkRow)
+		rows, err := collectRows(ctx, conn, query, nil, scanFkRow)
 		if err != nil {
 			return nil, err
 		}
@@ -672,7 +686,7 @@ var sqlserverDialect = &dialect{
 	qualifiedTable: func(database, schema, table string) (string, error) {
 		return QualifiedName(DbTypeSQLServer, database, schema, table)
 	},
-	indexes: func(c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
+	indexes: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
 		// Indexes are per-object, so the catalog of the target database is
 		// reached through a qualified name instead of a separate connection.
 		quoted, err := quoteIdent(DbTypeSQLServer, database)
@@ -684,7 +698,7 @@ var sqlserverDialect = &dialect{
 			return nil, err
 		}
 		literal := sqlLiteral(objectID)
-		flat, err := collectRows(conn.DB, fmt.Sprintf(`SELECT i.name, i.type_desc, CAST(i.is_unique AS int),
+		flat, err := collectRows(ctx, conn, fmt.Sprintf(`SELECT i.name, i.type_desc, CAST(i.is_unique AS int),
 			CAST(i.is_primary_key AS int), col.name
 			FROM %s.sys.indexes i
 			INNER JOIN %s.sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
@@ -735,36 +749,36 @@ const oracleCompletionObjectsSQL = `SELECT OBJECT_NAME FROM ALL_OBJECTS
 	SELECT DB_LINK FROM ALL_DB_LINKS WHERE OWNER = USER OR OWNER = 'PUBLIC'`
 
 var oracleDialect = &dialect{
-	databases: func(c *Store, conn *Conn) ([]string, error) {
-		return collectRows(conn.DB, "SELECT name FROM v$database ORDER BY name", nil, scanString)
+	databases: func(ctx context.Context, c *Store, conn *Conn) ([]string, error) {
+		return collectRows(ctx, conn, "SELECT name FROM v$database ORDER BY name", nil, scanString)
 	},
 	schemas: nil, // introspected through the connected user
-	tables: func(c *Store, conn *Conn, database, schema string) ([]TableInfo, error) {
-		return collectRows(conn.DB, `SELECT OBJECT_NAME, OBJECT_TYPE, '' FROM ALL_OBJECTS
+	tables: func(ctx context.Context, c *Store, conn *Conn, database, schema string) ([]TableInfo, error) {
+		return collectRows(ctx, conn, `SELECT OBJECT_NAME, OBJECT_TYPE, '' FROM ALL_OBJECTS
 			WHERE OBJECT_TYPE IN ('TABLE','VIEW') AND OWNER = USER ORDER BY OBJECT_NAME`,
 			nil, tableScanner(schema))
 	},
-	completionObjects: func(c *Store, conn *Conn, database string) ([]string, error) {
-		return collectRows(conn.DB, oracleCompletionObjectsSQL, nil, scanString)
+	completionObjects: func(ctx context.Context, c *Store, conn *Conn, database string) ([]string, error) {
+		return collectRows(ctx, conn, oracleCompletionObjectsSQL, nil, scanString)
 	},
-	columns: func(c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error) {
-		return collectRows(conn.DB, `SELECT column_name, data_type, nullable, data_default, 0, comments
+	columns: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ColumnInfo, error) {
+		return collectRows(ctx, conn, `SELECT column_name, data_type, nullable, data_default, 0, comments
 			FROM all_tab_columns c
 			LEFT JOIN all_col_comments cc ON cc.owner=c.owner AND cc.table_name=c.table_name
 				AND cc.column_name=c.column_name
 			WHERE c.owner=USER AND c.table_name = :1 ORDER BY c.column_id`,
 			[]interface{}{strings.ToUpper(table)}, scanStandardColumn)
 	},
-	search: func(c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
+	search: func(ctx context.Context, c *Store, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
 		query := fmt.Sprintf(`SELECT * FROM (
 			SELECT OWNER, OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS
 			WHERE OBJECT_TYPE IN ('TABLE', 'VIEW') AND UPPER(OBJECT_NAME) LIKE '%s' ESCAPE '\'
 			ORDER BY OWNER, OBJECT_NAME)
 			WHERE ROWNUM <= %d`, strings.ReplaceAll(strings.ToUpper(likePattern(fragment)), "'", "''"), limit)
-		return collectRows(conn.DB, query, nil, matchScanner(conn, database))
+		return collectRows(ctx, conn, query, nil, matchScanner(conn, database))
 	},
-	foreignKeys: func(c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
-		rows, err := collectRows(conn.DB, fmt.Sprintf(`SELECT ac.constraint_name, cc.column_name, rac.owner, rac.table_name,
+	foreignKeys: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
+		rows, err := collectRows(ctx, conn, fmt.Sprintf(`SELECT ac.constraint_name, cc.column_name, rac.owner, rac.table_name,
 			rcc.column_name, ac.delete_rule, ''
 			FROM ALL_CONSTRAINTS ac
 			JOIN ALL_CONS_COLUMNS cc ON cc.owner = ac.owner AND cc.constraint_name = ac.constraint_name
@@ -785,8 +799,8 @@ var oracleDialect = &dialect{
 	qualifiedTable: func(database, schema, table string) (string, error) {
 		return QualifiedName(DbTypeOracle, table)
 	},
-	indexes: func(c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
-		flat, err := collectRows(conn.DB, fmt.Sprintf(`SELECT i.index_name, i.index_type,
+	indexes: func(ctx context.Context, c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
+		flat, err := collectRows(ctx, conn, fmt.Sprintf(`SELECT i.index_name, i.index_type,
 			CASE WHEN i.uniqueness = 'UNIQUE' THEN 1 ELSE 0 END,
 			CASE WHEN EXISTS (SELECT 1 FROM ALL_CONSTRAINTS ac
 				WHERE ac.constraint_type = 'P' AND ac.owner = i.owner AND ac.index_name = i.index_name)

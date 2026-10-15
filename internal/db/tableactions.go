@@ -91,7 +91,7 @@ func TableActionStatement(o ObjectNames, action string) (string, error) {
 // runTableAction validates the object against the catalog, renders the
 // statement and executes it. It goes through the same execute path as a typed
 // statement, so the action lands in the history with its error if it fails.
-func (c *Store) RunTableAction(connID, database, schema, table, action, newName string) (string, error) {
+func (c *Store) RunTableAction(ctx context.Context, connID, database, schema, table, action, newName string) (string, error) {
 	conn, err := c.OpenConn(connID)
 	if err != nil {
 		return "", err
@@ -101,7 +101,7 @@ func (c *Store) RunTableAction(connID, database, schema, table, action, newName 
 	}
 	schema = DefaultSchema(conn.Config.Type, schema)
 
-	tables, err := c.Tables(connID, database, schema)
+	tables, err := c.Tables(ctx, connID, database, schema)
 	if err != nil {
 		return "", err
 	}
@@ -132,7 +132,7 @@ func (c *Store) RunTableAction(connID, database, schema, table, action, newName 
 	if err != nil {
 		return "", err
 	}
-	result := c.Execute(context.Background(), conn, database, statement, 0)
+	result := c.Execute(ctx, conn, database, statement, 0)
 	c.RecordStatement(connID, database, statement, result)
 	if result.Error != "" {
 		return statement, fmt.Errorf("%s", result.Error)

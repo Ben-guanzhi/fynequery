@@ -80,7 +80,7 @@ func TestEndToEndSQLite(t *testing.T) {
 	}
 
 	// Schema browsing.
-	dbs, err := c.store.Databases(cfg.ID)
+	dbs, err := c.store.Databases(context.Background(), cfg.ID)
 	if err != nil || len(dbs) != 1 {
 		t.Fatalf("databases: %v (len=%d)", err, len(dbs))
 	}
@@ -88,7 +88,7 @@ func TestEndToEndSQLite(t *testing.T) {
 		t.Fatalf("expected database %q, got %q", dbFile, dbs[0])
 	}
 
-	tables, err := c.store.Tables(cfg.ID, dbFile, "")
+	tables, err := c.store.Tables(context.Background(), cfg.ID, dbFile, "")
 	if err != nil {
 		t.Fatalf("tables: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestEndToEndSQLite(t *testing.T) {
 		t.Fatalf("expected users table, got %+v", tables)
 	}
 
-	cols, err := c.store.Columns(cfg.ID, dbFile, "", "users")
+	cols, err := c.store.Columns(context.Background(), cfg.ID, dbFile, "", "users")
 	if err != nil {
 		t.Fatalf("columns: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestForeignKeyMemoAndPicker(t *testing.T) {
 		t.Fatalf("openConn: %v", err)
 	}
 
-	fks, err := c.foreignKeys("c0", dbFile, "", "orders")
+	fks, err := c.foreignKeys(context.Background(), "c0", dbFile, "", "orders")
 	if err != nil {
 		t.Fatalf("foreignKeys: %v", err)
 	}
@@ -195,30 +195,30 @@ func TestForeignKeyMemoAndPicker(t *testing.T) {
 
 	// The catalog is now behind the memo: a schema change the session cannot
 	// see must not change the answer, because nothing re-reads it.
-	if _, err := conn.DB.Exec(`DROP TABLE orders`); err != nil {
-		t.Fatalf("drop: %v", err)
+	if res := c.store.Execute(context.Background(), conn, dbFile, `DROP TABLE orders`, 0); res.Error != "" {
+		t.Fatalf("drop: %s", res.Error)
 	}
 	twoKeys := `CREATE TABLE orders (id INTEGER PRIMARY KEY,
 		customer_id INTEGER REFERENCES customers(id),
 		biller_id INTEGER REFERENCES customers(id))`
-	if _, err := conn.DB.Exec(twoKeys); err != nil {
-		t.Fatalf("recreate: %v", err)
+	if res := c.store.Execute(context.Background(), conn, dbFile, twoKeys, 0); res.Error != "" {
+		t.Fatalf("recreate: %s", res.Error)
 	}
-	if again, err := c.foreignKeys("c0", dbFile, "", "orders"); err != nil {
+	if again, err := c.foreignKeys(context.Background(), "c0", dbFile, "", "orders"); err != nil {
 		t.Fatalf("second foreignKeys: %v", err)
 	} else if len(again) != 1 {
 		t.Fatalf("expected the memoized constraint list, got %+v", again)
 	}
 
 	// A different table is a different cache entry, not the same answer.
-	if got, err := c.foreignKeys("c0", dbFile, "", "customers"); err != nil || len(got) != 0 {
+	if got, err := c.foreignKeys(context.Background(), "c0", dbFile, "", "customers"); err != nil || len(got) != 0 {
 		t.Fatalf("customers has no foreign keys, got %+v (%v)", got, err)
 	}
 
 	// The picker reads the referenced table through the dialect's own name
 	// builder, so "what could this cell hold" is the key set the write would
 	// satisfy. Ordering on the key makes the list stable.
-	cands, err := c.foreignKeyValues("c0", dbFile, "", "orders", "customer_id", 10)
+	cands, err := c.foreignKeyValues(context.Background(), "c0", dbFile, "", "orders", "customer_id", 10)
 	if err != nil {
 		t.Fatalf("foreignKeyValues: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestForeignKeyMemoAndPicker(t *testing.T) {
 	}
 
 	// The composite-key refusal is what keeps such a cell plain text.
-	if _, err := c.foreignKeyValues("c0", dbFile, "", "orders", "biller_id", 10); err == nil {
+	if _, err := c.foreignKeyValues(context.Background(), "c0", dbFile, "", "orders", "biller_id", 10); err == nil {
 		t.Error("a memoized constraint list that lacks this column must be refused")
 	}
 }

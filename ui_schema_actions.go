@@ -7,6 +7,8 @@ package main
 // no catalog row: 新建表.
 
 import (
+	"context"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
@@ -71,13 +73,25 @@ func (c *Client) confirmNodeAction(nd *nodeData, action, newName string) {
 		if !ok {
 			return
 		}
-		run, err := c.store.RunTableAction(id, nd.db, nd.schema, nd.name, action, newName)
-		if err != nil {
-			dialog.ShowError(err, c.win)
-			return
-		}
-		c.setStatus("已执行：" + run)
-		c.refreshSchema()
+		// Checking the object against the catalog and running the statement are
+		// both round trips, so they do not run on the event thread. Nothing owns
+		// the cancel here: a DDL statement that has been sent is not something the
+		// user can take back, so this one runs to its answer.
+		database, schema, table := nd.db, nd.schema, nd.name
+		var (
+			run  string
+			aErr error
+		)
+		c.background(func(ctx context.Context) {
+			run, aErr = c.store.RunTableAction(ctx, id, database, schema, table, action, newName)
+		}, func() {
+			if aErr != nil {
+				dialog.ShowError(aErr, c.win)
+				return
+			}
+			c.setStatus("已执行：" + run)
+			c.refreshSchema()
+		})
 	}, c.win)
 }
 

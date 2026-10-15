@@ -87,7 +87,7 @@ func itemSet(file string, changes ...RowChange) ChangeSet {
 func TestApplyChangesCommitsTheWholeBatch(t *testing.T) {
 	store, file := newChangeStore(t, itemsSeed, itemsRows)
 
-	applied, err := store.ApplyChanges(itemSet(file,
+	applied, err := store.ApplyChanges(context.Background(), itemSet(file,
 		RowChange{Original: []interface{}{int64(1), "alpha", "n1"},
 			Edits: []CellEdit{{Column: "name", Value: "alpha2"}}},
 		RowChange{Kind: RowDelete, Original: []interface{}{int64(2), "beta", "n2"}},
@@ -128,7 +128,7 @@ func TestApplyChangesWritesBackAReadRow(t *testing.T) {
 		t.Fatalf("an INTEGER key reads back as %T, not int64", read.Rows[0][0])
 	}
 
-	applied, err := store.ApplyChanges(itemSet(file,
+	applied, err := store.ApplyChanges(context.Background(), itemSet(file,
 		RowChange{Original: read.Rows[0], Edits: []CellEdit{{Column: "name", Value: "alpha2"}}},
 		RowChange{Kind: RowDelete, Original: read.Rows[1]},
 	))
@@ -160,14 +160,14 @@ func TestApplyChangesWritesBackAReadRow(t *testing.T) {
 		Columns: []string{"id", "v"},
 		Changes: []RowChange{{Original: big.Rows[1], Edits: []CellEdit{{Column: "v", Value: "changed"}}}},
 	}
-	statements, err := store2.BuildChanges(set)
+	statements, err := store2.BuildChanges(context.Background(), set)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 	if !strings.Contains(statements[0], "9007199254740994") {
 		t.Errorf("statement = %s, want the key exact", statements[0])
 	}
-	if applied, err = store2.ApplyChanges(set); err != nil || applied != 1 {
+	if applied, err = store2.ApplyChanges(context.Background(), set); err != nil || applied != 1 {
 		t.Fatalf("apply: applied %d, err %v", applied, err)
 	}
 	if got := dumpTable(t, store2, file2, "big"); got != "9007199254740993|one\n9007199254740994|changed" {
@@ -199,14 +199,14 @@ func TestApplyChangesLocatesARowByKeyTypedAsText(t *testing.T) {
 		Changes: []RowChange{{Original: []interface{}{"9007199254740993", "one"},
 			Edits: []CellEdit{{Column: "v", Value: "changed"}}}},
 	}
-	statements, err := store.BuildChanges(set)
+	statements, err := store.BuildChanges(context.Background(), set)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 	if !strings.Contains(statements[0], "= 9007199254740993") {
 		t.Errorf("statement = %s, want the typed key written exactly", statements[0])
 	}
-	applied, err := store.ApplyChanges(set)
+	applied, err := store.ApplyChanges(context.Background(), set)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestApplyChangesRollsBackWhenAStatementFails(t *testing.T) {
 	store, file := newChangeStore(t, itemsSeed,
 		`INSERT INTO items (id, name, note) VALUES (1, 'alpha', 'n1'), (2, 'beta', 'n2')`)
 
-	applied, err := store.ApplyChanges(itemSet(file,
+	applied, err := store.ApplyChanges(context.Background(), itemSet(file,
 		RowChange{Original: []interface{}{int64(1), "alpha", "n1"},
 			Edits: []CellEdit{{Column: "name", Value: "renamed"}}},
 		// note is UNIQUE and 'n2' is taken, so this is the statement that dies.
@@ -259,7 +259,7 @@ func TestApplyChangesAbortsWhenAStatementMatchesNoRow(t *testing.T) {
 	store, file := newChangeStore(t, itemsSeed,
 		`INSERT INTO items (id, name, note) VALUES (1, 'alpha', 'n1'), (2, 'beta', 'n2')`)
 
-	applied, err := store.ApplyChanges(itemSet(file,
+	applied, err := store.ApplyChanges(context.Background(), itemSet(file,
 		RowChange{Original: []interface{}{int64(1), "alpha", "n1"},
 			Edits: []CellEdit{{Column: "name", Value: "renamed"}}},
 		// id 99 is not in the table, and this is not an error the server raises.
@@ -282,7 +282,7 @@ func TestApplyChangesAbortsWhenAStatementMatchesNoRow(t *testing.T) {
 	// The same queue with the row still present must succeed, or the guard above
 	// would pass for the wrong reason: a harness that never matches a row also
 	// never commits one.
-	applied, err = store.ApplyChanges(itemSet(file,
+	applied, err = store.ApplyChanges(context.Background(), itemSet(file,
 		RowChange{Original: []interface{}{int64(1), "alpha", "n1"},
 			Edits: []CellEdit{{Column: "name", Value: "renamed"}}},
 		RowChange{Kind: RowDelete, Original: []interface{}{int64(2), "beta", "n2"}},
@@ -303,7 +303,7 @@ func TestIdenticalValueUpdateCountsAsOneRow(t *testing.T) {
 	store, file := newChangeStore(t, itemsSeed,
 		`INSERT INTO items (id, name, note) VALUES (1, 'alpha', 'n1')`)
 
-	applied, err := store.ApplyChanges(itemSet(file,
+	applied, err := store.ApplyChanges(context.Background(), itemSet(file,
 		RowChange{Original: []interface{}{int64(1), "alpha", "n1"},
 			Edits: []CellEdit{{Column: "name", Value: "alpha"}}},
 	))
@@ -354,7 +354,7 @@ func TestApplyChangesRefusesBeforeTouchingTheServer(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			store, file := newChangeStore(t, itemsSeed,
 				`INSERT INTO items (id, name, note) VALUES (1, 'alpha', 'n1')`)
-			applied, err := store.ApplyChanges(c.set(file))
+			applied, err := store.ApplyChanges(context.Background(), c.set(file))
 			if err == nil {
 				t.Fatalf("ApplyChanges accepted a %s queue", c.name)
 			}
@@ -388,7 +388,7 @@ func TestCompositeKeyLocatesOneRowOnTheServer(t *testing.T) {
 			Edits:    []CellEdit{{Column: "v", Value: "updated"}},
 		}},
 	}
-	statements, err := store.BuildChanges(set)
+	statements, err := store.BuildChanges(context.Background(), set)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestCompositeKeyLocatesOneRowOnTheServer(t *testing.T) {
 		!strings.Contains(statements[0], `"a" = 'x'`) {
 		t.Fatalf("statement = %q, want both key columns in the WHERE", statements[0])
 	}
-	applied, err := store.ApplyChanges(set)
+	applied, err := store.ApplyChanges(context.Background(), set)
 	if err != nil || applied != 1 {
 		t.Fatalf("apply: applied %d, err %v", applied, err)
 	}
@@ -413,14 +413,14 @@ func TestApplyChangesLeavesNoTransactionOpen(t *testing.T) {
 	store, file := newChangeStore(t, itemsSeed,
 		`INSERT INTO items (id, name, note) VALUES (1, 'alpha', 'n1')`)
 
-	if _, err := store.ApplyChanges(itemSet(file,
+	if _, err := store.ApplyChanges(context.Background(), itemSet(file,
 		RowChange{Original: []interface{}{int64(1), "alpha", "n1"},
 			Edits: []CellEdit{{Column: "name", Value: "renamed"}}},
 		RowChange{Kind: RowDelete, Original: []interface{}{int64(99), "gone", "n9"}},
 	)); err == nil {
 		t.Fatal("the first batch was expected to abort")
 	}
-	if _, err := store.ApplyChanges(itemSet(file,
+	if _, err := store.ApplyChanges(context.Background(), itemSet(file,
 		RowChange{Original: []interface{}{int64(1), "alpha", "n1"},
 			Edits: []CellEdit{{Column: "name", Value: "renamed"}}},
 	)); err != nil {
@@ -442,7 +442,7 @@ func TestApplyChangesRejectsAnUnavailableConnection(t *testing.T) {
 	set := itemSet(file, RowChange{Original: []interface{}{int64(1), "alpha", "n1"},
 		Edits: []CellEdit{{Column: "name", Value: "x"}}})
 	store.Disconnect(changeConnID)
-	applied, err := store.ApplyChanges(set)
+	applied, err := store.ApplyChanges(context.Background(), set)
 	if err == nil || applied != 0 {
 		t.Fatalf("applying to a closed connection: applied %d, err %v", applied, err)
 	}
@@ -452,7 +452,7 @@ func TestApplyChangesRejectsAnUnavailableConnection(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("reconnect: %v", err)
 	}
-	if applied, err = store.ApplyChanges(set); err != nil || applied != 1 {
+	if applied, err = store.ApplyChanges(context.Background(), set); err != nil || applied != 1 {
 		t.Fatalf("after reconnect: applied %d, err %v", applied, err)
 	}
 	if got := dumpTable(t, store, file, "items"); got != "1|x|n1" {

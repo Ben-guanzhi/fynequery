@@ -1,14 +1,14 @@
 package db
 
 import (
-	"database/sql"
+	"context"
 	"regexp"
 	"strings"
 )
 
 // columns lists column metadata for a table; the per-engine queries and scans
 // live on the dialect (dialect.go).
-func (c *Store) Columns(id, database, schema, table string) ([]ColumnInfo, error) {
+func (c *Store) Columns(ctx context.Context, id, database, schema, table string) ([]ColumnInfo, error) {
 	conn, err := c.OpenConn(id)
 	if err != nil {
 		return nil, err
@@ -20,11 +20,11 @@ func (c *Store) Columns(id, database, schema, table string) ([]ColumnInfo, error
 	if err != nil {
 		return nil, err
 	}
-	return d.columns(c, conn, database, schema, table)
+	return d.columns(ctx, c, conn, database, schema, table)
 }
 
 // tableIndexes reads one table's index list via the dialect.
-func (c *Store) TableIndexes(connID, database, schema, table string) ([]IndexInfo, error) {
+func (c *Store) TableIndexes(ctx context.Context, connID, database, schema, table string) ([]IndexInfo, error) {
 	conn, err := c.OpenConn(connID)
 	if err != nil {
 		return nil, err
@@ -36,12 +36,12 @@ func (c *Store) TableIndexes(connID, database, schema, table string) ([]IndexInf
 	if err != nil {
 		return nil, err
 	}
-	return d.indexes(c, conn, database, schema, table)
+	return d.indexes(ctx, c, conn, database, schema, table)
 }
 
 // scanStrings runs a single-string-column query and collects results.
-func scanStrings(db *sql.DB, query string) ([]string, error) {
-	return collectRows(db, query, nil, scanString)
+func scanStrings(ctx context.Context, conn *Conn, query string) ([]string, error) {
+	return collectRows(ctx, conn, query, nil, scanString)
 }
 
 // allows implements DatabaseFilter matching.

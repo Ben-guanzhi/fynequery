@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -58,29 +59,33 @@ func (c *Store) Disconnect(id string) {
 
 // poolFor returns the pool for introspecting the given database. PostgreSQL
 // needs its own session per database; the others answer over the main pool.
-func (c *Store) poolFor(conn *Conn, database string) (*sql.DB, error) {
+//
+// ctx belongs here too: opening a per-database session is a dial plus a ping,
+// which is the slowest part of reading a remote catalog.
+func (c *Store) poolFor(ctx context.Context, conn *Conn, database string) (*sql.DB, error) {
 	if conn.DB == nil {
 		return nil, fmt.Errorf("not connected")
 	}
 	if conn.Config.Type == DbTypePostgres && database != "" && database != conn.Config.Database {
-		return c.perDatabasePool(conn, database)
+		return c.perDatabasePool(ctx, conn, database)
 	}
 	return conn.DB, nil
 }
 
 // queryPool returns the pool a statement runs on, opening a dedicated session
 // when the target database differs for engines that resolve names per session.
-func (c *Store) queryPool(conn *Conn, database string) (*sql.DB, error) {
+func (c *Store) queryPool(ctx context.Context, conn *Conn, database string) (*sql.DB, error) {
 	if database != "" && database != conn.Config.Database {
 		switch conn.Config.Type {
 		case DbTypeMySQL, DbTypeSQLServer:
-			return c.perDatabasePool(conn, database)
+			return c.perDatabasePool(ctx, conn, database)
 		}
 	}
-	return c.poolFor(conn, database)
+	return c.poolFor(ctx, conn, database)
 }
 
-func (c *Store) perDatabasePool(conn *Conn, database string) (*sql.DB, error) {
+// perDatabasePool opens, or returns the already open, session for one database.
+func (c *Store) perDatabasePool(ctx context.Context, conn *Conn, database string) (*sql.DB, error) {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	if db, ok := conn.pools[database]; ok {
@@ -92,7 +97,7 @@ func (c *Store) perDatabasePool(conn *Conn, database string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("open database %q: %w", database, err)
 	}

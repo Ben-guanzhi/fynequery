@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -110,7 +111,7 @@ func SqlComparison(op string) string {
 // names that reach a statement are ones the table actually has. Conditions are
 // ANDed: the bar narrows the page, and a row has to satisfy every condition on
 // it.
-func (c *Store) TableWhere(connID, database, schema, table string, filters []TableFilter) (string, error) {
+func (c *Store) TableWhere(ctx context.Context, connID, database, schema, table string, filters []TableFilter) (string, error) {
 	if len(filters) == 0 {
 		return "", nil
 	}
@@ -119,7 +120,7 @@ func (c *Store) TableWhere(connID, database, schema, table string, filters []Tab
 		return "", err
 	}
 	schema = DefaultSchema(conn.Config.Type, schema)
-	columns, err := c.Columns(connID, database, schema, table)
+	columns, err := c.Columns(ctx, connID, database, schema, table)
 	if err != nil {
 		return "", err
 	}

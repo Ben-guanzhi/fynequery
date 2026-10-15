@@ -60,17 +60,17 @@ func oraLiteral(value string) string {
 
 // tableForeignKeys reads the foreign-key constraints of one table; the
 // per-engine catalog queries live on the dialect (dialect.go).
-func (c *Store) TableForeignKeys(conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
+func (c *Store) TableForeignKeys(ctx context.Context, conn *Conn, database, schema, table string) ([]ForeignKeyInfo, error) {
 	d, err := dialectFor(conn.Config.Type)
 	if err != nil {
 		return nil, err
 	}
-	return d.foreignKeys(c, conn, database, schema, table)
+	return d.foreignKeys(ctx, c, conn, database, schema, table)
 }
 
 // ForeignKeys lists the constraints a table has. Memoization is the UI's
 // job (fkCache in main): the catalog readers stay pure here.
-func (c *Store) ForeignKeys(connID, database, schema, table string) ([]ForeignKeyInfo, error) {
+func (c *Store) ForeignKeys(ctx context.Context, connID, database, schema, table string) ([]ForeignKeyInfo, error) {
 	conn, err := c.OpenConn(connID)
 	if err != nil {
 		return nil, err
@@ -78,7 +78,7 @@ func (c *Store) ForeignKeys(connID, database, schema, table string) ([]ForeignKe
 	if schema == "" {
 		schema = ResolveSchema(conn.Config.Type, database, schema)
 	}
-	return c.TableForeignKeys(conn, database, schema, table)
+	return c.TableForeignKeys(ctx, conn, database, schema, table)
 }
 
 // ForeignKeyValue is one choice for a foreign-key cell: the key the cell would
@@ -222,7 +222,7 @@ func candidateText(value interface{}) string {
 // foreignKeyValues lists the values a foreign-key cell may take. It reads the
 // catalog first, so a column that is not a single-column reference is refused
 // before anything is queried.
-func (c *Store) ForeignKeyValues(connID, database, schema, table, column string, fks []ForeignKeyInfo, limit int) (ForeignKeyCandidates, error) {
+func (c *Store) ForeignKeyValues(ctx context.Context, connID, database, schema, table, column string, fks []ForeignKeyInfo, limit int) (ForeignKeyCandidates, error) {
 	conn, err := c.OpenConn(connID)
 	if err != nil {
 		return ForeignKeyCandidates{}, err
@@ -252,7 +252,7 @@ func (c *Store) ForeignKeyValues(connID, database, schema, table, column string,
 	// The description is a convenience: a catalog the database filter hides must
 	// not cost the user their list of keys.
 	var labelColumn string
-	if columns, err := c.Columns(connID, database, refSchema, fk.RefTable); err == nil {
+	if columns, err := c.Columns(ctx, connID, database, refSchema, fk.RefTable); err == nil {
 		labelColumn = pickLabelColumn(columns, refColumn)
 	}
 
@@ -261,13 +261,18 @@ func (c *Store) ForeignKeyValues(connID, database, schema, table, column string,
 		return ForeignKeyCandidates{}, err
 	}
 
-	db := conn.DB
-	if conn.Config.Type == DbTypePostgres {
-		if db, err = c.poolFor(conn, database); err != nil {
-			return ForeignKeyCandidates{}, err
-		}
+	// The same pool the catalog readers use: PostgreSQL needs a session inside
+	// the referenced database, the others answer over the main handle - and both
+	// now go through the lock, so a disconnect during this call is an error
+	// rather than a handle that vanished underneath it.
+	db, err := c.poolFor(ctx, conn, database)
+	if err != nil {
+		return ForeignKeyCandidates{}, err
 	}
-	result := runSelect(context.Background(), db, query, time.Now())
+	// The caller's context reaches this query: the candidate list is fetched
+	// while the user is waiting on a dialog, and a slow server must be
+	// interruptible rather than fatal.
+	result := runSelect(ctx, db, query, time.Now())
 	if result.Error != "" {
 		return ForeignKeyCandidates{}, fmt.Errorf("%s", result.Error)
 	}

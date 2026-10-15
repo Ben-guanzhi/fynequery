@@ -3,6 +3,7 @@ package db
 import (
 	"github.com/Ben-guanzhi/TableProGo/tableprosql"
 
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -41,7 +42,7 @@ const (
 // and something did fail, that failure is returned: "no matches" and "the
 // catalog could not be read" look the same in the UI but are not the same
 // thing.
-func (c *Store) SearchObjects(pattern string, limit int) ([]ObjectMatch, error) {
+func (c *Store) SearchObjects(ctx context.Context, pattern string, limit int) ([]ObjectMatch, error) {
 	pattern = strings.TrimSpace(pattern)
 	if pattern == "" {
 		return []ObjectMatch{}, nil
@@ -76,7 +77,14 @@ func (c *Store) SearchObjects(pattern string, limit int) ([]ObjectMatch, error) 
 		if len(found) >= limit {
 			break
 		}
-		databases, err := c.Databases(conn.Config.ID)
+		if err := ctx.Err(); err != nil {
+			// A search walks every database of every live connection, which on a
+			// remote server is a long walk. Leaving it because the caller stopped
+			// caring is a different thing from finding nothing, so the partial
+			// answer is returned as-is and the caller decides what to show.
+			return found, err
+		}
+		databases, err := c.Databases(ctx, conn.Config.ID)
 		if err != nil {
 			record(conn.Config.Name, err)
 			continue
@@ -89,7 +97,7 @@ func (c *Store) SearchObjects(pattern string, limit int) ([]ObjectMatch, error) 
 			if len(found) >= limit {
 				break
 			}
-			hits, err := c.SearchInDatabase(conn, database, pattern, limit-len(found))
+			hits, err := c.SearchInDatabase(ctx, conn, database, pattern, limit-len(found))
 			if err != nil {
 				// One database being unreachable - offline, no rights - must not
 				// hide the matches the others have.
@@ -111,7 +119,7 @@ func likePattern(fragment string) string {
 	return tableprosql.LikePattern(fragment)
 }
 
-func (c *Store) SearchInDatabase(conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
+func (c *Store) SearchInDatabase(ctx context.Context, conn *Conn, database, fragment string, limit int) ([]ObjectMatch, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -119,5 +127,5 @@ func (c *Store) SearchInDatabase(conn *Conn, database, fragment string, limit in
 	if err != nil {
 		return nil, err
 	}
-	return d.search(c, conn, database, fragment, limit)
+	return d.search(ctx, c, conn, database, fragment, limit)
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
@@ -84,8 +86,21 @@ func (c *Client) showFilterDialog() {
 	}
 	addCond()
 
-	var d *dialog.CustomDialog
-	apply := func() {
+	var (
+		d        *dialog.CustomDialog
+		applyBtn *widget.Button
+		giveUp   func()
+		apply    func()
+		reading  bool
+	)
+	// The WHERE is rebuilt against the catalog, so applying a filter is a round
+	// trip like any other: it goes off the event thread and a closed dialog gives
+	// up on it. The condition rows are read before that because the widgets
+	// belong to this thread.
+	apply = func() {
+		if reading {
+			return
+		}
 		var filters []db.TableFilter
 		for _, r := range conds {
 			if r.column.Selected == "" {
@@ -97,14 +112,26 @@ func (c *Client) showFilterDialog() {
 				Value:  r.value.Text,
 			})
 		}
-		where, err := c.store.TableWhere(c.currentID, c.grid.src.Database, c.grid.src.Schema, c.grid.src.Table, filters)
-		if err != nil {
-			dialog.ShowError(err, c.win)
-			return
-		}
-		c.tabs.entry.setTextSilently("SELECT * FROM " + base + where)
-		d.Hide()
-		c.runCurrent()
+		connID, database, schema, table := c.currentID, c.grid.src.Database, c.grid.src.Schema, c.grid.src.Table
+		var (
+			where string
+			wErr  error
+		)
+		reading = true
+		applyBtn.Disable()
+		giveUp = c.background(func(ctx context.Context) {
+			where, wErr = c.store.TableWhere(ctx, connID, database, schema, table, filters)
+		}, func() {
+			reading = false
+			applyBtn.Enable()
+			if wErr != nil {
+				dialog.ShowError(wErr, c.win)
+				return
+			}
+			c.tabs.entry.setTextSilently("SELECT * FROM " + base + where)
+			d.Hide()
+			c.runCurrent()
+		})
 	}
 	clear := func() {
 		c.tabs.entry.setTextSilently("SELECT * FROM " + base)
@@ -123,8 +150,10 @@ func (c *Client) showFilterDialog() {
 			}
 		}),
 	)
+	applyBtn = widget.NewButtonWithIcon("应用过滤", theme.ConfirmIcon(), func() { apply() })
+	applyBtn.Importance = widget.HighImportance
 	buttons := container.NewHBox(
-		widget.NewButtonWithIcon("应用过滤", theme.ConfirmIcon(), apply),
+		applyBtn,
 		widget.NewButtonWithIcon("清除过滤", theme.CancelIcon(), clear),
 		layout.NewSpacer(),
 	)
@@ -135,6 +164,11 @@ func (c *Client) showFilterDialog() {
 		container.NewVScroll(rows),
 	)
 	d = dialog.NewCustom("过滤 "+c.grid.src.Table, "关闭", content, c.win)
+	d.SetOnClosed(func() {
+		if giveUp != nil {
+			giveUp()
+		}
+	})
 	d.Resize(fyne.NewSize(560, 340))
 	d.Show()
 }

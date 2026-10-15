@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -13,8 +14,28 @@ import (
 	"tablepro-fyne/internal/db"
 )
 
+// structureData is one table's catalog as read from the server: the four lists
+// the dialog shows, each with the error that would have left it empty. It is
+// filled off the event thread and rendered on it.
+type structureData struct {
+	connID   string
+	dbType   string
+	database string
+	table    string
+	columns  []db.ColumnInfo
+	indexes  []db.IndexInfo
+	fks      []db.ForeignKeyInfo
+	ddl      string
+	colsErr  error
+	idxErr   error
+	fkErr    error
+	ddlErr   error
+}
+
 // showStructureDialog displays one table's columns and indexes — the metadata
-// the grid only implies. Both lists come from the dialect's catalog readers.
+// the grid only implies. All four lists come from the dialect's catalog readers,
+// so they are read off the event thread: on a remote server the old synchronous
+// version left the window unpainted before the dialog ever appeared.
 func (c *Client) showStructureDialog(nd *nodeData) {
 	id := c.selectedOrLive()
 	conn, err := c.store.OpenConn(id)
@@ -23,24 +44,32 @@ func (c *Client) showStructureDialog(nd *nodeData) {
 		return
 	}
 	c.setStatus("加载 " + nd.name + " 结构 ...")
-
-	cols, err := c.store.Columns(id, nd.db, nd.schema, nd.name)
-	if err != nil {
-		dialog.ShowError(err, c.win)
-		return
+	data := structureData{
+		connID:   id,
+		dbType:   conn.Config.Type,
+		database: nd.db,
+		table:    nd.name,
 	}
-	// A table without indexes is normal; a catalog that refuses to answer is
-	// reported but must not cost the user the column list.
-	indexes, err := c.store.TableIndexes(id, nd.db, nd.schema, nd.name)
-	if err != nil {
-		indexes = nil
-		c.setStatus("索引读取失败：" + err.Error())
-	} else {
-		c.setStatus("就绪")
-	}
+	schema := nd.schema
+	c.background(func(ctx context.Context) {
+		data.columns, data.colsErr = c.store.Columns(ctx, id, nd.db, schema, nd.name)
+		// A table without indexes is normal; a catalog that refuses to answer is
+		// reported but must not cost the user the column list.
+		data.indexes, data.idxErr = c.store.TableIndexes(ctx, id, nd.db, schema, nd.name)
+		// Foreign keys are the third thing a grid cannot show: which constraint
+		// points where, and what the engine does to the child rows on delete or
+		// update. Same rule as the index list - a catalog that refuses to answer
+		// costs this tab its rows, not the dialog.
+		data.fks, data.fkErr = c.foreignKeys(ctx, id, nd.db, schema, nd.name)
+		data.ddl, data.ddlErr = c.store.TableDDL(ctx, id, nd.db, schema, nd.name)
+	}, func() { c.showStructureDialogBody(data) })
+}
 
-	columnRows := make([][]string, 0, len(cols))
-	for _, col := range cols {
+// showStructureDialogBody turns the fetched catalog rows into the tabbed
+// dialog. UI thread only.
+func (c *Client) showStructureDialogBody(data structureData) {
+	columnRows := make([][]string, 0, len(data.columns))
+	for _, col := range data.columns {
 		role := ""
 		if col.IsPrimaryKey {
 			role = "PK"
@@ -56,8 +85,8 @@ func (c *Client) showStructureDialog(nd *nodeData) {
 	columnTable := newMetaTable(
 		[]string{"字段", "类型", "可空", "键", "默认值", "注释"}, columnRows)
 
-	indexRows := make([][]string, 0, len(indexes))
-	for _, idx := range indexes {
+	indexRows := make([][]string, 0, len(data.indexes))
+	for _, idx := range data.indexes {
 		flags := ""
 		if idx.Primary {
 			flags = "PK"
@@ -71,23 +100,12 @@ func (c *Client) showStructureDialog(nd *nodeData) {
 	indexTable := newMetaTable(
 		[]string{"索引", "类型", "约束", "字段"}, indexRows)
 
-	// Foreign keys are the third thing a grid cannot show: which constraint
-	// points where, and what the engine does to the child rows on delete or
-	// update. Same rule as the index list - a catalog that refuses to answer
-	// costs this tab its rows, not the dialog.
-	fks, err := c.foreignKeys(id, nd.db, nd.schema, nd.name)
-	if err != nil {
-		fks = nil
-		c.setStatus("外键读取失败：" + err.Error())
-	} else {
-		c.setStatus("就绪")
-	}
-	fkRows := make([][]string, 0, len(fks))
-	for _, fk := range fks {
+	fkRows := make([][]string, 0, len(data.fks))
+	for _, fk := range data.fks {
 		fkRows = append(fkRows, []string{
 			fk.Name,
 			strings.Join(fk.Columns, ", "),
-			db.RefName(conn.Config.Type, nd.db, fk),
+			db.RefName(data.dbType, data.database, fk),
 			strings.Join(fk.RefColumns, ", "),
 			fk.OnDelete, fk.OnUpdate,
 		})
@@ -95,31 +113,45 @@ func (c *Client) showStructureDialog(nd *nodeData) {
 	fkTable := newMetaTable(
 		[]string{"约束", "本表字段", "引用表", "引用字段", "ON DELETE", "ON UPDATE"}, fkRows)
 
+	if data.colsErr != nil {
+		dialog.ShowError(data.colsErr, c.win)
+		return
+	}
+	switch {
+	case data.idxErr != nil:
+		c.setStatus("索引读取失败：" + data.idxErr.Error())
+	case data.fkErr != nil:
+		c.setStatus("外键读取失败：" + data.fkErr.Error())
+	default:
+		c.setStatus("就绪")
+	}
+
 	tabs := container.NewAppTabs(
-		container.NewTabItem(fmt.Sprintf("字段 (%d)", len(cols)), columnTable),
-		container.NewTabItem(fmt.Sprintf("索引 (%d)", len(indexes)), indexTable),
-		container.NewTabItem(fmt.Sprintf("外键 (%d)", len(fks)), fkTable),
-		container.NewTabItem("DDL", c.buildDDLTab(id, nd)),
+		container.NewTabItem(fmt.Sprintf("字段 (%d)", len(data.columns)), columnTable),
+		container.NewTabItem(fmt.Sprintf("索引 (%d)", len(data.indexes)), indexTable),
+		container.NewTabItem(fmt.Sprintf("外键 (%d)", len(data.fks)), fkTable),
+		container.NewTabItem("DDL", c.ddlTab(data.ddl, data.ddlErr)),
 	)
-	d := dialog.NewCustom("结构 "+nd.name, "关闭", tabs, c.win)
+	d := dialog.NewCustom("结构 "+data.table, "关闭", tabs, c.win)
 	d.Resize(fyne.NewSize(680, 460))
 	d.Show()
 }
 
-// buildDDLTab renders the table's reconstructed DDL with a copy button.
-func (c *Client) buildDDLTab(connID string, nd *nodeData) fyne.CanvasObject {
-	ddl, err := c.store.TableDDL(connID, nd.db, nd.schema, nd.name)
+// ddlTab renders the table's reconstructed DDL with a copy button. A catalog
+// that refuses the DDL costs this tab its text, not the dialog.
+func (c *Client) ddlTab(ddl string, err error) fyne.CanvasObject {
+	text := ddl
 	if err != nil {
-		ddl = "-- 无法生成建表语句：" + err.Error()
+		text = "-- 无法生成建表语句：" + err.Error()
 	}
 	ddlEntry := widget.NewMultiLineEntry()
 	ddlEntry.TextStyle = fyne.TextStyle{Monospace: true}
 	ddlEntry.Wrapping = fyne.TextWrapOff
-	ddlEntry.SetText(ddl)
+	ddlEntry.SetText(text)
 	ddlEntry.Disable()
 
 	copyBtn := widget.NewButtonWithIcon("复制 DDL", theme.ContentCopyIcon(), func() {
-		c.win.Clipboard().SetContent(ddl)
+		c.win.Clipboard().SetContent(text)
 		c.setStatus("已复制建表语句")
 	})
 	return container.NewBorder(container.NewHBox(copyBtn), nil, nil, nil, ddlEntry)

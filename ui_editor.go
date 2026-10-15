@@ -6,6 +6,7 @@ package main
 // ui_suggest.go.
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -302,10 +303,10 @@ func (c *Client) suggestionPool() []string {
 			}
 			c.mu.Unlock()
 			if !ok && !loading {
-				go c.loadSuggestTables(c.currentID, dbName, key)
+				go c.loadSuggestTables(context.Background(), c.currentID, dbName, key)
 			}
 			if !okObjects && !loadingObjects {
-				go c.loadSuggestObjects(c.currentID, dbName, key)
+				go c.loadSuggestObjects(context.Background(), c.currentID, dbName, key)
 			}
 			pool = append(pool, tables...)
 			pool = append(pool, objects...)
@@ -319,9 +320,9 @@ func (c *Client) suggestionPool() []string {
 // functions, sequences, synonyms, database links). Tables already come from
 // loadSuggestTables. A failed load is NOT memoized, so the next keystroke
 // retries instead of leaving completion empty for the session.
-func (c *Client) loadSuggestObjects(connID, db, key string) {
+func (c *Client) loadSuggestObjects(ctx context.Context, connID, db, key string) {
 	var objects []string
-	names, err := c.store.CompletionObjects(connID, db)
+	names, err := c.store.CompletionObjects(ctx, connID, db)
 	if err == nil {
 		objects = names
 	}
@@ -337,9 +338,9 @@ func (c *Client) loadSuggestObjects(connID, db, key string) {
 // thread; database/sql and the guarded maps are safe for this, and nothing
 // here touches a widget. A failed load is NOT memoized, so the next
 // keystroke retries instead of leaving completion empty for the session.
-func (c *Client) loadSuggestTables(connID, db, key string) {
+func (c *Client) loadSuggestTables(ctx context.Context, connID, db, key string) {
 	var tables []string
-	infos, err := c.store.Tables(connID, db, "")
+	infos, err := c.store.Tables(ctx, connID, db, "")
 	if err == nil {
 		for _, ti := range infos {
 			tables = append(tables, ti.Name)

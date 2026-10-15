@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,7 +33,7 @@ func TestSQLiteColumnFlags(t *testing.T) {
 	}
 	t.Cleanup(func() { c.Disconnect("c0") })
 
-	cols, err := c.Columns("c0", dbFile, "", "comp")
+	cols, err := c.Columns(context.Background(), "c0", dbFile, "", "comp")
 	if err != nil {
 		t.Fatalf("columns: %v", err)
 	}

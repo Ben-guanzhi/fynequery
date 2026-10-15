@@ -309,7 +309,10 @@ func (c *Client) limitValue() int {
 	return 1000
 }
 
-// dbSelRefresh repopulates the database selector for the live connection.
+// dbSelRefresh repopulates the database selector for the live connection. That
+// list is a catalog query, so it runs off the event thread and the selector is
+// filled in the callback - the toolbar used to stop drawing while a remote
+// server answered it.
 func (c *Client) dbSelRefresh() {
 	if c.dbs.sel == nil {
 		return
@@ -319,25 +322,33 @@ func (c *Client) dbSelRefresh() {
 		c.dbs.sel.SetOptions(nil)
 		return
 	}
-	dbs, err := c.store.Databases(c.currentID)
-	if err != nil {
+	id := c.currentID
+	var (
+		dbs   []string
+		dbErr error
+	)
+	c.background(func(ctx context.Context) {
+		dbs, dbErr = c.store.Databases(ctx, id)
+	}, func() {
+		if dbErr != nil {
+			c.dbs.sel.Enable()
+			c.setStatus("数据库列表加载失败：" + dbErr.Error())
+			return
+		}
+		if len(dbs) == 0 {
+			c.dbs.sel.Enable()
+			return
+		}
+		c.mu.Lock()
+		c.dbs.list = dbs
+		c.mu.Unlock()
 		c.dbs.sel.Enable()
-		c.setStatus("数据库列表加载失败：" + err.Error())
-		return
-	}
-	if len(dbs) == 0 {
-		c.dbs.sel.Enable()
-		return
-	}
-	c.mu.Lock()
-	c.dbs.list = dbs
-	c.mu.Unlock()
-	c.dbs.sel.Enable()
-	c.dbs.sel.SetOptions(dbs)
-	if c.currentDB == "" {
-		c.currentDB = dbs[0]
-	}
-	c.dbs.sel.SetSelected(c.resolveDB())
+		c.dbs.sel.SetOptions(dbs)
+		if c.currentDB == "" {
+			c.currentDB = dbs[0]
+		}
+		c.dbs.sel.SetSelected(c.resolveDB())
+	})
 }
 
 // resolveDB returns the effective database to run against.
@@ -428,7 +439,7 @@ func (c *Client) runStatements(stmts []string) {
 			if paged {
 				// Making the window stable reads the catalog, so it belongs
 				// here rather than on the UI thread.
-				stmt, note := c.stablePageQuery(conn, dbName, stmts[0])
+				stmt, note := c.stablePageQuery(ctx, conn, dbName, stmts[0])
 				pageNote = note
 				res := c.store.ExecutePage(ctx, conn, dbName, stmt, 1, pageSize)
 				c.store.RecordStatement(connID, dbName, stmts[0], res)

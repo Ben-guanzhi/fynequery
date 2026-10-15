@@ -3,6 +3,7 @@ package db
 import (
 	"github.com/Ben-guanzhi/TableProGo/tableprosql"
 
+	"context"
 	"database/sql"
 	"fmt"
 	"math"
@@ -505,7 +506,7 @@ func BuildStatements(
 
 // buildChanges resolves what the grid cannot know - the object's name and the
 // table's keys and types - and leaves the rest to the pure builder.
-func (c *Store) BuildChanges(set ChangeSet) ([]string, error) {
+func (c *Store) BuildChanges(ctx context.Context, set ChangeSet) ([]string, error) {
 	conn, err := c.OpenConn(set.ConnID)
 	if err != nil {
 		return nil, err
@@ -519,7 +520,7 @@ func (c *Store) BuildChanges(set ChangeSet) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	columns, err := c.Columns(set.ConnID, set.Database, schema, set.Table)
+	columns, err := c.Columns(ctx, set.ConnID, set.Database, schema, set.Table)
 	if err != nil {
 		return nil, err
 	}
@@ -538,11 +539,13 @@ func (c *Store) BuildChanges(set ChangeSet) ([]string, error) {
 // ApplyChanges runs the rebuilt statements as one transaction: either every
 // edit lands or none does, which is the only way a mistake stays fixable. A
 // statement that matches no row aborts the batch instead of quietly skipping.
+// A canceled context stops the batch the same way: the transaction is left to
+// the deferred rollback, so nothing half-applied survives.
 // The count is the rows the batch committed, so it is 0 for any failed run -
 // including the one that aborted on a statement matching no row, whose earlier
 // statements had already been rolled back by the time this returns.
-func (c *Store) ApplyChanges(set ChangeSet) (int64, error) {
-	statements, err := c.BuildChanges(set)
+func (c *Store) ApplyChanges(ctx context.Context, set ChangeSet) (int64, error) {
+	statements, err := c.BuildChanges(ctx, set)
 	if err != nil {
 		return 0, err
 	}
@@ -550,12 +553,12 @@ func (c *Store) ApplyChanges(set ChangeSet) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	db, err := c.queryPool(conn, set.Database)
+	db, err := c.queryPool(ctx, conn, set.Database)
 	if err != nil {
 		return 0, err
 	}
 
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -563,7 +566,7 @@ func (c *Store) ApplyChanges(set ChangeSet) (int64, error) {
 
 	var applied int64
 	for i, statement := range statements {
-		affected, err := execInTx(tx, statement, i)
+		affected, err := execInTx(ctx, tx, statement, i)
 		if err != nil {
 			return 0, err
 		}
@@ -575,8 +578,8 @@ func (c *Store) ApplyChanges(set ChangeSet) (int64, error) {
 	return applied, nil
 }
 
-func execInTx(tx *sql.Tx, statement string, index int) (int64, error) {
-	res, err := tx.Exec(statement)
+func execInTx(ctx context.Context, tx *sql.Tx, statement string, index int) (int64, error) {
+	res, err := tx.ExecContext(ctx, statement)
 	if err != nil {
 		return 0, fmt.Errorf("statement %d: %w", index+1, err)
 	}

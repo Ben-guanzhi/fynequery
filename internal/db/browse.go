@@ -1,11 +1,17 @@
 package db
 
+import "context"
+
 // Client-level catalog readers: apply-generic over the dialect table in
 // dialect.go. The engine-specific SQL lives there; what stays here is the
 // barrier code - connection handling, schema defaults and the database filter.
+//
+// Every reader takes the caller's context. A catalog query is a round trip like
+// any other, so one that cannot be interrupted turns a slow remote server into
+// a window that will not draw and a 取消 button that does nothing.
 
 // databases lists databases for the live connection, applying the filter.
-func (c *Store) Databases(id string) ([]string, error) {
+func (c *Store) Databases(ctx context.Context, id string) ([]string, error) {
 	conn, err := c.OpenConn(id)
 	if err != nil {
 		return nil, err
@@ -19,7 +25,7 @@ func (c *Store) Databases(id string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	names, err := d.databases(c, conn)
+	names, err := d.databases(ctx, c, conn)
 	if err != nil {
 		return nil, err
 	}
@@ -52,12 +58,12 @@ func (c *Store) filterNames(id string, names []string) []string {
 }
 
 // schemas lists schemas for engines that have them (PostgreSQL, SQL Server).
-func (c *Store) Schemas(id, database string) ([]string, error) {
+func (c *Store) Schemas(ctx context.Context, id, database string) ([]string, error) {
 	conn, err := c.OpenConn(id)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := c.poolFor(conn, database); err != nil {
+	if _, err := c.poolFor(ctx, conn, database); err != nil {
 		return nil, err
 	}
 	d, err := dialectFor(conn.Config.Type)
@@ -69,11 +75,11 @@ func (c *Store) Schemas(id, database string) ([]string, error) {
 		// schema; Oracle is introspected through the connected user.
 		return nil, nil
 	}
-	return d.schemas(c, conn, database)
+	return d.schemas(ctx, c, conn, database)
 }
 
 // tables lists tables and views for a database/schema.
-func (c *Store) Tables(id, database, schema string) ([]TableInfo, error) {
+func (c *Store) Tables(ctx context.Context, id, database, schema string) ([]TableInfo, error) {
 	conn, err := c.OpenConn(id)
 	if err != nil {
 		return nil, err
@@ -90,13 +96,13 @@ func (c *Store) Tables(id, database, schema string) ([]TableInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return d.tables(c, conn, database, schema)
+	return d.tables(ctx, c, conn, database, schema)
 }
 
 // CompletionObjects names the catalog objects SQL completion should offer
 // beyond tables and views: the Code Assistant list. Engines without one answer
 // with nil so the caller just appends nothing.
-func (c *Store) CompletionObjects(id, database string) ([]string, error) {
+func (c *Store) CompletionObjects(ctx context.Context, id, database string) ([]string, error) {
 	conn, err := c.OpenConn(id)
 	if err != nil {
 		return nil, err
@@ -108,5 +114,5 @@ func (c *Store) CompletionObjects(id, database string) ([]string, error) {
 	if d.completionObjects == nil {
 		return nil, nil
 	}
-	return d.completionObjects(c, conn, database)
+	return d.completionObjects(ctx, c, conn, database)
 }

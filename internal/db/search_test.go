@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,7 +36,7 @@ func TestSearchObjects(t *testing.T) {
 	t.Cleanup(func() { c.Disconnect("c0") })
 
 	// A plain fragment finds tables and views, with the database filled in.
-	hits, err := c.SearchObjects("user", 0)
+	hits, err := c.SearchObjects(context.Background(), "user", 0)
 	if err != nil {
 		t.Fatalf("searchObjects: %v", err)
 	}
@@ -49,19 +50,19 @@ func TestSearchObjects(t *testing.T) {
 	}
 
 	// The empty path answers cleanly.
-	if hits, err := c.SearchObjects("no_such_table_xyz", 0); err != nil || len(hits) != 0 {
+	if hits, err := c.SearchObjects(context.Background(), "no_such_table_xyz", 0); err != nil || len(hits) != 0 {
 		t.Errorf("no-match search = %v, %v", hits, err)
 	}
 	// A blank pattern matches nothing rather than dumping the catalog.
-	if hits, err := c.SearchObjects("   ", 0); err != nil || len(hits) != 0 {
+	if hits, err := c.SearchObjects(context.Background(), "   ", 0); err != nil || len(hits) != 0 {
 		t.Errorf("blank search = %v, %v", hits, err)
 	}
 	// A typed % is a literal, so "ord%" matches nothing even though orders exists.
-	if hits, err := c.SearchObjects("ord%", 0); err != nil || len(hits) != 0 {
+	if hits, err := c.SearchObjects(context.Background(), "ord%", 0); err != nil || len(hits) != 0 {
 		t.Errorf("escaped-wildcard search = %v, %v", hits, err)
 	}
 	// A view is found and typed as one.
-	if hits, err := c.SearchObjects("v_ord", 0); err != nil || len(hits) != 1 || hits[0].Type != "view" {
+	if hits, err := c.SearchObjects(context.Background(), "v_ord", 0); err != nil || len(hits) != 1 || hits[0].Type != "view" {
 		t.Errorf("view search = %+v, %v", hits, err)
 	}
 }

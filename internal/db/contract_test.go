@@ -373,7 +373,7 @@ func testCatalogContract(t *testing.T, engine string) {
 	dbName, schema := target.database, target.schema
 
 	t.Run("databases list the fixture", func(t *testing.T) {
-		dbs, err := store.Databases("contract")
+		dbs, err := store.Databases(context.Background(), "contract")
 		if err != nil {
 			t.Fatalf("Databases: %v", err)
 		}
@@ -383,7 +383,7 @@ func testCatalogContract(t *testing.T, engine string) {
 	})
 
 	t.Run("tables list the fixture with types", func(t *testing.T) {
-		tables, err := store.Tables("contract", dbName, schema)
+		tables, err := store.Tables(context.Background(), "contract", dbName, schema)
 		if err != nil {
 			t.Fatalf("Tables: %v", err)
 		}
@@ -401,7 +401,7 @@ func testCatalogContract(t *testing.T, engine string) {
 	})
 
 	t.Run("columns carry the primary key and nullability", func(t *testing.T) {
-		cols, err := store.Columns("contract", dbName, schema, "tpro_child")
+		cols, err := store.Columns(context.Background(), "contract", dbName, schema, "tpro_child")
 		if err != nil {
 			t.Fatalf("Columns: %v", err)
 		}
@@ -443,7 +443,7 @@ func testCatalogContract(t *testing.T, engine string) {
 	})
 
 	t.Run("foreign keys resolve to the parent table", func(t *testing.T) {
-		fks, err := store.ForeignKeys("contract", dbName, schema, "tpro_child")
+		fks, err := store.ForeignKeys(context.Background(), "contract", dbName, schema, "tpro_child")
 		if err != nil {
 			t.Fatalf("ForeignKeys: %v", err)
 		}
@@ -463,7 +463,7 @@ func testCatalogContract(t *testing.T, engine string) {
 	})
 
 	t.Run("indexes include the declared non-unique one", func(t *testing.T) {
-		idxs, err := store.TableIndexes("contract", dbName, schema, "tpro_child")
+		idxs, err := store.TableIndexes(context.Background(), "contract", dbName, schema, "tpro_child")
 		if err != nil {
 			t.Fatalf("TableIndexes: %v", err)
 		}
@@ -493,7 +493,7 @@ func testCatalogContract(t *testing.T, engine string) {
 	})
 
 	t.Run("quick open finds the fixture by fragment", func(t *testing.T) {
-		matches, err := store.SearchInDatabase(conn, dbName, "tpro_chi", 50)
+		matches, err := store.SearchInDatabase(context.Background(), conn, dbName, "tpro_chi", 50)
 		if err != nil {
 			t.Fatalf("SearchInDatabase: %v", err)
 		}
@@ -536,7 +536,7 @@ func testCatalogContract(t *testing.T, engine string) {
 	})
 
 	t.Run("rebuilt DDL reports the constraint the catalog found", func(t *testing.T) {
-		ddl, err := store.TableDDL("contract", dbName, schema, "tpro_child")
+		ddl, err := store.TableDDL(context.Background(), "contract", dbName, schema, "tpro_child")
 		if err != nil {
 			t.Fatalf("TableDDL: %v", err)
 		}
@@ -699,7 +699,7 @@ func testWriteContract(t *testing.T, engine string) {
 
 	t.Run("a read row is written back", func(t *testing.T) {
 		rows := readParent()
-		applied, err := store.ApplyChanges(parentSet(rows.Columns,
+		applied, err := store.ApplyChanges(context.Background(), parentSet(rows.Columns,
 			RowChange{Original: rows.Rows[0], Edits: []CellEdit{{Column: "name", Value: "renamed"}}}))
 		if err != nil || applied != 1 {
 			t.Fatalf("apply: applied %d, err %v", applied, err)
@@ -714,7 +714,7 @@ func testWriteContract(t *testing.T, engine string) {
 		// Row 1 holds "renamed" from the write above; typing the same text again
 		// changes no bytes, which is the answer MySQL reports as zero rows by
 		// default - and zero is what the guard calls a lost row.
-		applied, err := store.ApplyChanges(parentSet(rows.Columns,
+		applied, err := store.ApplyChanges(context.Background(), parentSet(rows.Columns,
 			RowChange{Original: rows.Rows[0], Edits: []CellEdit{{Column: "name", Value: ValueString(rows.Rows[0][1])}}}))
 		if err != nil {
 			t.Fatalf("a no-op edit of a row that exists must not read as a lost row: %v", err)
@@ -727,7 +727,7 @@ func testWriteContract(t *testing.T, engine string) {
 	t.Run("a failing statement rolls the batch back", func(t *testing.T) {
 		rows := readParent()
 		dupe := ValueString(rows.Rows[0][0])
-		applied, err := store.ApplyChanges(parentSet(rows.Columns,
+		applied, err := store.ApplyChanges(context.Background(), parentSet(rows.Columns,
 			RowChange{Original: rows.Rows[1], Edits: []CellEdit{{Column: "name", Value: "should-not-survive"}}},
 			// The second statement re-uses a key that exists, so the server - not
 			// the builder - is the one that has to refuse.
@@ -754,7 +754,7 @@ func testWriteContract(t *testing.T, engine string) {
 		// transaction aborts it, and anything reusing the connection afterwards
 		// answers "current transaction is aborted" until it is rolled back.
 		rows := readParent()
-		applied, err := store.ApplyChanges(parentSet(rows.Columns,
+		applied, err := store.ApplyChanges(context.Background(), parentSet(rows.Columns,
 			RowChange{Original: rows.Rows[2], Edits: []CellEdit{{Column: "name", Value: "after-rollback"}}}))
 		if err != nil || applied != 1 {
 			t.Fatalf("apply after a rollback: applied %d, err %v", applied, err)
@@ -774,7 +774,7 @@ func testWriteContract(t *testing.T, engine string) {
 		rows := readParent()
 		const withQuote = `a\'b\c`
 		const withNewline = `x\ny`
-		applied, err := store.ApplyChanges(parentSet(rows.Columns,
+		applied, err := store.ApplyChanges(context.Background(), parentSet(rows.Columns,
 			RowChange{Original: rows.Rows[3], Edits: []CellEdit{{Column: "name", Value: withQuote}}},
 			RowChange{Original: rows.Rows[4], Edits: []CellEdit{{Column: "name", Value: withNewline}}}))
 		if err != nil || applied != 2 {
@@ -790,7 +790,7 @@ func testWriteContract(t *testing.T, engine string) {
 		// Same layer on the reading side: the bar's contains test is a LIKE whose
 		// pattern and ESCAPE character both go through the literal layer, and what
 		// it has to find is the backslash the save above stored.
-		where, err := store.TableWhere("contract", target.database, target.schema, "tpro_parent",
+		where, err := store.TableWhere(context.Background(), "contract", target.database, target.schema, "tpro_parent",
 			[]TableFilter{{Column: "name", Op: FilterContains, Value: `\n`}})
 		if err != nil {
 			t.Fatalf("filter on the stored text: %v", err)
@@ -847,7 +847,7 @@ func testWriteContract(t *testing.T, engine string) {
 		if got := ValueString(rows.Rows[1][0]); got != "123456789012345678.90" {
 			t.Fatalf("the seeded key reads back %q, want the digits that were inserted", got)
 		}
-		applied, err := store.ApplyChanges(ChangeSet{
+		applied, err := store.ApplyChanges(context.Background(), ChangeSet{
 			ConnID: "contract", Database: target.database, Schema: target.schema,
 			Table: "tpro_decimal", Columns: rows.Columns,
 			Changes: []RowChange{{Original: rows.Rows[1], Edits: []CellEdit{{Column: "v", Value: "hit"}}}},

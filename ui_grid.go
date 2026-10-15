@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strconv"
@@ -50,54 +51,96 @@ func (c *Client) exportGrid() {
 		if f == nil {
 			return
 		}
-		defer f.Close()
-		var werr error
-		switch f.URI().Extension() {
-		case ".json":
-			werr = db.WriteJSON(f, c.grid.header, c.grid.rows)
-		case ".sql":
-			werr = c.writeInsertScript(f)
-		case ".xlsx":
-			werr = c.writeWorkbookFile(f)
-		default:
-			werr = db.WriteCSV(f, c.grid.header, c.grid.rows)
+		name := f.URI().Name()
+		report := func(werr error) {
+			if werr != nil {
+				c.setStatus("导出失败：" + werr.Error())
+				return
+			}
+			c.setStatus(fmt.Sprintf("已导出 %d 行到 %s", len(c.grid.rows), name))
 		}
-		if werr != nil {
-			c.setStatus("导出失败：" + werr.Error())
+		if f.URI().Extension() != ".sql" {
+			// The other formats render from rows already in memory: nothing is
+			// waited on, so the file can be closed right here.
+			defer f.Close()
+			report(c.writeGridFile(f))
 			return
 		}
-		c.setStatus(fmt.Sprintf("已导出 %d 行到 %s", len(c.grid.rows), f.URI().Name()))
+		// The INSERT export is the one format that needs the catalog, for the
+		// column types. That read goes off the event thread, and its callback
+		// writes and closes the file - the handle may not be closed early.
+		var (
+			dbType string
+			types  map[string]string
+			tErr   error
+		)
+		connID, ref := c.currentID, c.grid.src
+		c.setStatus("导出中 ...")
+		c.background(func(ctx context.Context) {
+			dbType, types, tErr = c.insertColumnTypes(ctx, connID, ref.Database, ref.Schema, ref.Table)
+		}, func() {
+			defer f.Close()
+			if tErr != nil {
+				report(tErr)
+				return
+			}
+			report(c.writeInsertScript(f, dbType, types))
+		})
 	}, c.win)
 	d.SetFileName("result.csv")
 	d.Show()
 }
 
-// writeInsertScript renders the current raw result as INSERT statements for
-// the table the query read from. Only a single-table SELECT * can be turned
-// back into INSERTs; anything else is refused with a reason.
-func (c *Client) writeInsertScript(f fyne.URIWriteCloser) error {
-	if c.grid.src.Table == "" {
-		return fmt.Errorf("INSERT 导出需要单表的 SELECT * 查询")
+// writeGridFile renders the result into the chosen file format. Everything it
+// needs is already in memory - which is why the INSERT export, whose types come
+// from the catalog, is handled by the caller instead.
+func (c *Client) writeGridFile(f fyne.URIWriteCloser) error {
+	switch f.URI().Extension() {
+	case ".json":
+		return db.WriteJSON(f, c.grid.header, c.grid.rows)
+	case ".xlsx":
+		return c.writeWorkbookFile(f)
+	default:
+		return db.WriteCSV(f, c.grid.header, c.grid.rows)
 	}
-	conn, err := c.store.OpenConn(c.currentID)
+}
+
+// insertColumnTypes resolves what the INSERT export cannot know from the grid:
+// the engine and the type of every column. The types are a catalog read, which
+// makes this the only round trip an export makes.
+func (c *Client) insertColumnTypes(ctx context.Context, connID, database, schema, table string) (string, map[string]string, error) {
+	conn, err := c.store.OpenConn(connID)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	typ := conn.Config.Type
-	schema := db.DefaultSchema(typ, c.grid.src.Schema)
-	name, err := db.TableName(typ, c.grid.src.Database, schema, c.grid.src.Table)
+	schema = db.DefaultSchema(typ, schema)
+	cols, err := c.store.Columns(ctx, connID, database, schema, table)
 	if err != nil {
-		return err
-	}
-	cols, err := c.store.Columns(c.currentID, c.grid.src.Database, schema, c.grid.src.Table)
-	if err != nil {
-		return err
+		return "", nil, err
 	}
 	types := make(map[string]string, len(cols))
 	for _, col := range cols {
 		types[strings.ToLower(col.Name)] = col.Type
 	}
-	script, err := db.InsertScript(typ, name, c.grid.src.Table, c.grid.cols, types, c.grid.lastRows)
+	return typ, types, nil
+}
+
+// writeInsertScript renders the current raw result as INSERT statements for
+// the table the query read from. Only a single-table SELECT * can be turned
+// back into INSERTs; anything else is refused with a reason. The engine and the
+// column types come from insertColumnTypes: the grid shows values, not
+// declarations.
+func (c *Client) writeInsertScript(f fyne.URIWriteCloser, dbType string, types map[string]string) error {
+	if c.grid.src.Table == "" {
+		return fmt.Errorf("INSERT 导出需要单表的 SELECT * 查询")
+	}
+	name, err := db.TableName(dbType, c.grid.src.Database,
+		db.DefaultSchema(dbType, c.grid.src.Schema), c.grid.src.Table)
+	if err != nil {
+		return err
+	}
+	script, err := db.InsertScript(dbType, name, c.grid.src.Table, c.grid.cols, types, c.grid.lastRows)
 	if err != nil {
 		return err
 	}

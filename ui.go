@@ -383,6 +383,50 @@ func (c *Client) runAsync(work func(), after func()) {
 	}()
 }
 
+// background runs one server round trip off the event thread and hands back
+// the way to give up on it. Every catalog reader takes a context now, so each
+// caller needs a thread to run it on and a way to stop: on a remote server a
+// catalog read can take longer than the user is willing to wait, and one that
+// runs on the Fyne thread freezes the window while it is out - the 取消 button
+// cannot help because the click never gets delivered.
+//
+// work runs with the context it is handed and must use it; after runs on the
+// event thread with whatever work captured. The returned cancel is idempotent
+// and belongs to the thing that owns the round trip - a dialog passes it to
+// OnClosed, so a dismissed dialog does not leave a query running on the server.
+// A round trip the cancel interrupted reports nothing: its answer belongs to a
+// fragment, a filter or a dialog that is gone, and letting it land is how the
+// screen ends up showing an answer nobody asked for any more. A round trip that
+// had already finished still reports, because the next one is queued behind it
+// and cannot be overtaken by it.
+//
+// Like runAsync and loadChildren, it stays inline when asyncRun is off: a test
+// gets a deterministic call instead of a goroutine it would have to wait for.
+func (c *Client) background(work func(context.Context), after func()) (cancel func()) {
+	ctx, stop := context.WithCancel(context.Background())
+	var once sync.Once
+	giveUp := func() { once.Do(stop) }
+	if !c.asyncRun || c.dispatch == nil {
+		work(ctx)
+		stop()
+		if after != nil {
+			after()
+		}
+		return giveUp
+	}
+	go func() {
+		work(ctx)
+		interrupted := ctx.Err() != nil
+		c.dispatch(func() {
+			stop()
+			if !interrupted && after != nil {
+				after()
+			}
+		})
+	}()
+	return giveUp
+}
+
 // focusEditor returns the keyboard to the SQL editor. Typing into a stale
 // button is what made the editor look dead after clicking 连接.
 func (c *Client) focusEditor() {

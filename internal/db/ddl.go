@@ -3,6 +3,7 @@ package db
 import (
 	"github.com/Ben-guanzhi/TableProGo/tableprosql"
 
+	"context"
 	"fmt"
 	"strings"
 )
@@ -124,7 +125,7 @@ func buildCreateTable(dbType, schema, table string, columns []ColumnInfo, types 
 }
 
 // tableDDL renders the DDL for one table from its catalog rows.
-func (c *Store) TableDDL(connID, database, schema, table string) (string, error) {
+func (c *Store) TableDDL(ctx context.Context, connID, database, schema, table string) (string, error) {
 	conn, err := c.OpenConn(connID)
 	if err != nil {
 		return "", err
@@ -132,17 +133,17 @@ func (c *Store) TableDDL(connID, database, schema, table string) (string, error)
 	if schema == "" {
 		schema = ResolveSchema(conn.Config.Type, database, schema)
 	}
-	cols, err := c.Columns(connID, database, schema, table)
+	cols, err := c.Columns(ctx, connID, database, schema, table)
 	if err != nil {
 		return "", err
 	}
 	// Indexes and foreign keys are conveniences here: a catalog that refuses
 	// them must not cost the user the column list.
-	indexes, err := c.TableIndexes(connID, database, schema, table)
+	indexes, err := c.TableIndexes(ctx, connID, database, schema, table)
 	if err != nil {
 		indexes = nil
 	}
-	fks, err := c.ForeignKeys(connID, database, schema, table)
+	fks, err := c.ForeignKeys(ctx, connID, database, schema, table)
 	if err != nil {
 		fks = nil
 	}

@@ -151,7 +151,7 @@ func executeCommand(ctx context.Context, db *sql.DB, query string, start time.Ti
 // limit caps a SELECT's rows and, when the cap binds, says whether it cut them
 // short.
 func (c *Store) Execute(ctx context.Context, conn *Conn, database, query string, limit int) QueryResult {
-	db, err := c.queryPool(conn, database)
+	db, err := c.queryPool(ctx, conn, database)
 	if err != nil {
 		return QueryResult{Error: err.Error()}
 	}
