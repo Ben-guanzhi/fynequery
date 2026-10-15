@@ -7,10 +7,10 @@ fyne.io/systray v1.12.3-0.20260810170012-af4e8e793ec4/go.mod h1:RVwqP9nYMo7h5zVi
 github.com/Azure/azure-sdk-for-go/sdk/azcore v0.19.0/go.mod h1:h6H6c8enJmmocHUbLiiGY6sx7f9i+X3m1CHdd5c6Rdw=
 github.com/Azure/azure-sdk-for-go/sdk/azidentity v0.11.0/go.mod h1:HcM1YX14R7CJcghJGOYCgdezslRSVzqwLf/q+4Y2r/0=
 github.com/Azure/azure-sdk-for-go/sdk/internal v0.7.0/go.mod h1:yqy467j36fJxcRV2TzfVZ1pCb5vxm4BtZPUdYWe/Xo8=
-github.com/Ben-guanzhi/TableProGo/tableprosql v0.1.0 h1:x+JdKdNa9jIulHvCEjKyBpOyaYWajEAatV9+Co+ErNI=
-github.com/Ben-guanzhi/TableProGo/tableprosql v0.1.0/go.mod h1:v6FdVbVPGlXk3inyw02bXuTlVWHm/nkcB63lZje6OA4=
-github.com/Ben-guanzhi/TableProGo/tableproxlsx v0.1.0 h1:hT8KRFazLfD3HUw6WGAiEKVhxq1q3LWbskKdOWRCKuw=
-github.com/Ben-guanzhi/TableProGo/tableproxlsx v0.1.0/go.mod h1:qkVPOKqqmOumoBBTkCSxx9AO2IRFSBuJWJcyjeoDTFY=
+github.com/Ben-guanzhi/TableProGo/tableprosql v0.1.1 h1:YbQgLe/yiS9zKJXyHmTm38BARcj4AJT40XwjEE32XgE=
+github.com/Ben-guanzhi/TableProGo/tableprosql v0.1.1/go.mod h1:v6FdVbVPGlXk3inyw02bXuTlVWHm/nkcB63lZje6OA4=
+github.com/Ben-guanzhi/TableProGo/tableproxlsx v0.1.1 h1:8WLk8eGyJJ5BmzkYuZJXVkMzEzdIJ855MSGT8JJqyIU=
+github.com/Ben-guanzhi/TableProGo/tableproxlsx v0.1.1/go.mod h1:qkVPOKqqmOumoBBTkCSxx9AO2IRFSBuJWJcyjeoDTFY=
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/FyshOS/fancyfs v0.0.1 h1:kgvm7VvwOMLkYTqSflplp62SlMVWQ2uAoHw9CXwXHYg=

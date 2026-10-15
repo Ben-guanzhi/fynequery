@@ -303,8 +303,9 @@ JSON 到浏览器就已经是 double 了，>2^53 在网页里就丢了，`valueL
 | `x\ny` | `'x\ny'` ⇒ 存成换行 | 静默改数据 |
 
 这里的洞不是「少了一份规则」而是「有两份规则」：共享包的
-`QuotedLiteral`（`tableprosql@v0.1.0/sqlgen.go:99-113`）一直带 MySQL 分支，注释
-写明了危害，`sqlgen_test.go:107-124` 五条断言守着；根仓 [../TableProGo/changes.go:200](file:///D:/tools/db/TableProGo/changes.go#L200)
+`QuotedLiteral`（`tableprosql@v0.1.1/sqlgen.go:86-92`，MySQL 那条挂在
+`dialect.go:27` 的 `quoteLiteralMySQL` 上）一直带 MySQL 分支，注释
+写明了危害，`sqlgen_test.go:110-125` 五条断言守着；根仓 [../TableProGo/changes.go:200](file:///D:/tools/db/TableProGo/changes.go#L200)
 委托它。fynequery 这边留的是本地那份副本
 （[internal/db/changes.go:236](file:///D:/tools/db/fynequery/internal/db/changes.go#L236) 曾经自己拼
 `''`），它比共享包少一条方言，所以修法是删掉拼接、改调
@@ -334,9 +335,10 @@ postgresql / oracle / sqlserver 必须原样取字」，另外 3 条是既有的
 ### 钉在 tag 上的共享模块
 
 `go.mod` 用 tag 取 `tableprosql` / `tableproxlsx`
-（[go.mod:62-68](file:///D:/tools/db/fynequery/go.mod#L62)，故意不留 `replace`，`git clone` +
+（[go.mod:62-70](file:///D:/tools/db/fynequery/go.mod#L62)，故意不留 `replace`，`git clone` +
 `go build` 只靠 tag 就能成）。代价是**这边看不见上游动了什么**：根仓用 `replace` 指着
-自己的工作树，它的测试永远绿，而本仓编的是 modcache 里那份 v0.1.0。① 那个洞就是这么
+自己的工作树，它的测试永远绿，而本仓编的是 modcache 里那份钉住的 tag（写这一节时是
+v0.1.0，现在是 v0.1.1）。① 那个洞就是这么
 来的（共享包早就有 MySQL 反斜杠规则，钉住的这份没有）。索引目录这条更直接，两仓对同
 一个目录调用执行的是不同语句：
 
@@ -346,9 +348,8 @@ postgresql / oracle / sqlserver 必须原样取字」，另外 3 条是既有的
 
 ⇒ 根仓 [../TableProGo/catalog.go:430](file:///D:/tools/db/TableProGo/catalog.go#L430) 五个目标
 对四列，MySQL 上每张表的索引面板都会停在 `rows.Scan`（它还在原来那行下面用「名字等于
-PRIMARY 就算主键」补了缺的第四列）。本仓躲过这一枪只是因为没走它：
-[internal/db/dialect.go:291](file:///D:/tools/db/fynequery/internal/db/dialect.go#L291) 自己留了一份
-五列齐的语句。第三列是另一半问题，而且这边也中招：`NON_UNIQUE` 装的正是「is-unique」的
+PRIMARY 就算主键」补了缺的第四列）。本仓当时躲过这一枪只是因为没走它：那份索引读自己
+留了一条五列齐的语句。第三列是另一半问题，而且这边也中招：`NON_UNIQUE` 装的正是「is-unique」的
 反面，两仓都把它直接 scan 进 `unique`，普通索引会被报成 UNIQUE——这条是从两边代码读
 出来的，契约套件里那句 `reported UNIQUE`
 （[internal/db/contract_test.go:486](file:///D:/tools/db/fynequery/internal/db/contract_test.go#L486)）
@@ -363,23 +364,45 @@ PRIMARY 就算主键」补了缺的第四列）。本仓躲过这一枪只是因
 - 新增一条不需要服务器的守卫：四个引擎的列数都必须等于调用方 scan 的 5，第三列必须是派生
   表达式（[../TableProGo/tableprosql/catalog_test.go:16](file:///D:/tools/db/TableProGo/tableprosql/catalog_test.go#L16)、
   `:61`）。
-- 本仓那份本地语句改成与共享包**同一条**：把两处的 raw string 抽出、折掉空白后逐字符相同
-  （pg / mssql / oracle 三条索引语句本来就相同，这次一并核了；顺带发现 pg 那条列目录语句
-  也只差 `IN ('r','v','m','p')` 里的空格）。留着的理由只剩「钉住的 tag 里那条还是四列」，
-  注释里写明。
+- 本仓那份本地语句已经删掉，MySQL 的索引读改成直接调 `tableprosql.IndexesQuery`
+  （[internal/db/dialect.go:297](file:///D:/tools/db/fynequery/internal/db/dialect.go#L297)）。删之前量过两处等价：
+  两处的 raw string 折掉空白后都是 249 个字符、同一条语句，实参顺序都还是 `schema, table`
+  （`IndexesQuery` 的 MySQL 分支不读 `database`）。这一条是行为等价的判据，不是「改了就好」。
+  pg / mssql / oracle 三个 reader 这次没动，但它们的语句与共享包逐字符相同（pg 那条 508 字符一致；
+  mssql / oracle 两条在 `IndexesQuery` 的分支里就是同一段文本，连本仓自己预先拼的
+  `QuoteIdent` / `QuotedLiteral` 那几步，共享函数里也已经做了）——这三处同样可以改成调用，只是
+  ③ 的洞只咬 MySQL，改它们该另开一条，不混在这次里顺手做掉。pg 那条列目录语句仍只差
+  `IN ('r','v','m','p')` 里的空格。
 - 版本落后以后由 CI 说，两个方向各一个 job：根仓 `shared-retag`
   （[../TableProGo/.github/workflows/ci.yml:56](file:///D:/tools/db/TableProGo/.github/workflows/ci.yml#L56)，共享目录里有非测试
   改动落在自己的 tag 之后 ⇒ 红，并点名该打哪个 tag）、本仓 `shared-vs-upstream`
   （[.github/workflows/ci.yml:47](file:///D:/tools/db/fynequery/.github/workflows/ci.yml#L47)，把 modcache 里钉住的那份与上游 main
-  的目录 diff ⇒ 不为空就红）。两个 job 的脚本本体都在本机跑过：根仓那个今天的仓库状态就判
-  红，报出 `dialect.go`/`sqlgen.go`（`84d0f4d` 那次方言表重构）与 `exportxlsx.go`（`a54bdac`）；
-  本仓这个拿 modcache 与根仓工作树对跑 `diff -qr -x '*_test.go'`，报出的正是 `catalog.go`
-  不同、`dialect.go` 只在上游有、`sqlgen.go` 不同三处（CI 里对的是上游 main，等这次的改动
-  推上去才会看到 `catalog.go` 进名单）。这正是它们该做的事。
+  的目录 diff ⇒ 不为空就红）。两个 job 的脚本本体都在本机跑过，而且都跑到过两头：打 tag 之前
+  根仓那个对当时的仓库状态判红，报出 `dialect.go`/`sqlgen.go`（`84d0f4d` 那次方言表重构）与
+  `exportxlsx.go`（`a54bdac`），本仓这个拿 modcache 里 v0.1.0 与根仓工作树对跑
+  `diff -qr -x '*_test.go'`，报出的正是 `catalog.go` 不同、`dialect.go` 只在上游有、`sqlgen.go`
+  不同三处；`tableprosql/v0.1.1` + `tableproxlsx/v0.1.1`（都指向 `e5dcded`）打上并升档之后，
+  根仓那个两模块的差集为空、本仓这个 `diff -qr -x '*_test.go'` 两模块都 exit 0。这正是它们该
+  做的事——红的时候点名该做什么，绿的时候说明钉住的这份就是上游那份。
 
-**还差一步要人来**：把本仓的 MySQL 索引读改成直接调 `tableprosql.IndexesQuery`、删掉本地
-那份，必须排在 `tableprosql/v0.1.1` 打上并推上去之后——先改的话 `go.mod` 里没有那个 tag，
-本仓直接 `go build` 失败。在那之前 `shared-vs-upstream` 会一直红。
+升档这一步实际踩到的分发细节：tag 推上去之后 `go mod download` 仍然失败，报
+`goproxy.cn/sumdb/...` 404 `not found: temporarily unavailable`——本机只通 goproxy.cn
+（`proxy.golang.org` 直接 dial 超时），而校验和查的是代理上的 sumdb 镜像，一个还没被爬取的
+版本在那里就是 404。先 `curl` 一次该版本的 `@v/v0.1.1.info` 触发按需抓取，`go mod download`
+随后默认口径就通过；没有用 `GOPRIVATE`/`GOSUMDB=off` 绕，因为那样写进 `go.sum` 的哈希走的是
+一条 CI 不会走的路。升档后的 `go.sum` 只剩 v0.1.1 四行（`go mod tidy` 把 v0.1.0 的两组清掉了），
+`go mod tidy -diff` 干净。
+
+这次「删本地、改调共享包」在本机没有可红的基础设施，也不假装有：modcache 里那份是带哈希校验的
+只读副本，把 `IndexesQuery` 临时退回四列来做负对照这条路走不通。所以它的牙齿只有两处，都是
+结构性而非运行时的——`shared-vs-upstream`（钉住的这份一旦不等于上游 main 就红）与根仓那条不需要
+服务器的形状守卫 `catalog_test.go:16`。真 MySQL 上「四列 vs 五个落点」那一枪归契约套件
+`TestContractMySQLCatalog`（[internal/db/contract_test.go:361](file:///D:/tools/db/fynequery/internal/db/contract_test.go#L361)，
+同组里 `reported UNIQUE` 那句在 `:486`），它至今没在真服务器上跑过 ⇒ 这一条只能算「等 CI 第一次跑
+才算背书」，不能写成已验证。本机改后全套：`gofmt -l .` 空、`go vet ./...` 干净、
+`go test -race -count=1 ./...` 绿（`tablepro-fyne` 44.032s、`internal/db` 7.511s）、`go build` 成功；
+改前基线同一条命令也是这两行绿（30.300s / 2.349s）。也就是说这次交的是「行为等价 + 仍然绿」，
+不是「新用例把它逼绿」。
 
 守卫的牙齿由 `TestTheIndexShapeGuardRefusesTheShapesItGuardsAgainst`
 （[../TableProGo/tableprosql/catalog_test.go:89](file:///D:/tools/db/TableProGo/tableprosql/catalog_test.go#L89)）自己钉：把改前
@@ -460,9 +483,10 @@ BIGINT 解成 `uint64`、把 FLOAT 解成 `float32`、把字符串与 DECIMAL �
 契约第一次被跑起来就抓到一处：MySQL 的索引目录查询只 SELECT 了 4 列，而
 `scanIndexRow` 要 5 个落点，于是真 MySQL 上每次 `TableIndexes` 都在 scan 处报错
 （[internal/db/dialect.go:291](file:///D:/tools/db/fynequery/internal/db/dialect.go#L291)
-起的闭包）。已改：主键标志由 `INDEX_NAME = 'PRIMARY'` 在 SQL 里答。共享包里是
-同一段查询文本（`../TableProGo/tableprosql/catalog.go:213`），根仓的 scan 同样
-要 5 个落点（`../TableProGo/catalog.go:427`），那一侧还没跟着改。
+起的闭包）。已改：主键标志由 `INDEX_NAME = 'PRIMARY'` 在 SQL 里答，第三列把 `NON_UNIQUE`
+取反。共享包里是同一段查询文本（`../TableProGo/tableprosql/catalog.go:218`），根仓的 scan
+同样要 5 个落点（`../TableProGo/catalog.go:430`）——那一侧也已跟着 `e5dcded` 改完，本仓这个
+闭包自 `tableprosql/v0.1.1` 起就是从共享包取语句，本地那份文本已经没有了。
 
 CI 的 `contract` job 用 service 容器起 `mysql:8.0` 与 `postgres:16`，只跑
 `./internal/db`（它需要 cgo 但不需要 UI 的 GL 头），并设

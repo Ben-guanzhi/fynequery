@@ -64,7 +64,7 @@ require (
 // a separate clone, so a relative replace would silently break here. That is
 // what makes `git clone` + `go build` work from nothing.
 require (
-	github.com/Ben-guanzhi/TableProGo/tableprosql v0.1.0
-	github.com/Ben-guanzhi/TableProGo/tableproxlsx v0.1.0
+	github.com/Ben-guanzhi/TableProGo/tableprosql v0.1.1
+	github.com/Ben-guanzhi/TableProGo/tableproxlsx v0.1.1
 	github.com/zalando/go-keyring v0.2.8
 )

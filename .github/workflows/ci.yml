@@ -38,12 +38,12 @@ jobs:
   # Pinning by tag is what makes a bare clone build, but it also means this repo
   # can stay green while the shared code it compiles against is not what upstream
   # holds: the MySQL index statement sat at four columns in the pinned tag while
-  # the shape was already fixed upstream, and the only reason the app still read
-  # indexes correctly is that internal/db/dialect.go keeps its own copy. Compare
-  # the pinned module in the cache with the tip of upstream and fail on any
-  # difference - either direction is drift, and only a tag bump plus a go.mod
-  # change closes it. Test files are excluded because a consumer never compiles
-  # them.
+  # the shape was already fixed upstream, and only internal/db/dialect.go's own
+  # copy of it kept the index panel reading. That copy is gone now, so this job is
+  # what keeps the pin honest. Compare the pinned module in the cache with the tip
+  # of upstream and fail on any difference - either direction is drift, and only a
+  # tag bump plus a go.mod change closes it. Test files are excluded because a
+  # consumer never compiles them.
   shared-vs-upstream:
     runs-on: ubuntu-latest
     steps:

@@ -289,20 +289,16 @@ var mysqlDialect = &dialect{
 		return QualifiedName(DbTypeMySQL, database, table)
 	},
 	indexes: func(c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
-		// scanIndexRow expects five destinations, so a statement that selects
-		// four fails the scan for every table on the server - which is what the
-		// pinned tableprosql v0.1.0 does here, and why this read is local rather
-		// than a call to tableprosql.IndexesQuery. STATISTICS has no is-primary
-		// column either: MySQL marks the key by naming it PRIMARY, and the fourth
-		// column answers with that. The third derives NON_UNIQUE, which names the
-		// opposite of what the readers scan it into. The index read of the MySQL
+		// The same statement the root client sends, so one engine has one index
+		// catalog SQL. Both flags come back derived: STATISTICS has no is-primary
+		// column (MySQL marks the key by naming it PRIMARY) and NON_UNIQUE holds
+		// the opposite of what scanIndexRow scans into. The MySQL row of the index
 		// catalog contract catches either mistake - whenever a server is configured.
-		flat, err := collectRows(conn.DB, `SELECT INDEX_NAME, INDEX_TYPE, CASE WHEN NON_UNIQUE = 0 THEN 1 ELSE 0 END,
-			CASE WHEN INDEX_NAME = 'PRIMARY' THEN 1 ELSE 0 END, COLUMN_NAME
-			FROM information_schema.STATISTICS
-			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-			ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
-			[]interface{}{schema, table}, scanIndexRow)
+		query, args, err := tableprosql.IndexesQuery(DbTypeMySQL, database, schema, table)
+		if err != nil {
+			return nil, err
+		}
+		flat, err := collectRows(conn.DB, query, args, scanIndexRow)
 		if err != nil {
 			return nil, err
 		}
