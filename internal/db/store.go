@@ -163,10 +163,12 @@ func (c *Store) DeleteConnection(id string) error {
 	for i, cfg := range c.saved {
 		if cfg.ID == id {
 			if conn, ok := c.live[id]; ok {
-				if conn.DB != nil {
-					conn.DB.Close()
+				// Detach first, then close: the flag is what stops a query that
+				// still holds this *Conn from hanging a new session on it after
+				// the map entry is gone.
+				for _, db := range conn.detach() {
+					db.Close()
 				}
-				conn.closePools()
 				delete(c.live, id)
 			}
 			c.saved = append(c.saved[:i], c.saved[i+1:]...)
@@ -194,7 +196,10 @@ func (c *Store) ConnectionStatus(id string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	conn, ok := c.live[id]
-	return ok && conn.DB != nil
+	if !ok {
+		return false
+	}
+	return conn.isOpen()
 }
 
 func (c *Store) LiveConfig(id string) (ConnConfig, bool) {

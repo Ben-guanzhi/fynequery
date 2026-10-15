@@ -499,6 +499,100 @@ CI 的 `contract` job 用 service 容器起 `mysql:8.0` 与 `postgres:16`，只�
 CI 那次 run 才是它第一次被执行——和 `release.yml` 里的 msys2 步骤同属「写了但还
 没被真实 run 验证」的环节。
 
+### 断开、翻页与目录读的三条收口
+
+这一节记 ④⑤⑥ 三条：一次只读代码的风险盘点按严重度排到它们，共同点是「本机
+`-race` 是绿的，所以没人看见」。三条各自配了守卫测试与负对照，负对照的口径是
+「把守卫那一行改坏，测试必须变红」，红/绿数量写在每条后面。
+
+**④ 读与断开的锁纪律。** `Conn.DB` 原来是导出字段：`Connect`/`Disconnect` 在
+`Store.mu` 里写它，而 `dialect.go` 里 35 处目录读（27 处 `collectRows`、7 处
+`collectRowsOn`、`browse_columns.go` 1 处）一处锁都不拿。跟 `Disconnect` 撞上的
+读要么被 `-race` 报出来（本机实测报不到，见本节末尾），要么在两次取值之间撞上刚
+被置空的句柄，把进程 panic 掉；更细的一
+层在 `DeleteConnection`，它改之前先 `closePools()` 再 `delete(c.live, id)`（HEAD 的
+`internal/db/store.go:161-170`），此时仍握着 `*Conn` 的在途查询会走
+`perDatabasePool` 在那具已经没人认领的 Conn 上开一条新连接，服务端会话就此挂着。
+现在三样状态都归 `Conn.mu`：主句柄（字段已收成私有 `db`，全仓再也写不出
+`conn.DB`）、按库的会话池、以及 `closed` 这个「不再开新
+会话」的标志；读只能经 `handle()`（[internal/db/core.go:68](file:///D:/tools/db/fynequery/internal/db/core.go#L68)）、
+`isOpen()`（[:78](file:///D:/tools/db/fynequery/internal/db/core.go#L78)）与
+`detach()`（[:89](file:///D:/tools/db/fynequery/internal/db/core.go#L89)）拿到，
+锁序恒为 `Store.mu → Conn.mu`；`perDatabasePool`
+（[internal/db/store_connect.go:89](file:///D:/tools/db/fynequery/internal/db/store_connect.go#L89)）
+在 `Conn.mu` 内建池并 `PingContext`，`closed` 已置起就直接拒绝。守卫是
+`internal/db/conn_lifecycle_test.go` 的 4 条（读撞上断开不 panic、断开后方言读
+返回错误而不是崩溃、关闭的连接不能再注册池、读一律说「未连接」）。原来的测试只
+覆盖「先断开再改表」，所以这条洞在本机一直是绿的；`recover` 计数是给「崩溃」这一
+结果留的断言，至于这一对读写能不能被 `-race` 抓到，见本节末尾的实测——答案是不能，
+所以钉住它的是那 4 条断言，不是检测器。
+
+**⑤ 运行期间的翻页与取消归属。** 错的是顺序不是竞态：查询在途时翻页条仍可点，
+第二轮 `runTracked` 会覆盖 `Client.cancelFn`，于是「取消」只停最新那个，旧的照旧
+跑；两轮都往 UI 线程投递结果，后落地的说了算——网格是 A 页、页码条写着 B 页。
+现在 `runTracked`（[ui_query.go:503](file:///D:/tools/db/fynequery/ui_query.go#L503)）
+在 `busy` 期间直接拒绝第二轮并说明「已有查询在执行，请等待或点「取消」」，`setRunning`
+（[:571](file:///D:/tools/db/fynequery/ui_query.go#L571)）把上一页/下一页/每页/分页
+浏览与执行按钮一起灰掉，`cancelRun`（[:557](file:///D:/tools/db/fynequery/ui_query.go#L557)）
+始终指向真正在跑的那一轮。守卫是 `ui_run_guard_test.go` 的 2 条：一条不碰数据库
+地验拒绝与取消归属，一条通过真实控件验翻页条整条在途锁死、被拒的那次连页码都不
+动。两者都用 `parkable` 把 `Client.dispatch` 换成测试自己逐条放行的队列，所以
+「在途」是真的在途，不是靠 sleep 猜时间。
+
+**⑥ 目录读的上下文与线程。** 审计给的口径是「事件线程上同步打库，且目录查询没有
+ctx」：保存前生成语句、外键候选、过滤框取候选值、结构页四读、搜索遍历、导出 INSERT
+脚本、schema 树加载都在 Fyne 线程里直跑，而 `collectRows` 压根没有 context 参数
+——远端慢库等于窗口无响应，且点不到的「取消」按钮也救不了。改动分两层。内核侧：
+`dialect` 里 8 个会打到服务器的闭包（`databases`/`schemas`/`tables`/
+`completionObjects`/`columns`/`search`/`foreignKeys`/`indexes`，
+[internal/db/dialect.go:25](file:///D:/tools/db/fynequery/internal/db/dialect.go#L25)）
+与 33 处方言实现第一参数一律 `context.Context`，`collectRowsOn` 走
+`db.QueryContext`（[:124](file:///D:/tools/db/fynequery/internal/db/dialect.go#L124)），
+`poolFor`/`perDatabasePool` 的 `PingContext`、`ApplyChanges` 的 `BeginTx`/
+`ExecContext`、`SearchObjects` 的循环内 `ctx.Err()` 检查同样跟着；`Execute`/
+`ExecutePage`/`RunTableAction` 不再自己 `context.Background()`。UI 侧新增一个原语
+`Client.background(work, after) cancel`
+（[ui.go:405](file:///D:/tools/db/fynequery/ui.go#L405)）：把一轮服务器往返挪出事件
+线程，并交回「放弃它」的把手；10 处调用点分布在 8 个文件，对话框把把手交给
+`SetOnClosed`（4 处），所以关掉对话框不会留一条查询挂在服务器上。两条语义是设计
+的核心：**被放弃的那一轮不上屏**（它的答案属于一个已经不存在的分片/过滤/对话框），
+**已经答完的那轮照旧上屏**（下一轮排在它后面，超不过它）——不引入世代计数，靠
+FIFO 投递就够，理由同 ⑤。`asyncRun` 关闭时它退化成同步调用，因此既有那批内联测试
+一行都不用改。守卫共 8 条：`internal/db/catalog_ctx_test.go` 4 条（取消的 ctx 必
+返回 `context.Canceled`、池被占满时调用方放弃能立刻脱身而不用等驱动、搜索遍历收到
+放弃就停、被放弃的会话不会注册进 `conn.pools`），`ui_background_test.go` 4 条（工
+作还挂着时调用方必须已经返回、被放弃的一轮零次上报、答完后才到达的取消仍上报一次、
+内联路径按 work→after 顺序跑完）。
+
+负对照与数量（都按「改坏一行→重跑→改回」做，改坏的行当场恢复）：
+
+| 改坏的守卫 | 结果 |
+| --- | --- |
+| `collectRowsOn` 退回 `db.Query`（无 ctx） | `TestCatalogReadRefusesACanceledContext` 红（两处断言各报一次：取消的 ctx 上 `Columns` 返回 `<nil>` 并给了 2 列；方言闭包同样无视取消），`TestCatalogReadUnblocksWhenTheCallerGivesUp` 停在 `database/sql.(*DB).conn [select]` 直到 20s 超时把测试二进制 panic 掉——正是「远端慢库 = 窗口无响应」的字面复现；同一 run 里第三条来不及出结果 |
+| `background` 里 `interrupted := false` | `ui_background_test.go` 4 条里 1 红（被放弃的一轮上报了 1 次），其余 3 绿 |
+| `background` 永远走内联 | 4 条里 3 红（两条报「跑在调用方线程上」，一条报回调从未投递），整包 15.3s 收尾不挂死 |
+| `handle()` 里先无锁读一次私有字段再做 nil 判断（回到旧字段语义） | 4 条全绿，`-race` 也没报——这把锁在此路径上把读写排成了序，所以这条改坏**不构成牙齿**，④ 的守卫不靠检测器（见下） |
+| `perDatabasePool` 里删掉 `if conn.closed` 拒绝 | `TestClosedConnCannotOpenNewPools` 红两处：「a closed connection opened a new pool; nothing can close it again」＋「closed connection holds 1 pools after it was disconnected」，其余 7 条绿 |
+| `detach()` 里删掉 `conn.closed = true` | 同一条测试同样红两处（走的是另一行，证明这个标志本身在承重，不是摆设），其余 7 条绿 |
+
+定稿门禁：`gofmt -l internal/ *.go` 空，`go vet ./...` 退出 0，`go test ./... -count=1`
+两包 `ok`（12.033s / 1.554s），`go test -race ./... -count=1` 两包 `ok`（20.264s /
+2.414s），全部跑在 `TABLEPRO_STATE_DIR` 指着的临时目录里；8 条内核守卫（④ 4 条 +
+⑥ 内核 4 条）单独 `-v` 数过，全 `--- PASS`。三条共 14 条新守卫
+（④ 4 条、⑤ 2 条、⑥ 8 条）：碰库的那些——④ 的 4 条、⑥ 内核的 4 条、⑤ 的翻页那
+条——只用 SQLite，⑥ 的 UI 4 条与 ⑤ 的 `runTracked` 那条压根不接驱动。所以 MySQL/
+PG 上的 ctx 行为仍只有 `internal/db/contract_test.go` 说得上话，而那一组在本机依然
+全部 skip（没有 server），要等 CI 第一次真跑。
+
+关于 ④ 的「绿」要说准确：我把 `handle()` 改回旧字段语义（先不拿锁读一次私有字段，
+再做 nil 判断）试过两次，`-race` 与 `recover` 计数**都没有报红**——这条路径上
+`OpenConn` 与 `Connect`/`Disconnect` 都过 `Store.mu`，测试实际发生的每次读写都被这
+把锁排成了序。所以 ④ 只能按它确定的那一面来钉：握着 `*Conn` 的调用方在 `Store.mu`
+之外读那个字段，值可以在同一条语句的两次取值之间变成 nil
+（`TestDialectReadAfterDisconnectIsAnError` 钉的就是这一面），再加上 `perDatabasePool`
+那扇漏会话的门——这条守卫的牙齿是上表后两行，不是检测器。反过来，`conn.DB` 收成私
+有字段这一手有它自己的机械保证：编译期就再也写不出不带锁的那次读。
+
 ### 发版
 
 本地一份：`task release`，产物名带 `git describe` 的版本与目标平台，同时
@@ -525,6 +619,7 @@ run 验证过的环节，它后面紧跟一步 `gcc --version`，环境不对就
 其他要点：
 
 - **异步连接与查询**：连接握手、表目录加载、SQL 执行均在工作线程进行，界面不冻结；执行中可点「取消」中断长查询（fyne 2.6+ 的 fyne.Do 调度回主线程）
+- **目录读可放弃**：结构页、结构操作（重命名/删除等发出的 DDL）、过滤框、单元格的外键候选、保存的生成语句与落库、搜索遍历、INSERT 导出、侧栏重载与数据库下拉刷新共 10 处，都经 `Client.background` 在工作线程上跑一轮服务器往返并带着 `context`；对话框关闭即放弃那一轮，它的答案不再上屏，已经答完的那轮则照常落地
 - **线程归属**：当前连接 / 当前库 / 每页行数只归 UI 线程所有，工作线程拿的是启动时在 `c.mu` 内取到的快照；`TestQueryGoroutineUsesSessionSnapshot` 在 `go test -race` 下用一条慢查询 + 并发改写会话字段的守卫脚本钉住这条不变量
 - **编辑器行号槽**：等宽 SQL 编辑器左侧带行号（禁用多行输入框实现，与编辑器同族同字号精确对齐）；长脚本在标签内滚动而非拉伸窗口，编辑时自动跟随光标行
 - **查询标签**：多页独立编辑器（`Ctrl/Cmd+N` 新建、`Ctrl/Cmd+W` 关闭、

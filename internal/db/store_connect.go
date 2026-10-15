@@ -35,12 +35,11 @@ func (c *Store) Connect(cfg ConnConfig) error {
 
 	c.mu.Lock()
 	if old, ok := c.live[cfg.ID]; ok {
-		if old.DB != nil {
-			old.DB.Close()
+		for _, db := range old.detach() {
+			db.Close()
 		}
-		old.closePools()
 	}
-	c.live[cfg.ID] = &Conn{Config: cfg, DB: db}
+	c.live[cfg.ID] = &Conn{Config: cfg, db: db}
 	c.mu.Unlock()
 	return nil
 }
@@ -49,11 +48,9 @@ func (c *Store) Disconnect(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if conn, ok := c.live[id]; ok {
-		if conn.DB != nil {
-			conn.DB.Close()
-			conn.DB = nil
+		for _, db := range conn.detach() {
+			db.Close()
 		}
-		conn.closePools()
 	}
 }
 
@@ -63,13 +60,14 @@ func (c *Store) Disconnect(id string) {
 // ctx belongs here too: opening a per-database session is a dial plus a ping,
 // which is the slowest part of reading a remote catalog.
 func (c *Store) poolFor(ctx context.Context, conn *Conn, database string) (*sql.DB, error) {
-	if conn.DB == nil {
-		return nil, fmt.Errorf("not connected")
+	db, err := conn.handle()
+	if err != nil {
+		return nil, err
 	}
 	if conn.Config.Type == DbTypePostgres && database != "" && database != conn.Config.Database {
 		return c.perDatabasePool(ctx, conn, database)
 	}
-	return conn.DB, nil
+	return db, nil
 }
 
 // queryPool returns the pool a statement runs on, opening a dedicated session
@@ -85,11 +83,17 @@ func (c *Store) queryPool(ctx context.Context, conn *Conn, database string) (*sq
 }
 
 // perDatabasePool opens, or returns the already open, session for one database.
+// The closed check is inside the same critical section that registers the pool,
+// so a Conn that has been detached - by Disconnect, or by DeleteConnection while
+// a query still held it - cannot grow a new session nobody will ever close.
 func (c *Store) perDatabasePool(ctx context.Context, conn *Conn, database string) (*sql.DB, error) {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	if db, ok := conn.pools[database]; ok {
 		return db, nil
+	}
+	if conn.closed {
+		return nil, fmt.Errorf("not connected")
 	}
 	cfg := conn.Config
 	cfg.Database = database

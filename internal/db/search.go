@@ -54,7 +54,7 @@ func (c *Store) SearchObjects(ctx context.Context, pattern string, limit int) ([
 	c.mu.Lock()
 	conns := make([]*Conn, 0, len(c.live))
 	for _, conn := range c.live {
-		if conn.DB != nil {
+		if conn.isOpen() {
 			conns = append(conns, conn)
 		}
 	}

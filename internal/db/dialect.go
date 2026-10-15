@@ -104,11 +104,18 @@ var catalogDialects = map[string]*dialect{
 // collectRows runs query on the connection's pool and folds every row through
 // scan: the higher-order loop every catalog reader shares - open, scan into a T,
 // close, report the cursor's own error.
+//
+// The handle comes from Conn.mu, which is what keeps a reader that races a
+// Disconnect honest: it either gets the not-connected error or runs on a handle
+// that is merely closed, and database/sql answers that with an error too. Read
+// straight off an exported field the same reader could dereference a handle
+// Disconnect had just nilled.
 func collectRows[T any](ctx context.Context, conn *Conn, query string, args []interface{}, scan func(*sql.Rows) (T, error)) ([]T, error) {
-	if conn.DB == nil {
-		return nil, fmt.Errorf("not connected")
+	db, err := conn.handle()
+	if err != nil {
+		return nil, err
 	}
-	return collectRowsOn(ctx, conn.DB, query, args, scan)
+	return collectRowsOn(ctx, db, query, args, scan)
 }
 
 // collectRowsOn is collectRows for a pool the caller has already chosen: the

@@ -210,7 +210,7 @@ func (c *Store) OpenConn(id string) (*Conn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	conn, ok := c.live[id]
-	if !ok || conn.DB == nil {
+	if !ok || !conn.isOpen() {
 		return nil, fmt.Errorf("not connected")
 	}
 	return conn, nil
