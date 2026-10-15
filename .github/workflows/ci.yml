@@ -35,6 +35,44 @@ jobs:
           go mod tidy
           git diff --exit-code -- go.mod go.sum
 
+  # Pinning by tag is what makes a bare clone build, but it also means this repo
+  # can stay green while the shared code it compiles against is not what upstream
+  # holds: the MySQL index statement sat at four columns in the pinned tag while
+  # the shape was already fixed upstream, and the only reason the app still read
+  # indexes correctly is that internal/db/dialect.go keeps its own copy. Compare
+  # the pinned module in the cache with the tip of upstream and fail on any
+  # difference - either direction is drift, and only a tag bump plus a go.mod
+  # change closes it. Test files are excluded because a consumer never compiles
+  # them.
+  shared-vs-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: pinned shared modules are what upstream holds
+        run: |
+          set -o pipefail
+          git clone --depth 1 https://github.com/Ben-guanzhi/TableProGo "$RUNNER_TEMP/upstream"
+          go mod download github.com/Ben-guanzhi/TableProGo/tableprosql \
+            github.com/Ben-guanzhi/TableProGo/tableproxlsx
+          failed=0
+          for mod in tableprosql tableproxlsx; do
+            pinned=$(go list -m -f '{{.Dir}}' "github.com/Ben-guanzhi/TableProGo/$mod")
+            if diff -qr -x '*_test.go' "$pinned" "$RUNNER_TEMP/upstream/$mod" >"$RUNNER_TEMP/$mod.diff"; then
+              echo "$(go list -m "github.com/Ben-guanzhi/TableProGo/$mod") is what upstream main holds"
+            else
+              echo "::error::$mod is pinned to something other than upstream main: cut a tag for these changes and bump go.mod."
+              sed "s|$RUNNER_TEMP/upstream/||" "$RUNNER_TEMP/$mod.diff"
+              failed=1
+            fi
+          done
+          exit "$failed"
+
   # The dialect table's catalog and window SQL is only truly proven against a
   # server: which column a scanner expects, whether an OFFSET window comes back
   # disjoint, whether a rebuilt name addresses the table, and whether a write

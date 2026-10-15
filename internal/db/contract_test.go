@@ -657,6 +657,10 @@ func TestContractPostgresWritePath(t *testing.T) { testWriteContract(t, DbTypePo
 // round-trip back through the key predicate, and that is exactly what only a
 // real server can tell us.
 //
+// What a text value reaches the server as is asserted, though, and for the same
+// reason: whether an engine reads the client's literal as the bytes that were
+// typed is the server's answer, not something the builder can prove about itself.
+//
 // The subtests run in order against one fixture and carry state forward; that
 // is the sequence the grid produces, not four independent stories.
 func testWriteContract(t *testing.T, engine string) {
@@ -757,6 +761,108 @@ func testWriteContract(t *testing.T, engine string) {
 		}
 		if got := nameAt(2); got != "after-rollback" {
 			t.Errorf("row 3 reads back %q, want the retried save committed", got)
+		}
+	})
+
+	t.Run("escaped text lands as the bytes that were typed", func(t *testing.T) {
+		// Doubling the apostrophe is only half of a safe literal, and which half
+		// is missing is engine business: MySQL reads a backslash as the escape
+		// character inside a string literal, so an un-doubled one either swallows
+		// the closing quote (the statement stops being the one that was built) or
+		// quietly stores something else - a backslash and an n become a newline.
+		// Only the server can say which of the two a client is doing.
+		rows := readParent()
+		const withQuote = `a\'b\c`
+		const withNewline = `x\ny`
+		applied, err := store.ApplyChanges(parentSet(rows.Columns,
+			RowChange{Original: rows.Rows[3], Edits: []CellEdit{{Column: "name", Value: withQuote}}},
+			RowChange{Original: rows.Rows[4], Edits: []CellEdit{{Column: "name", Value: withNewline}}}))
+		if err != nil || applied != 2 {
+			t.Fatalf("apply: applied %d, err %v", applied, err)
+		}
+		if got := nameAt(3); got != withQuote {
+			t.Errorf("row 4 stores %q, want the %q that was typed", got, withQuote)
+		}
+		if got := nameAt(4); got != withNewline {
+			t.Errorf("row 5 stores %q, want the %q that was typed", got, withNewline)
+		}
+
+		// Same layer on the reading side: the bar's contains test is a LIKE whose
+		// pattern and ESCAPE character both go through the literal layer, and what
+		// it has to find is the backslash the save above stored.
+		where, err := store.TableWhere("contract", target.database, target.schema, "tpro_parent",
+			[]TableFilter{{Column: "name", Op: FilterContains, Value: `\n`}})
+		if err != nil {
+			t.Fatalf("filter on the stored text: %v", err)
+		}
+		found := store.Execute(ctx, conn, target.database,
+			"SELECT id, name FROM "+parent+where+" ORDER BY id", 0)
+		if found.Error != "" {
+			t.Fatalf("the filter bar's statement was refused by the server: %s", found.Error)
+		}
+		if found.RowCount != 1 {
+			t.Fatalf("contains %q matched %d rows, want the one row that holds it", `\n`, found.RowCount)
+		}
+		if got := ValueString(found.Rows[0][1]); got != withNewline {
+			t.Errorf("it matched row %q, want the row written above", got)
+		}
+	})
+
+	t.Run("a decimal key reaches the server with every digit", func(t *testing.T) {
+		// The parent fixture keys on INT, so the exact-decimal half of the key
+		// predicate needs its own table: a NUMERIC(30,2) key whose 20 digits a
+		// double cannot name, and a second row holding exactly what the float
+		// path rounds those digits to. Rounded, the UPDATE lands on that other
+		// row and the server still answers "one row matched" - the guard that
+		// catches a vanished row has nothing to catch here, which is the whole
+		// reason the digits have to go out as they were read.
+		decimal := contractObject(engine, target.schema, "tpro_decimal")
+		setup := []string{
+			"DROP TABLE IF EXISTS " + decimal,
+			"CREATE TABLE " + decimal + " (id NUMERIC(30,2) NOT NULL PRIMARY KEY, v VARCHAR(8) NOT NULL)",
+			"INSERT INTO " + decimal + " (id, v) VALUES (123456789012345678.90, 'target')",
+			"INSERT INTO " + decimal + " (id, v) VALUES (123456789012345680.00, 'decoy')",
+			"INSERT INTO " + decimal + " (id, v) VALUES (1, 'first')",
+		}
+		t.Cleanup(func() {
+			store.Execute(context.Background(), conn, target.database, "DROP TABLE IF EXISTS "+decimal, 0)
+		})
+		runContractStmts(t, store, conn, setup)
+
+		readDecimal := func() QueryResult {
+			t.Helper()
+			res := store.Execute(ctx, conn, target.database, "SELECT id, v FROM "+decimal+" ORDER BY id", 0)
+			if res.Error != "" {
+				t.Fatalf("read the decimal fixture: %s", res.Error)
+			}
+			if res.RowCount != 3 {
+				t.Fatalf("decimal fixture read %d rows, want the 3 seeded", res.RowCount)
+			}
+			return res
+		}
+		rows := readDecimal()
+		// Both drivers answer an exact decimal with bytes, so the grid holds the
+		// key as text - which is the shape whose digits used to be rebuilt from a
+		// float64.
+		if got := ValueString(rows.Rows[1][0]); got != "123456789012345678.90" {
+			t.Fatalf("the seeded key reads back %q, want the digits that were inserted", got)
+		}
+		applied, err := store.ApplyChanges(ChangeSet{
+			ConnID: "contract", Database: target.database, Schema: target.schema,
+			Table: "tpro_decimal", Columns: rows.Columns,
+			Changes: []RowChange{{Original: rows.Rows[1], Edits: []CellEdit{{Column: "v", Value: "hit"}}}},
+		})
+		if err != nil || applied != 1 {
+			t.Fatalf("apply on a decimal key: applied %d, err %v", applied, err)
+		}
+		after := readDecimal()
+		if got := ValueString(after.Rows[1][1]); got != "hit" {
+			t.Errorf("the row keyed %s reads %q: the key did not reach the server as it was read",
+				ValueString(after.Rows[1][0]), got)
+		}
+		if got := ValueString(after.Rows[2][1]); got != "decoy" {
+			t.Errorf("the write landed on the row keyed %s instead - a decimal key was rounded",
+				ValueString(after.Rows[2][0]))
 		}
 	})
 }

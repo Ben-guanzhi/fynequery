@@ -289,12 +289,15 @@ var mysqlDialect = &dialect{
 		return QualifiedName(DbTypeMySQL, database, table)
 	},
 	indexes: func(c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
-		// STATISTICS has no is-primary column: MySQL marks the key by naming it
-		// PRIMARY, which is what the fourth column answers with. scanIndexRow
-		// expects five destinations, so a query that selects four fails the scan
-		// for every table on the server. The index read of the MySQL catalog
-		// contract is what catches that - whenever a server is configured.
-		flat, err := collectRows(conn.DB, `SELECT INDEX_NAME, INDEX_TYPE, NON_UNIQUE,
+		// scanIndexRow expects five destinations, so a statement that selects
+		// four fails the scan for every table on the server - which is what the
+		// pinned tableprosql v0.1.0 does here, and why this read is local rather
+		// than a call to tableprosql.IndexesQuery. STATISTICS has no is-primary
+		// column either: MySQL marks the key by naming it PRIMARY, and the fourth
+		// column answers with that. The third derives NON_UNIQUE, which names the
+		// opposite of what the readers scan it into. The index read of the MySQL
+		// catalog contract catches either mistake - whenever a server is configured.
+		flat, err := collectRows(conn.DB, `SELECT INDEX_NAME, INDEX_TYPE, CASE WHEN NON_UNIQUE = 0 THEN 1 ELSE 0 END,
 			CASE WHEN INDEX_NAME = 'PRIMARY' THEN 1 ELSE 0 END, COLUMN_NAME
 			FROM information_schema.STATISTICS
 			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?

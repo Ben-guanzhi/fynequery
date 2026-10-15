@@ -206,7 +206,7 @@ job，见下。
    lib/pq 的 `decode`、go-sql-driver 的 `readRow` 都读过源码确认），所以任何整数
    主键的 UPDATE/DELETE 都以 `unsupported value of type int64` 失败，「导出为
    INSERT 语句」同样失败。现在按各驱动真正交来的形状补齐
-   （[internal/db/changes.go:206](file:///D:/tools/db/fynequery/internal/db/changes.go#L206)），
+   （[internal/db/changes.go:270](file:///D:/tools/db/fynequery/internal/db/changes.go#L270)），
    并且写成整数而不是先转 float：超过 2^53 的键转成 double 就不再是那个键，
    WHERE 会指到别的行或哪也不指。根仓没有照搬这三个分支——它够不着：那边每个进
    `valueLiteral` 的值都过一遍 JSON（`json.NewDecoder(...).Decode(&body)` 解
@@ -215,7 +215,7 @@ job，见下。
 2. `ApplyChanges` 失败时返回一路累加到那儿的半截计数，跟它自己那句
    "nothing was committed" 相互矛盾；界面只显示错误，所以这个数没流到用户眼前，
    但一个说谎的返回值不该留在那里。现在失败一律返回 0
-   （[internal/db/changes.go:501](file:///D:/tools/db/fynequery/internal/db/changes.go#L501)）。
+   （[internal/db/changes.go:568](file:///D:/tools/db/fynequery/internal/db/changes.go#L568)）。
 
 顺带把 MySQL 连接设成 `ClientFoundRows`
 （[internal/db/store_connect.go:126](file:///D:/tools/db/fynequery/internal/db/store_connect.go#L126)）：
@@ -245,6 +245,9 @@ double 只有 53 位尾数，用户拼对了键，服务端拿到的是另一个
 | `18446744073709551615` | `18446744073709552000` | 差 1 |
 | `18446744073709551616` | `18446744073709552000` | 差 1 |
 | `-99999999999999999999` | `-100000000000000000000` | 同样差 1，只是差在高位 |
+| `123456789012345678.90` | `123456789012345680` | 带小数点的那侧同一个悬崖，这次连整数部分都错了 |
+| `0.1111111111111111111111` | `0.1111111111111111` | 后 10 位凭空抹掉 |
+| `1.50` | `1.5` | 值相等，但用户写的标度保不住 |
 
 危害不是「报错」而是**改错行**：夹具里 `9007199254740993` 与 `9007199254740992`
 两行都在，旧路径把 UPDATE 落到了邻行，`ApplyChanges` 返回 applied=1、一句错误都
@@ -253,21 +256,30 @@ double 只有 53 位尾数，用户拼对了键，服务端拿到的是另一个
 （[internal/db/changes_apply_test.go:185](file:///D:/tools/db/fynequery/internal/db/changes_apply_test.go#L185)、
 根仓 `../TableProGo/apply_test.go:159`）。
 
-现在认得的只有「一个可选符号加一串数字」这一种形状，认得就原样写
-（[internal/db/changes.go:192](file:///D:/tools/db/fynequery/internal/db/changes.go#L192)）：
+现在认得的形状是「一个可选符号、一串数字、至多一个小数点且点两侧都要有数字」，认得
+就原样写（[internal/db/changes.go:193](file:///D:/tools/db/fynequery/internal/db/changes.go#L193)）：
 64 位装得下的走 `ParseInt/ParseUint` 顺带把 `007`、`+7` 归一化，装不下的**照写数字**，
 既不四舍五入也不由客户端拒绝——`DECIMAL(30,0)` 真装得下 20 位，而 `bigint` 会用自己
 的 out-of-range 错误回答，那个错误响亮且点名列名，客户端没权限替服务端先把它舍掉。
 （这里修正了我先前的提案「超 19 位就拒绝」：那会误伤合法的大 DECIMAL 列。）
-`1e3`、`1.50`、`0x10` 一律走老路，文字列的 `007` 仍是 `'007'`。
+小数那侧同样只认形状、不算数：`1.50` 原样出，`.5`、`1.`、`1e3` 仍走老路（依次渲染成
+`0.5`、`1`、`1000`），`0x10`、`1.2.3` 仍被拒，文字列的 `007` 仍是 `'007'`。真库侧补了
+一条 `NUMERIC(30,2)` 主键的用例
+（[internal/db/contract_test.go:811](file:///D:/tools/db/fynequery/internal/db/contract_test.go#L811)）：
+把 `123456789012345678.90` 和旧路径正好渲染出来的那个邻值 `123456789012345680.00` 一起
+种进去，改前者只有前者能动——这条是带诱饵行的，只看渲染文本看不出危害。
 
-负对照分两层。把字符串分支里这次调用短路（`false && whole`，等价于改回旧写法）：4 条
-表驱动断言加那条真库测试红，红出的正是上面表格里的四个数。再把形状扫描关掉（循环条件
-改成 `i < 0`，等于什么都认）：6 条红，其中一条是原本
-就存在的「`twelve` 必须被拒」——没有这道扫描，数字列里任何文本都会被当作**未加引号
-的字面量**发给服务端，这才是这道扫描真正挡的东西，注释里写明了。
+负对照分两层。把字符串分支里这次调用短路（`false && exact`，等价于改回旧写法）：2 条
+测试红，表驱动里红出的正是上面表格那 7 个数（前 4 行是整数那侧，这次一并重新量过），
+另一条是真库夹具 `TestApplyChangesLocatesARowByKeyTypedAsText`。再把形状扫描关掉
+（`allDigits` 的循环条件改成 `i < 0`，等于什么都认）：6 条红——`1e3` 的归一化没了，
+`twelve` 与 `7x`、`0x10`、`7 7`、`1.2.3` 五道拒绝一起失效。没有这道扫描，数字列里任何
+文本都会被当作**未加引号的字面量**发给服务端，这才是这道扫描真正挡的东西，注释里写明了。
+两层对照只在 fynequery 侧做：把改动临时退回旧写法属于破坏性动作，根仓那次尝试被工作区
+的策略拦下了；根仓的 helper 与这边逐字节相同（见下），所以这组红/绿数字对两边都成立。
 
-根仓那边补的是同一份 helper（两仓 `wholeNumberLiteral` 逐字节相同，39 行），但根仓
+根仓那边补的是同一份 helper（两仓 `exactNumberLiteral` + `allDigits` 逐字节相同，33 行，
+md5 对过），表驱动用例也同步了——根仓原本断的是 `1.50` → `1.5`，这次翻成原样。但根仓
 **没有**加 `int64/uint64/float32` 分支：它够不着。实测——把 `int64`、`uint64`、
 `float32` marshal 成 JSON 再解回 `interface{}`，四个值的动态类型全是 `float64`；根仓
 每个入口都是 `json.NewDecoder(r.Body).Decode(&body)` 解 `[][]interface{}`
@@ -276,6 +288,103 @@ double 只有 53 位尾数，用户拼对了键，服务端拿到的是另一个
 `7.0`（`changes_test.go:16`）。所以那边的悬崖在更外一层：读回来的 `bigint` 主键经
 JSON 到浏览器就已经是 double 了，>2^53 在网页里就丢了，`valueLiteral` 修不了它——
 要修得改查询结果的序列化与前端，本次没做。手打的键与过滤条件（文本）则两仓都修好了。
+
+### 文本字面量的反斜杠
+
+`''` 翻倍只解决引号，另一半是**转义字符本身**：MySQL 在单引号字面量里把反斜杠
+当转义读，其它引擎（含开了 `NO_BACKSLASH_ESCAPES` 的 MySQL）把它当字面取。于
+是同一份「翻倍」代码在两种引擎上含义相反——尾巴一个反斜杠就把收尾引号吃掉，字
+面量与它后面那截语句黏在一起：
+
+| 用户写的 | 旧渲染（MySQL 解析） | 后果 |
+| --- | --- | --- |
+| `x\` | `'x\'` … 未闭合 | 语法错误 |
+| `\' OR 1=1 -- ` | `'\' OR 1=1 -- '` ⇒ 第 3 个引号闭合，`OR 1=1 -- ` 成 SQL | 注入 |
+| `x\ny` | `'x\ny'` ⇒ 存成换行 | 静默改数据 |
+
+这里的洞不是「少了一份规则」而是「有两份规则」：共享包的
+`QuotedLiteral`（`tableprosql@v0.1.0/sqlgen.go:99-113`）一直带 MySQL 分支，注释
+写明了危害，`sqlgen_test.go:107-124` 五条断言守着；根仓 [../TableProGo/changes.go:200](file:///D:/tools/db/TableProGo/changes.go#L200)
+委托它。fynequery 这边留的是本地那份副本
+（[internal/db/changes.go:236](file:///D:/tools/db/fynequery/internal/db/changes.go#L236) 曾经自己拼
+`''`），它比共享包少一条方言，所以修法是删掉拼接、改调
+`tableprosql.QuotedLiteral`——两边同一个答案，测试也就一份。写路径（`valueLiteral`
+→ `predicate`/`literals`）、过滤框（[internal/db/filters.go:66](file:///D:/tools/db/fynequery/internal/db/filters.go#L66)）、
+INSERT 导出都走这一层。
+
+`LIKE` 那一层叠在它上面：`contains` 用 `/` 做 `ESCAPE` 字符
+（[internal/db/filters.go:35-38](file:///D:/tools/db/fynequery/internal/db/filters.go#L35)）正是为了避开
+反斜杠的第二重含义，所以 `ESCAPE '/'` 在四个引擎上都原样通过字面量层（表驱动里
+单列四条断言钉住）。也因此本仓的 pattern 是 `'%a\\b%'`（2 个反斜杠）而根仓那条
+断言是 4 个——根仓的 `LikePattern` 自己会把反斜杠交给 `\` 转义，两边各自的
+`ESCAPE` 选择不同，不是分叉。
+
+负对照分两层，红出的都是**多算**而不是少算：先把方言参数写死成 `mysql`（等价于
+所有引擎都翻倍反斜杠），4 条测试 8 条断言红，其中 4 条是新用例里「sqlite /
+postgresql / oracle / sqlserver 必须原样取字」，另外 3 条是既有的 SQL Server
+`N''` 前缀断言（`TestUpdateUsesKeyColumnsAndDialectQuoting`、
+`TestInsertScriptExport`）——过度转义会改存进去的值，守卫必须是分方言的；再退回
+本地那份只翻倍引号的实现，红 6 条（新用例 5 条 + 表内 1 条），红出来的字符串就
+是上面表格里那三个。真库侧在契约套件写半区补了一条
+`escaped text lands as the bytes that were typed`
+（[internal/db/contract_test.go:767](file:///D:/tools/db/fynequery/internal/db/contract_test.go#L767)）：存 `a\'b\c` 与 `x\ny`
+再读回逐字节比对，然后用过滤框搜 `\n` 必须恰好命中那一行——「引擎有没有把客户
+端送出的字面量读成用户打的那些字节」只有服务端能答。
+
+### 钉在 tag 上的共享模块
+
+`go.mod` 用 tag 取 `tableprosql` / `tableproxlsx`
+（[go.mod:62-68](file:///D:/tools/db/fynequery/go.mod#L62)，故意不留 `replace`，`git clone` +
+`go build` 只靠 tag 就能成）。代价是**这边看不见上游动了什么**：根仓用 `replace` 指着
+自己的工作树，它的测试永远绿，而本仓编的是 modcache 里那份 v0.1.0。① 那个洞就是这么
+来的（共享包早就有 MySQL 反斜杠规则，钉住的这份没有）。索引目录这条更直接，两仓对同
+一个目录调用执行的是不同语句：
+
+| | 钉住的 v0.1.0 里 MySQL 那条 | 两个客户端各自 scan 的目标数 |
+| --- | --- | --- |
+| 选出的列 | `INDEX_NAME, INDEX_TYPE, NON_UNIQUE, COLUMN_NAME`，4 列 | 5 |
+
+⇒ 根仓 [../TableProGo/catalog.go:430](file:///D:/tools/db/TableProGo/catalog.go#L430) 五个目标
+对四列，MySQL 上每张表的索引面板都会停在 `rows.Scan`（它还在原来那行下面用「名字等于
+PRIMARY 就算主键」补了缺的第四列）。本仓躲过这一枪只是因为没走它：
+[internal/db/dialect.go:291](file:///D:/tools/db/fynequery/internal/db/dialect.go#L291) 自己留了一份
+五列齐的语句。第三列是另一半问题，而且这边也中招：`NON_UNIQUE` 装的正是「is-unique」的
+反面，两仓都把它直接 scan 进 `unique`，普通索引会被报成 UNIQUE——这条是从两边代码读
+出来的，契约套件里那句 `reported UNIQUE`
+（[internal/db/contract_test.go:486](file:///D:/tools/db/fynequery/internal/db/contract_test.go#L486)）
+接不住它，因为四列的语句先就 scan 不过去。
+
+修法是**对齐上游，不再往本仓复制一份**：
+
+- 共享包的 MySQL 分支补成五列，并把 flag 改成派生的 `CASE WHEN NON_UNIQUE = 0 THEN 1 ELSE 0 END`
+  （[../TableProGo/tableprosql/catalog.go:218](file:///D:/tools/db/TableProGo/tableprosql/catalog.go#L218)），
+  注释写清「五条语句都回答同样的五列，且列名按含义而不是按目录列」。根仓那句 `name == "PRIMARY"`
+  的补丁删了——第四列现在语句自己答。
+- 新增一条不需要服务器的守卫：四个引擎的列数都必须等于调用方 scan 的 5，第三列必须是派生
+  表达式（[../TableProGo/tableprosql/catalog_test.go:16](file:///D:/tools/db/TableProGo/tableprosql/catalog_test.go#L16)、
+  `:61`）。
+- 本仓那份本地语句改成与共享包**同一条**：把两处的 raw string 抽出、折掉空白后逐字符相同
+  （pg / mssql / oracle 三条索引语句本来就相同，这次一并核了；顺带发现 pg 那条列目录语句
+  也只差 `IN ('r','v','m','p')` 里的空格）。留着的理由只剩「钉住的 tag 里那条还是四列」，
+  注释里写明。
+- 版本落后以后由 CI 说，两个方向各一个 job：根仓 `shared-retag`
+  （[../TableProGo/.github/workflows/ci.yml:56](file:///D:/tools/db/TableProGo/.github/workflows/ci.yml#L56)，共享目录里有非测试
+  改动落在自己的 tag 之后 ⇒ 红，并点名该打哪个 tag）、本仓 `shared-vs-upstream`
+  （[.github/workflows/ci.yml:47](file:///D:/tools/db/fynequery/.github/workflows/ci.yml#L47)，把 modcache 里钉住的那份与上游 main
+  的目录 diff ⇒ 不为空就红）。两个 job 的脚本本体都在本机跑过：根仓那个今天的仓库状态就判
+  红，报出 `dialect.go`/`sqlgen.go`（`84d0f4d` 那次方言表重构）与 `exportxlsx.go`（`a54bdac`）；
+  本仓这个拿 modcache 与根仓工作树对跑 `diff -qr -x '*_test.go'`，报出的正是 `catalog.go`
+  不同、`dialect.go` 只在上游有、`sqlgen.go` 不同三处（CI 里对的是上游 main，等这次的改动
+  推上去才会看到 `catalog.go` 进名单）。这正是它们该做的事。
+
+**还差一步要人来**：把本仓的 MySQL 索引读改成直接调 `tableprosql.IndexesQuery`、删掉本地
+那份，必须排在 `tableprosql/v0.1.1` 打上并推上去之后——先改的话 `go.mod` 里没有那个 tag，
+本仓直接 `go build` 失败。在那之前 `shared-vs-upstream` 会一直红。
+
+守卫的牙齿由 `TestTheIndexShapeGuardRefusesTheShapesItGuardsAgainst`
+（[../TableProGo/tableprosql/catalog_test.go:89](file:///D:/tools/db/TableProGo/tableprosql/catalog_test.go#L89)）自己钉：把改前
+那条四列语句喂进同一个计数器和同一个第三列检查，量出来是 4、第三列是裸的 `NON_UNIQUE`，
+两处都判红。没有这条，「列数必须等于 5」有可能只是在数它自己造的字符串。
 
 ### 行数上限的截断探针
 

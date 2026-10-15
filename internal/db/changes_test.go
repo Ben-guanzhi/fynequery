@@ -108,13 +108,28 @@ func TestValueLiteralsFollowTheColumn(t *testing.T) {
 		// are better than a literal for a number nobody typed.
 		{"mysql", "decimal(30,0)", "18446744073709551616", "18446744073709551616"},
 		{"postgresql", "numeric", "-99999999999999999999", "-99999999999999999999"},
-		// The float path keeps everything that is not a plain run of digits.
+		// The float path keeps everything that is not a plain number.
 		{"postgresql", "double precision", "1e3", "1000"},
-		{"mysql", "decimal(18,2)", "1.50", "1.5"},
+		// A plain decimal goes out as the digits it was typed as: a double keeps
+		// 15-17 significant digits and no more, so the scale of a DECIMAL(30,2)
+		// column is beyond what the float can name.
+		{"mysql", "decimal(18,2)", "1.50", "1.50"},
+		{"mysql", "decimal(20,2)", "123456789012345678.90", "123456789012345678.90"},
+		{"postgresql", "numeric", "0.1111111111111111111111", "0.1111111111111111111111"},
+		{"mysql", "decimal(10,2)", "-1.25", "-1.25"},
+		// Shapes the float path has always rendered, and renders exactly: no digit
+		// on one side of the point, so nothing here is a plain decimal.
+		{"mysql", "double precision", ".5", "0.5"},
+		{"mysql", "double precision", "1.", "1"},
 		{"mysql", "bigint", "+7", "7"},
 		{"mysql", "bigint", "007", "7"},
 		// A text column never sees any of this: its digits are its value.
 		{"mysql", "varchar", "007", "'007'"},
+		// Nor does it skip the escaping layer: a name with an apostrophe and a
+		// backslash is quoted twice over on MySQL, once for the quote and once
+		// for the escape character the engine reads inside the literal.
+		{"mysql", "varchar", `a'b\c`, `'a''b\\c'`},
+		{"postgresql", "text", `a\b`, `'a\b'`},
 	}
 	for _, c := range cases {
 		got, err := valueLiteral(c.dbType, c.colType, c.value)
@@ -144,10 +159,67 @@ func TestValueLiteralsFollowTheColumn(t *testing.T) {
 	// the shape test in front of that is the only thing standing between the
 	// server and whatever else is in the cell: anything that merely starts like a
 	// number is still refused.
-	for _, junk := range []string{"7x", "0x10", "7 7", "-"} {
+	for _, junk := range []string{"7x", "0x10", "7 7", "-", "1.2.3"} {
 		if _, err := valueLiteral("mysql", "bigint", junk); err == nil {
 			t.Errorf("%q was written as a literal, want it refused", junk)
 		}
+	}
+}
+
+// The two layers that make a string safe: doubling the apostrophe is only half
+// of it on MySQL, which also reads a backslash as the escape character inside a
+// single-quoted literal. A value ending in one would otherwise eat the closing
+// quote and run the literal into the rest of the statement - and the rest of the
+// statement is a WHERE clause, so the row it names is whichever the data says,
+// not the one on the screen. Only MySQL: every other engine takes the backslash
+// literally, and doubling it there would change the stored value.
+func TestQuotedLiteralEscapesTheEnginesOwnEscapeCharacter(t *testing.T) {
+	cases := []struct {
+		dbType, value, want string
+	}{
+		{"mysql", `a\`, `'a\\'`},
+		{"mysql", `a'b\c`, `'a''b\\c'`},
+		{"mysql", `\' OR 1=1 -- `, `'\\'' OR 1=1 -- '`},
+		{"sqlite", `a\`, `'a\'`},
+		{"postgresql", `a\`, `'a\'`},
+		{"oracle", `a\`, `'a\'`},
+		{"sqlserver", `a\b`, `N'a\b'`},
+	}
+	for _, c := range cases {
+		if got := quotedLiteral(c.dbType, c.value); got != c.want {
+			t.Errorf("quotedLiteral(%s, %q) = %s, want %s", c.dbType, c.value, got, c.want)
+		}
+	}
+
+	// The LIKE layer rides on top of this one: the pattern escapes the wildcards
+	// with /, and the whole pattern then goes through the literal layer, so a
+	// backslash in what the user typed ends up doubled in the text MySQL parses.
+	if got := quotedLiteral("mysql", ContainsPattern(`a\b`)); got != `'%a\\b%'` {
+		t.Errorf("mysql contains pattern = %s, want %s", got, `'%a\\b%'`)
+	}
+	// The escape character of a contains test is / precisely because it survives
+	// both layers untouched on every engine.
+	for _, dbType := range []string{"mysql", "postgresql", "sqlite", "oracle"} {
+		if got := quotedLiteral(dbType, likeEscape); got != "'/'" {
+			t.Errorf("%s ESCAPE character = %s, want '/'", dbType, got)
+		}
+	}
+
+	// Statement level: the value is a key, so it sits in the WHERE between the
+	// table name and the columns being written. One unescaped backslash there
+	// turns that into a different statement.
+	statements, err := BuildStatements("mysql", "`t`", []string{"name", "qty"}, []string{"name"},
+		map[string]string{"name": "varchar", "qty": "int"},
+		[]RowChange{{
+			Original: []interface{}{`x\`, 1.0},
+			Edits:    []CellEdit{{Column: "qty", Value: 2.0}},
+		}})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+	want := "UPDATE `t` SET `qty` = 2 WHERE `name` = 'x\\\\'"
+	if statements[0] != want {
+		t.Errorf("statement = %s, want %s", statements[0], want)
 	}
 }
 
