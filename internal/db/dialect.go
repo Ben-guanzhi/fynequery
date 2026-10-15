@@ -205,8 +205,10 @@ func scanFkRow(r *sql.Rows) (tableprosql.FKRow, error) {
 	return row, err
 }
 
-// scanIndexRow reads one flat catalog row; a per-engine fixup (MySQL's
-// "PRIMARY" name) happens in that engine's closure.
+// scanIndexRow reads one flat catalog row: name, kind, unique, primary, column.
+// Every engine's query has to answer for all five - the arity is checked by the
+// row itself at scan time, so a short select list fails the read on a real
+// server and nowhere else.
 func scanIndexRow(r *sql.Rows) (indexRow, error) {
 	var row indexRow
 	var unique, primary int
@@ -287,18 +289,19 @@ var mysqlDialect = &dialect{
 		return QualifiedName(DbTypeMySQL, database, table)
 	},
 	indexes: func(c *Store, conn *Conn, database, schema, table string) ([]IndexInfo, error) {
-		flat, err := collectRows(conn.DB, `SELECT INDEX_NAME, INDEX_TYPE, NON_UNIQUE, COLUMN_NAME
+		// STATISTICS has no is-primary column: MySQL marks the key by naming it
+		// PRIMARY, which is what the fourth column answers with. scanIndexRow
+		// expects five destinations, so a query that selects four fails the scan
+		// for every table on the server. The index read of the MySQL catalog
+		// contract is what catches that - whenever a server is configured.
+		flat, err := collectRows(conn.DB, `SELECT INDEX_NAME, INDEX_TYPE, NON_UNIQUE,
+			CASE WHEN INDEX_NAME = 'PRIMARY' THEN 1 ELSE 0 END, COLUMN_NAME
 			FROM information_schema.STATISTICS
 			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 			ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
 			[]interface{}{schema, table}, scanIndexRow)
 		if err != nil {
 			return nil, err
-		}
-		for i := range flat {
-			if flat[i].name == "PRIMARY" {
-				flat[i].primary = true
-			}
 		}
 		return aggregateIndexes(flat), nil
 	},
