@@ -5,8 +5,10 @@ import (
 	"fyne.io/fyne/v2/app"
 )
 
-// appVersion shows in the window title so a stale executable is obvious.
-const appVersion = "1.3.0"
+// appVersion shows in the window title so a stale executable is obvious. A
+// release build overwrites it with the tag (`-ldflags -X main.appVersion=...`),
+// so what the title bar says and what was published are the same string.
+var appVersion = "1.3.0"
 
 func main() {
 	a := app.NewWithID("com.tableprogo.fyne")

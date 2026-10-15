@@ -1,6 +1,9 @@
 # build artifacts
 *.exe
 
+# release artifacts from `task release` (name carries the tag and the target)
+/fynequery-*-*
+
 # go build/test temp
 *.out
 

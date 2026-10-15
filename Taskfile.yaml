@@ -12,7 +12,25 @@ tasks:
   build:
     desc: Build the executable
     cmds:
-      - go build -o {{.APP_NAME}}.exe .
+      # -H=windowsgui: without it the PE is a console subsystem image, so
+      # double-clicking the app opens a cmd window next to the window.
+      - cmd: "go build -ldflags '-H=windowsgui' -o {{.APP_NAME}}.exe ."
+        platforms: [windows]
+      - cmd: "go build -o {{.APP_NAME}} ."
+        platforms: [linux, darwin]
+
+  release:
+    desc: Build the distributable, stripped and stamped with the git tag
+    vars:
+      VER:
+        sh: git describe --tags --always --dirty
+    cmds:
+      - cmd: "go build -ldflags '-H=windowsgui -s -w -X main.appVersion={{.VER}}' -o {{.APP_NAME}}-{{.VER}}-windows-amd64.exe ."
+        platforms: [windows]
+      - cmd: "go build -ldflags '-s -w -X main.appVersion={{.VER}}' -o {{.APP_NAME}}-{{.VER}}-linux-amd64 ."
+        platforms: [linux]
+      - cmd: "go build -ldflags '-s -w -X main.appVersion={{.VER}}' -o {{.APP_NAME}}-{{.VER}}-darwin-amd64 ."
+        platforms: [darwin]
 
   run:
     desc: Build and run
