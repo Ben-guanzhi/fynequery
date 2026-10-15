@@ -250,10 +250,6 @@ func (c *Client) runPage(pageNo int) {
 			return c.store.ExecutePage(ctx, conn, dbName, stmt, pageNo, pageSize), stmt
 		},
 		func(res db.QueryResult, _ string, canceled bool) {
-			c.mu.Lock()
-			c.cancelFn = nil
-			c.mu.Unlock()
-			c.setRunning(false)
 			if res.Error != "" {
 				c.renderResult(res)
 				if canceled {

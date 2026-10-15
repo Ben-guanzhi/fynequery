@@ -171,7 +171,12 @@ type Client struct {
 	currentDB string
 	// cancelFn aborts the in-flight query.
 	cancelFn context.CancelFunc
-	cache    memoCache
+	// busy says one tracked run is in flight. It exists because a page turn is a
+	// re-query: without the guard it started a second run that overwrote cancelFn,
+	// so 取消 stopped the newest run and let the old one land on top of it, and the
+	// grid ended up showing page A under a bar that said page B.
+	busy  bool
+	cache memoCache
 
 	// The rest is UI-thread state, grouped by what moves together: the sidebar
 	// pickers, the schema navigator, the history panel and the editor tabs.

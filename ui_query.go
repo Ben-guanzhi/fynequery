@@ -443,10 +443,6 @@ func (c *Client) runStatements(stmts []string) {
 			return last, lastStmt
 		},
 		func(res db.QueryResult, lastStmt string, canceled bool) {
-			c.mu.Lock()
-			c.cancelFn = nil
-			c.mu.Unlock()
-			c.setRunning(false)
 			c.setEditContext(lastStmt, res)
 			c.renderResult(res)
 			c.afterRunPaging(lastStmt, res, pageNote, len(stmts) == 1)
@@ -489,14 +485,37 @@ func rowCapNote(dbType, stmt string, limit int, truncated bool) string {
 // a background goroutine (inline when asyncRun is false, for deterministic
 // tests) and finish receives its result on the UI thread. runCurrent and
 // runPage share the cancellation, busy-button and marshalling bookkeeping.
+//
+// It reports whether the round started: a run that is still in flight owns the
+// cancellation and the result grid, so a second one is refused rather than
+// allowed to overwrite it.
 func (c *Client) runTracked(busy string, work func(context.Context) (db.QueryResult, string),
-	finish func(db.QueryResult, string, bool)) {
-	ctx, cancel := context.WithCancel(context.Background())
+	finish func(db.QueryResult, string, bool)) bool {
 	c.mu.Lock()
+	if c.busy {
+		c.mu.Unlock()
+		c.setStatus("已有查询在执行，请等待或点「取消」")
+		return false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.busy = true
 	c.cancelFn = cancel
 	c.mu.Unlock()
 	c.setRunning(true)
 	c.setStatus(busy)
+
+	// release belongs to runTracked, not to the callers: every finish callback
+	// used to clear cancelFn for itself, which is how a round that was no longer
+	// the current one could take the 取消 button away. Owning it here, together
+	// with the guard above, means exactly one round is ever in flight - so the
+	// cancellation the button holds is always the one that can still be stopped.
+	release := func() {
+		c.mu.Lock()
+		c.busy = false
+		c.cancelFn = nil
+		c.mu.Unlock()
+		c.setRunning(false)
+	}
 
 	run := func() (db.QueryResult, string, bool) {
 		res, lastStmt := work(ctx)
@@ -509,13 +528,18 @@ func (c *Client) runTracked(busy string, work func(context.Context) (db.QueryRes
 	}
 	if !c.asyncRun {
 		res, lastStmt, canceled := run()
+		release()
 		finish(res, lastStmt, canceled)
-		return
+		return true
 	}
 	go func() {
 		res, lastStmt, canceled := run()
-		c.dispatch(func() { finish(res, lastStmt, canceled) })
+		c.dispatch(func() {
+			release()
+			finish(res, lastStmt, canceled)
+		})
 	}()
+	return true
 }
 
 // cancelRun aborts the in-flight query, if any.
@@ -528,20 +552,27 @@ func (c *Client) cancelRun() {
 	}
 }
 
-// setRunning toggles the run/cancel buttons for an in-flight query.
+// setRunning toggles every control that starts or redirects a run: the run and
+// cancel buttons, and the whole paging bar. A page turn is a re-query of the
+// same statement, so it is exactly as unwelcome mid-run as a second 执行 - and
+// the bar is the worse one to leave live, because the run it starts describes a
+// window nobody has asked for any more.
 func (c *Client) setRunning(running bool) {
-	if c.runBtn != nil {
-		if running {
-			c.runBtn.Disable()
-		} else {
-			c.runBtn.Enable()
+	idle := !running
+	toggle := func(w fyne.Disableable, enabled bool) {
+		if w == nil {
+			return
 		}
-	}
-	if c.cancelRunBtn != nil {
-		if running {
-			c.cancelRunBtn.Enable()
-		} else {
-			c.cancelRunBtn.Disable()
+		if enabled {
+			w.Enable()
+			return
 		}
+		w.Disable()
 	}
+	toggle(c.runBtn, idle)
+	toggle(c.cancelRunBtn, running)
+	toggle(c.page.prevBtn, idle)
+	toggle(c.page.nextBtn, idle)
+	toggle(c.page.sizeSel, idle)
+	toggle(c.page.check, idle)
 }
