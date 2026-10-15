@@ -315,6 +315,110 @@ func TestPagingCheckGreysRowCap(t *testing.T) {
 	}
 }
 
+// TestRowCapDeclinedIsReported covers the other half of the same cliff, with
+// 分页浏览 off: a statement that caps its own rows is run as written, so the
+// grid can hold more rows than 行数上限 says. The row count cannot show that,
+// so the status line has to say it. The plain twin is the negative control -
+// when the cap binds, nothing may claim it did not.
+func TestRowCapDeclinedIsReported(t *testing.T) {
+	c := newPagingClient(t, 25, false, "10")
+	c.page.limitSel.SetSelected("100")
+
+	c.tabs.entry.setTextSilently("SELECT id, name FROM items ORDER BY id LIMIT 30")
+	c.runCurrent()
+	if len(c.grid.rows) != 25 {
+		t.Fatalf("rows = %d, want the statement's own 25 under a 100 cap", len(c.grid.rows))
+	}
+	if !strings.Contains(c.status.Text, "行数上限 100 未生效") {
+		t.Fatalf("status = %q, want the declined cap named", c.status.Text)
+	}
+
+	d := newPagingClient(t, 25, false, "10")
+	d.page.limitSel.SetSelected("100")
+	d.tabs.entry.setTextSilently("SELECT id, name FROM items ORDER BY id")
+	d.runCurrent()
+	if len(d.grid.rows) != 25 {
+		t.Fatalf("rows = %d, want all 25 under a 100 cap", len(d.grid.rows))
+	}
+	if strings.Contains(d.status.Text, "未生效") {
+		t.Fatalf("status = %q, a bound cap must not be reported as declined", d.status.Text)
+	}
+}
+
+// TestRowCapTruncatedIsReported is the twin of the declined case: a cap that
+// binds and cuts the answer short has to say so, because 返回 100 行 looks exactly
+// like a table with a hundred rows in it. The negative controls are the two
+// results that must not be described as a cut - a cap the whole answer fits, and
+// a page window, which is a window by agreement with the user rather than a
+// truncation of a cap.
+func TestRowCapTruncatedIsReported(t *testing.T) {
+	c := newPagingClient(t, 120, false, "10")
+	c.page.limitSel.SetSelected("100")
+	c.tabs.entry.setTextSilently("SELECT id, name FROM items ORDER BY id")
+	c.runCurrent()
+	if len(c.grid.rows) != 100 {
+		t.Fatalf("rows = %d, want the cap to hold the grid to 100", len(c.grid.rows))
+	}
+	if !strings.Contains(c.status.Text, "还有更多行未取出") {
+		t.Fatalf("status = %q, want the cut cap named", c.status.Text)
+	}
+	if strings.Contains(c.status.Text, "未生效") {
+		t.Errorf("status = %q, a cap that bound must not also be reported as declined", c.status.Text)
+	}
+
+	// The same table under a cap it fits: one row count, the opposite verdict.
+	// Raising the selector is what a user does next, and it reuses the seed.
+	c.page.limitSel.SetSelected("500")
+	c.runCurrent()
+	if len(c.grid.rows) != 120 {
+		t.Fatalf("rows = %d, want all 120 under a 500 cap", len(c.grid.rows))
+	}
+	if strings.Contains(c.status.Text, "还有更多行") {
+		t.Errorf("status = %q, a result the cap did not touch must not claim more rows exist", c.status.Text)
+	}
+
+	// Paging answers a different question - the window is chosen, not forced -
+	// so the cap's wording has to stay out of the way.
+	e := newPagingClient(t, 25, true, "10")
+	e.tabs.entry.setTextSilently("SELECT id, name FROM items ORDER BY id")
+	e.runCurrent()
+	if len(e.grid.rows) != 10 {
+		t.Fatalf("rows = %d, want page 1 of 10", len(e.grid.rows))
+	}
+	if strings.Contains(e.status.Text, "还有更多行未取出") {
+		t.Errorf("status = %q, a page window is not a truncated cap", e.status.Text)
+	}
+}
+
+// TestScriptResultIsNotClaimedAsAPage pins the fix for the bar lying: a script
+// runs through the row-cap path, so its last result is a whole capped result,
+// not a window. Turning the page then replayed rows already on screen under a
+// new page number.
+func TestScriptResultIsNotClaimedAsAPage(t *testing.T) {
+	c := newPagingClient(t, 25, true, "10")
+	c.tabs.entry.setTextSilently("SELECT 1;\nSELECT * FROM items")
+
+	c.runCurrent()
+	if c.page.stmt != "" {
+		t.Fatalf("pageStmt = %q, a script result was claimed as page 1", c.page.stmt)
+	}
+	if c.page.bar.Visible() {
+		t.Fatal("page bar shown for a result that was not fetched as a window")
+	}
+	if !strings.Contains(c.status.Text, "一次只认一条语句") {
+		t.Fatalf("status = %q, want the reason the script is not paged", c.status.Text)
+	}
+
+	first := c.grid.rows[0][1]
+	c.stepPage(1)
+	if c.page.no != 1 {
+		t.Fatalf("page = %d, a refused result must not turn", c.page.no)
+	}
+	if len(c.grid.rows) != 25 || c.grid.rows[0][1] != first {
+		t.Fatalf("rows changed to %d starting %q on a non-paged result", len(c.grid.rows), c.grid.rows[0][1])
+	}
+}
+
 // TestFailedQueryKeepsItsError reports what the status line said: the runner
 // used to read ctx.Err() after cancelling every query, so a plain failure looked
 // like a cancellation. A syntax error must stay a syntax error.

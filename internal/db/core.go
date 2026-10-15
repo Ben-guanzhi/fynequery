@@ -70,6 +70,11 @@ type QueryResult struct {
 	LastInsertID  int64
 	ExecutionTime float64
 	Error         string
+	// Truncated says the row cap cut the answer short, so a grid full of
+	// exactly "limit" rows is not mistaken for the whole story. Only a cap the
+	// client injected can truncate: a statement with a window of its own is run
+	// as written and stays false however many rows it returns.
+	Truncated bool
 }
 
 // ColumnInfo describes one column of a table in the schema browser.

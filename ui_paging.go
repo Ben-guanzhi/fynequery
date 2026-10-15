@@ -90,7 +90,11 @@ func validPageSize(n int) bool {
 
 // pageEligible decides whether the result just shown can be browsed as row
 // windows, and explains why not when 分页浏览 is on but the statement refuses.
-func (c *Client) pageEligible(stmt string, res db.QueryResult) (bool, string) {
+// singleStatement is what the run actually executed: a script's last result is
+// whatever the script ended with, and re-running just that statement as page 2
+// would replay rows the script had already shown, so the bar must not claim a
+// page the run never fetched.
+func (c *Client) pageEligible(stmt string, res db.QueryResult, singleStatement bool) (bool, string) {
 	if !c.page.on || res.Error != "" {
 		return false, ""
 	}
@@ -100,6 +104,9 @@ func (c *Client) pageEligible(stmt string, res db.QueryResult) (bool, string) {
 	}
 	if !db.Pageable(cfg.Type, stmt) {
 		return false, "分页浏览只支持本身不带行窗口（LIMIT/OFFSET/TOP/FETCH/ROWNUM）的 SELECT"
+	}
+	if !singleStatement {
+		return false, "分页浏览一次只认一条语句"
 	}
 	return true, ""
 }
@@ -153,11 +160,11 @@ func (c *Client) stablePageQuery(conn *db.Conn, database, stmt string) (string, 
 // afterRunPaging re-points the page state at the statement that produced the
 // result now on screen, then refreshes the bar. Called after every full run:
 // executing is always page 1, and note is what stablePageQuery reported.
-func (c *Client) afterRunPaging(stmt string, res db.QueryResult, note string) {
+func (c *Client) afterRunPaging(stmt string, res db.QueryResult, note string, singleStatement bool) {
 	c.page.no = 1
 	c.page.stmt = ""
 	c.page.note = ""
-	if ok, why := c.pageEligible(stmt, res); ok {
+	if ok, why := c.pageEligible(stmt, res, singleStatement); ok {
 		c.page.stmt = stmt
 		c.page.note = note
 	} else if why != "" {

@@ -449,7 +449,13 @@ func (c *Client) runStatements(stmts []string) {
 			c.setRunning(false)
 			c.setEditContext(lastStmt, res)
 			c.renderResult(res)
-			c.afterRunPaging(lastStmt, res, pageNote)
+			c.afterRunPaging(lastStmt, res, pageNote, len(stmts) == 1)
+			if !c.page.on && res.Error == "" && len(res.Columns) > 0 {
+				// Paging off means the toolbar's 行数上限 is the user's stated
+				// intent; say so whenever the answer and that intent disagree -
+				// cut short, or the statement never taking the cap at all.
+				c.appendStatus(rowCapNote(conn.Config.Type, lastStmt, limit, res.Truncated))
+			}
 			c.refreshHistory()
 			c.clearTabDirty(c.tabs.entry)
 			if canceled && res.Error != "" {
@@ -457,6 +463,26 @@ func (c *Client) runStatements(stmts []string) {
 			}
 			c.focusEditor()
 		})
+}
+
+// rowCapNote phrases the two outcomes the row count cannot explain by itself:
+// the cap bound and cut the answer short, so what is on screen is only the first
+// slice; or the cap ran but the SQL was left untouched, so the grid is not what
+// the selector asked for either. Empty when neither applies - the cap bound and
+// the whole answer fit, or 无限制 was chosen.
+func rowCapNote(dbType, stmt string, limit int, truncated bool) string {
+	if truncated {
+		// Only a cap the client injected can truncate, so this is the one case
+		// where the row count is known to be a prefix rather than the story.
+		return fmt.Sprintf(" · 已达行数上限 %d，还有更多行未取出", limit)
+	}
+	switch db.JudgeRowCap(dbType, stmt, limit) {
+	case db.RowCapOwnWindow:
+		return fmt.Sprintf(" · 语句自带行窗口，行数上限 %d 未生效", limit)
+	case db.RowCapShapeUnsafe:
+		return " · 该语句形状无法安全注入行数上限，返回多少行就是多少行"
+	}
+	return ""
 }
 
 // runTracked runs one query round with the 取消 button wired to it: work runs on

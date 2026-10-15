@@ -392,3 +392,12 @@ func (c *Client) setStatus(text string) {
 		c.status.SetText(text)
 	}
 }
+
+// appendStatus extends the line just written, for the verdict a plain "返回 N 行"
+// cannot convey: the row cap ran, declined, and the grid is showing more than
+// the number the toolbar says.
+func (c *Client) appendStatus(text string) {
+	if c.status != nil && text != "" {
+		c.status.SetText(c.status.Text + text)
+	}
+}

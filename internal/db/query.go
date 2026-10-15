@@ -30,6 +30,41 @@ func withRowLimit(query, dbType string, limit int) string {
 	return tableprosql.RowLimit(dbType, query, limit)
 }
 
+// RowCapStatus is what the row cap does to one statement: bind, or decline and
+// leave the SQL exactly as written.
+type RowCapStatus int
+
+const (
+	// RowCapNotRequested means no cap was asked for ("无限制"), so nothing was
+	// injected and the statement can return any number of rows.
+	RowCapNotRequested RowCapStatus = iota
+	// RowCapApplied means the cap was injected, so the grid cannot exceed it.
+	RowCapApplied
+	// RowCapOwnWindow means the statement already caps its own rows.
+	RowCapOwnWindow
+	// RowCapShapeUnsafe means the statement reads as a query but the renderer
+	// refuses to inject into its shape (SQL Server caps with TOP, which cannot
+	// go into a WITH ... SELECT).
+	RowCapShapeUnsafe
+)
+
+// JudgeRowCap answers, before a run, whether the chosen 行数上限 will reach this
+// statement. The verdict comes from the shared renderer rather than a second
+// copy of its guard: RowLimit hands back the untouched query exactly when it
+// declines, so the two can never drift apart.
+func JudgeRowCap(dbType, query string, limit int) RowCapStatus {
+	if limit <= 0 {
+		return RowCapNotRequested
+	}
+	if tableprosql.RowLimit(dbType, query, limit) != query {
+		return RowCapApplied
+	}
+	if ownLimitRe.MatchString(trimStatement(query)) {
+		return RowCapOwnWindow
+	}
+	return RowCapShapeUnsafe
+}
+
 // runSelect scans a resultset into a QueryResult. A cancelled context aborts
 // the query and is reported through the result's error.
 func runSelect(ctx context.Context, db *sql.DB, query string, start time.Time) QueryResult {
@@ -111,19 +146,40 @@ func executeCommand(ctx context.Context, db *sql.DB, query string, start time.Ti
 	}
 }
 
-// execute dispatches a single statement against a connection. The context
-// carries a cancellation; cancelling it aborts a running query.
+// Execute dispatches a single statement against a connection. The context
+// carries a cancellation; cancelling it aborts a running query. A positive
+// limit caps a SELECT's rows and, when the cap binds, says whether it cut them
+// short.
 func (c *Store) Execute(ctx context.Context, conn *Conn, database, query string, limit int) QueryResult {
 	db, err := c.queryPool(conn, database)
 	if err != nil {
 		return QueryResult{Error: err.Error()}
 	}
-	if limit > 0 {
-		query = withRowLimit(query, conn.Config.Type, limit)
-	}
 	start := time.Now()
+	// isSelectQuery is answered on the text the user wrote, and so is the cap:
+	// RowLimit only ever rewrites a SELECT or a WITH, so the two questions have
+	// the same answer either way, and one text is what the probe is compared
+	// against below.
 	if isSelectQuery(query) {
-		return runSelect(ctx, db, query, start)
+		// Fetch one row past the cap. A grid full of exactly "limit" rows then
+		// has two possible stories - the table holds exactly that many, or it
+		// holds more and the rest never arrived - and the row count cannot tell
+		// them apart, so the extra row decides and is dropped again.
+		fetch := limit
+		if limit > 0 {
+			fetch = limit + 1
+		}
+		probe := withRowLimit(query, conn.Config.Type, fetch)
+		result := runSelect(ctx, db, probe, start)
+		// The extra row is a probe only when the cap is ours: a statement with a
+		// window of its own is run as written, and trimming its rows would be
+		// the client silently editing an answer the server was told to shape.
+		if limit > 0 && probe != query && result.Error == "" && len(result.Rows) > limit {
+			result.Rows = result.Rows[:limit]
+			result.RowCount = limit
+			result.Truncated = true
+		}
+		return result
 	}
 	return executeCommand(ctx, db, query, start)
 }

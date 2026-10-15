@@ -64,6 +64,11 @@ func TestEndToEndSQLite(t *testing.T) {
 	if limited.RowCount != 1 {
 		t.Fatalf("row limit: expected 1 row, got %d", limited.RowCount)
 	}
+	// Two users exist, so the one row kept is a prefix and has to be reported
+	// as one - the count alone looks like a table with a single row.
+	if !limited.Truncated {
+		t.Errorf("Truncated = false under a cap of 1 over 2 rows")
+	}
 
 	// Non-SELECT command reports affected rows.
 	ins := c.store.Execute(context.Background(), conn, "", "INSERT INTO users (name, active) VALUES ('carol', 1)", 0)
