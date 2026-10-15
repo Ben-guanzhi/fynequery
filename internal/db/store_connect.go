@@ -117,6 +117,15 @@ func createConnection(cfg ConnConfig) (*sql.DB, error) {
 		mc.Net = "tcp"
 		mc.Addr = fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 		mc.DBName = cfg.Database
+		// UPDATE can report rows MATCHED or rows whose bytes changed, and the
+		// write path's "matched no row, so nothing was committed" guard
+		// (changes.go) has to mean the same thing on every engine: on the driver
+		// default, re-saving a value that is already stored reports 0 and aborts
+		// a batch that did nothing wrong. SQLite is measured to answer with the
+		// matched row (changes_apply_test.go); PostgreSQL and MySQL are answered
+		// by the write half of contract_test.go, because a server this test suite
+		// is not dialling cannot be asserted about from here.
+		mc.ClientFoundRows = true
 		if cfg.SSLMode == "true" {
 			mc.TLSConfig = "true"
 		}

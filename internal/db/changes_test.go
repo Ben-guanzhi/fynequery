@@ -90,6 +90,31 @@ func TestValueLiteralsFollowTheColumn(t *testing.T) {
 		{"postgresql", "character varying(20)", "x", "'x'"},
 		{"oracle", "varchar2", "x", "'x'"},
 		{"postgresql", "boolean", true, "1"},
+		// The shapes a result read yields: an integer column arrives as int64,
+		// and stays exact past the point a float64 stops holding the number.
+		{"mysql", "bigint", int64(9007199254740993), "9007199254740993"},
+		{"postgresql", "int", int64(-7), "-7"},
+		// go-sql-driver answers an unsigned BIGINT with uint64 and a FLOAT with
+		// float32, both of which the key predicate then has to write back.
+		{"mysql", "bigint unsigned", uint64(18446744073709551615), "18446744073709551615"},
+		{"mysql", "float", float32(0.5), "0.5"},
+		// Text is what the cell editor and the filter bar hand over, and a whole
+		// number in it stays exact: a float64 reading of these digits is a
+		// different number, so the predicate would name another row or none.
+		{"postgresql", "int", "9007199254740993", "9007199254740993"},
+		{"mysql", "bigint", "18446744073709551615", "18446744073709551615"},
+		// Past 64 bits the digits go to the server unchanged rather than rounded:
+		// DECIMAL(30,0) holds this value and a bigint refuses it, and both answers
+		// are better than a literal for a number nobody typed.
+		{"mysql", "decimal(30,0)", "18446744073709551616", "18446744073709551616"},
+		{"postgresql", "numeric", "-99999999999999999999", "-99999999999999999999"},
+		// The float path keeps everything that is not a plain run of digits.
+		{"postgresql", "double precision", "1e3", "1000"},
+		{"mysql", "decimal(18,2)", "1.50", "1.5"},
+		{"mysql", "bigint", "+7", "7"},
+		{"mysql", "bigint", "007", "7"},
+		// A text column never sees any of this: its digits are its value.
+		{"mysql", "varchar", "007", "'007'"},
 	}
 	for _, c := range cases {
 		got, err := valueLiteral(c.dbType, c.colType, c.value)
@@ -102,11 +127,27 @@ func TestValueLiteralsFollowTheColumn(t *testing.T) {
 		}
 	}
 
+	// A narrower integer is not a shape any pinned driver yields, so accepting it
+	// would mean the switch is widening types it was never handed.
+	if _, err := valueLiteral("postgresql", "int", int32(7)); err == nil {
+		t.Error("a type no result read yields must be refused, not widened")
+	}
+
 	if _, err := valueLiteral("postgresql", "int", "twelve"); err == nil {
 		t.Error("text in a numeric column must be refused, not written as a guess")
 	}
 	if _, err := valueLiteral("postgresql", "text", "a\x00b"); err == nil {
 		t.Error("NUL must not reach the server")
+	}
+
+	// Digits beyond 64 bits are passed through as the text they were typed as, so
+	// the shape test in front of that is the only thing standing between the
+	// server and whatever else is in the cell: anything that merely starts like a
+	// number is still refused.
+	for _, junk := range []string{"7x", "0x10", "7 7", "-"} {
+		if _, err := valueLiteral("mysql", "bigint", junk); err == nil {
+			t.Errorf("%q was written as a literal, want it refused", junk)
+		}
 	}
 }
 

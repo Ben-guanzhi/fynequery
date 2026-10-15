@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -69,6 +70,35 @@ func TestInsertScriptBuilderMatchesTheOldRendererByteForByte(t *testing.T) {
 			!strings.Contains(err.Error(), "没有可导出的行") {
 			t.Errorf("%s: empty result: want the old refusal, got %v", dbType, err)
 		}
+	}
+}
+
+// TestInsertScriptExportsRowsAsRead covers the type a real row carries: an
+// integer column reads back as int64, so an export that refuses it fails on
+// every table with a numeric field. The byte-for-byte oracle above cannot see
+// this - the old renderer shares the same refusal, so both sides error out,
+// both return the same empty string, and the comparison still passes.
+func TestInsertScriptExportsRowsAsRead(t *testing.T) {
+	store, file := newChangeStore(t, itemsSeed, itemsRows)
+	conn, err := store.OpenConn(changeConnID)
+	if err != nil {
+		t.Fatalf("open conn: %v", err)
+	}
+	read := store.Execute(context.Background(), conn, file, "SELECT * FROM items ORDER BY 1", 0)
+	if read.Error != "" {
+		t.Fatalf("read: %s", read.Error)
+	}
+	script, err := InsertScript(DbTypeSQLite, `"items"`, "items",
+		[]string{"id", "name", "note"},
+		map[string]string{"id": "integer", "name": "text", "note": "text"}, read.Rows)
+	if err != nil {
+		t.Fatalf("export of read rows: %v", err)
+	}
+	want := "INSERT INTO \"items\" (\"id\", \"name\", \"note\") VALUES (1, 'alpha', 'n1');\n" +
+		"INSERT INTO \"items\" (\"id\", \"name\", \"note\") VALUES (2, 'beta', 'n2');\n" +
+		"INSERT INTO \"items\" (\"id\", \"name\", \"note\") VALUES (3, 'gamma', 'n3');\n"
+	if script != want {
+		t.Errorf("script =\n%s\nwant\n%s", script, want)
 	}
 }
 

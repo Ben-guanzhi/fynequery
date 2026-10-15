@@ -171,6 +171,46 @@ func numberLiteral(value float64) string {
 	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
+// wholeNumberLiteral renders text that denotes a plain whole number exactly and
+// reports whether it recognised that shape. The float path can't: a double keeps
+// 53 bits of mantissa, so "9007199254740993" comes back one lower and a key
+// predicate built on it names a neighbouring row or none.
+//
+// Digits past what 64 bits hold go out as the digits themselves rather than as a
+// rounded float or a refusal - a server reads a numeric literal at its own
+// precision, so a DECIMAL(30,0) column still gets the value the user named, while
+// a bigint column answers an impossible one with its own out-of-range error. That
+// error is the outcome the client must not pre-empt by quietly rounding: it is
+// loud, and it names the column.
+//
+// Only the shape is recognised, never the size: an optional sign and nothing but
+// digits, so "1e3" and "1.50" and "0x10" stay on the path that has always
+// rendered them (or refused them). That scan is also what keeps the verbatim
+// branch above from doing damage: without it, "twelve" in a numeric cell would go
+// out as the literal twelve rather than being refused, and any text a cell holds
+// would reach the server unquoted.
+func wholeNumberLiteral(text string) (string, bool) {
+	body := strings.TrimPrefix(text, "+")
+	digits := strings.TrimPrefix(body, "-")
+	if digits == "" {
+		return "", false
+	}
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return "", false
+		}
+	}
+	if number, err := strconv.ParseInt(text, 10, 64); err == nil {
+		return strconv.FormatInt(number, 10), true
+	}
+	if !strings.HasPrefix(body, "-") {
+		if number, err := strconv.ParseUint(digits, 10, 64); err == nil {
+			return strconv.FormatUint(number, 10), true
+		}
+	}
+	return body, true
+}
+
 func quotedLiteral(dbType, value string) string {
 	escaped := strings.ReplaceAll(value, "'", "''")
 	// Only SQL Server needs the national prefix to keep wide characters, and
@@ -184,6 +224,23 @@ func quotedLiteral(dbType, value string) string {
 // valueLiteral turns what the grid holds into a literal for the column it
 // belongs to. The declared type decides whether text is a number, which is what
 // lets a cleared numeric cell mean NULL instead of zero.
+//
+// The switch below answers the shapes a read can actually leave in a cell:
+// runSelect is the only reader the plain and the paged grid go through, and it
+// folds the driver's bytes and times into text and passes everything else
+// through. What the drivers hand back is therefore what has to be answered
+// here - go-sqlite3 measured in TestApplyChangesWritesBackAReadRow, lib/pq
+// decoding every integer width to int64 (encode.go's textDecode/binaryDecode)
+// and go-sql-driver's text rows answering with int64, uint64 for an unsigned
+// BIGINT and float32 for FLOAT (packets.go's readRow). A type outside this set
+// is refused rather than guessed at, so a driver that starts answering a new
+// shape fails loudly instead of writing a value it never read.
+//
+// Text is the other half, and it is not a read at all: it is what someone typed
+// into a cell or the filter bar, so the column's declared type decides whether it
+// is a number. A whole number keeps its digits from there - see
+// wholeNumberLiteral - because a person who typed a 17-digit key means that key,
+// and the float path would hand the server a different one.
 func valueLiteral(dbType, colType string, value interface{}) (string, error) {
 	switch v := value.(type) {
 	case nil:
@@ -193,13 +250,31 @@ func valueLiteral(dbType, colType string, value interface{}) (string, error) {
 			return "1", nil
 		}
 		return "0", nil
+	case int64:
+		// The grid hands the row it read straight to the key predicate, so an
+		// integer primary key reaches here as an int64 - see
+		// TestApplyChangesWritesBackAReadRow. It must not be reformatted as a
+		// float64: past 2^53 the float cannot hold the key, so the WHERE would
+		// locate a different row or none.
+		return strconv.FormatInt(v, 10), nil
+	case uint64:
+		// Same reason, and the same 2^53 argument: an unsigned BIGINT key is
+		// past what a float64 can name exactly, so it is written from the integer.
+		return strconv.FormatUint(v, 10), nil
 	case float64:
 		return numberLiteral(v), nil
+	case float32:
+		// Widening is exact, so the shortest decimal for the double names the
+		// same float the server stores back from that literal.
+		return numberLiteral(float64(v)), nil
 	case string:
 		if isNumericColumn(colType) {
 			trimmed := strings.TrimSpace(v)
 			if trimmed == "" {
 				return "NULL", nil
+			}
+			if literal, whole := wholeNumberLiteral(trimmed); whole {
+				return literal, nil
 			}
 			number, err := strconv.ParseFloat(trimmed, 64)
 			if err != nil {
@@ -443,9 +518,12 @@ func (c *Store) BuildChanges(set ChangeSet) ([]string, error) {
 	return BuildStatements(conn.Config.Type, name, set.Columns, keys, types, set.Changes)
 }
 
-// applyChanges runs the rebuilt statements as one transaction: either every
+// ApplyChanges runs the rebuilt statements as one transaction: either every
 // edit lands or none does, which is the only way a mistake stays fixable. A
 // statement that matches no row aborts the batch instead of quietly skipping.
+// The count is the rows the batch committed, so it is 0 for any failed run -
+// including the one that aborted on a statement matching no row, whose earlier
+// statements had already been rolled back by the time this returns.
 func (c *Store) ApplyChanges(set ChangeSet) (int64, error) {
 	statements, err := c.BuildChanges(set)
 	if err != nil {
@@ -470,7 +548,7 @@ func (c *Store) ApplyChanges(set ChangeSet) (int64, error) {
 	for i, statement := range statements {
 		affected, err := execInTx(tx, statement, i)
 		if err != nil {
-			return applied, err
+			return 0, err
 		}
 		applied += affected
 	}
