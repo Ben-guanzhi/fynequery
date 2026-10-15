@@ -63,7 +63,12 @@
   处处无锁读，改它会和在跑的查询竞态），对话框也因此顺手重拉结构树和数据库下拉
   （`TestFilterFollowsSavedConfig`）。它只影响导航，SQL 照样打得到整台服务器；
   SQLite 只有一个库，两栏置灰
-- **行数上限**：100 / 500 / 1000 / 5000 / 无限制
+- **行数上限**：100 / 500 / 1000 / 5000 / 无限制。语句自带行窗口、或形状无法安全
+  注入上限（SQL Server 的 `WITH … SELECT` 就是：`TOP` 插不进去）时，SQL 按原样执行，
+  状态栏在结果行数后面写明「行数上限 N 未生效」而不是悄悄多给行
+  （`TestRowCapDeclinedIsReported`，含上限真的绑上时不得报未生效的负对照）；
+  上限真的绑上且砍掉了答案时，写明「已达行数上限 N，还有更多行未取出」，
+  免得刚好一屏的行数被当成整张表（`TestRowCapTruncatedIsReported`）
 - **结果分页浏览**：勾选工具条的「分页浏览」后，单条 SELECT 按页取数——每页
   10 / 20 / 50 / 100 / 200 / 500 行，翻页时重新查库（服务端行窗口：
   MySQL/PG/SQLite 的 `LIMIT…OFFSET`、SQL Server/Oracle 的
@@ -72,7 +77,9 @@
   整页即视为可能还有下一页、短页即末页（下一页置灰）。改每页行数会立刻重取
   第 1 页；翻页不写历史记录、有未保存的网格更改时被拒绝；分页开启时
   「行数上限」置灰（行窗口就是上限）。自带行窗口（LIMIT/TOP/OFFSET/FETCH/
-  ROWNUM）的语句按原样执行并说明未分页。**注意：结果内搜索与表头排序只作用于
+  ROWNUM）的语句按原样执行并说明未分页；多语句脚本也一样只说明不翻页——脚本的
+  结果是整份取的，把末条语句说成「第 1 页」会让下一页重演屏幕上已有的行
+  （`TestScriptResultIsNotClaimedAsAPage`）。**注意：结果内搜索与表头排序只作用于
   当前页**
 - **翻页稳定排序**：没有 ORDER BY 的语句，行窗口不保证各行被稳定分给某一页——
   上一页出现过的行可能在下一页重复，也可能被跳过。因此分页时：语句自带外层
@@ -141,15 +148,23 @@ fynequery/
 
 ## 构建与运行
 
-要求：Go 1.22+、具备 CGO 的编译器（Windows 上可用 MinGW/TDM-gcc 等）。
+要求：Go 1.25+（口径是 `go.mod` 里的 `go 1.25.0`，CI 用 `go-version-file` 读它；
+更旧的 Go 只有在 `GOTOOLCHAIN=auto` 且能联网时才会自己下去一版工具链，
+`local` 就直接拒）、具备 CGO 的编译器（Windows 上可用 MinGW/TDM-gcc 等）。
 
 ```bash
 git clone <本仓地址>
 cd fynequery
 go mod tidy
-go build -o fynequery.exe .
+go build -ldflags "-H=windowsgui" -o fynequery.exe .
 ./fynequery.exe
 ```
+
+`-H=windowsgui` 不是可选的美化：不带它，产物的 PE 子系统是 `Windows CUI`
+（`objdump -p` 实测 `00000003`），双击会先弹一个控制台窗；带上它是
+`Windows GUI`（`00000002`）。这个 flag 只对 Windows 链接有效，所以
+`Taskfile.yaml` 把它放在 `platforms: [windows]` 的分支里，Linux/macOS 走另一条
+`go build`（`task build` 会按当前平台挑对应那条）。
 
 不需要初始化脚本。共享逻辑住在兄弟仓 `TableProGo` 里，已下沉成两个独立模块并
 打了 tag：`github.com/Ben-guanzhi/TableProGo/tableprosql`（各方言 SQL 文本与
@@ -167,7 +182,203 @@ clone 就能构建。早先这里用相对 `replace` 指 `../tableprosql`，单�
 `gofmt -l .` + `go vet ./...` + `go test -race ./...`。测试跑在
 `TABLEPRO_STATE_DIR` 指向的临时目录里，不会写你真实的连接与历史。
 `.github/workflows/ci.yml` 跑同一套门，另加 `go mod tidy` 无差异校验与一次
-`go build`——它同时就是「tag 分发可用」的持续证明。
+`go build`——它同时就是「tag 分发可用」的持续证明；同文件还有一个 `contract`
+job，见下。
+
+### 写路径的事务矩阵
+
+`ApplyChanges` 是本包唯一往服务器写数据的地方，它的承诺是「要么全落，要么全不
+落」。这句没法由 `changes_test.go` 那些纯渲染断言证明，只有一个真会回滚的事务说
+得算，所以 [internal/db/changes_apply_test.go](file:///D:/tools/db/fynequery/internal/db/changes_apply_test.go)
+用 SQLite 文件库跑这张矩阵（9 个测试、15 条 RUN，不需要任何 server）：三种改动
+共用一个事务提交；第 2 条语句撞 UNIQUE 时，第 1 条已经写下的行也不留下；第 2 条
+匹配不到行时同样回滚，而把同一队列指向还在的那两行必须成功——否则守卫会因为
+「谁都匹配不到」而假绿；空队列、键不在结果里、未知 kind、类型不符、表不存在这
+五种拒绝必须发生在开事务之前；回滚之后还能再存一次；断开时拒绝、重连后落地。
+断言一律回读表格内容，不是只看客户端自己报的计数。
+
+它抓到两处真问题：
+
+1. `valueLiteral` 不认识 `int64`（也没有 go-sql-driver 会交来的 `uint64` 与
+   `float32`），而网格是把读回来的那一行原样当 `Original` 交下来的
+   （[ui_grid_edit.go:102](file:///D:/tools/db/fynequery/ui_grid_edit.go#L102)
+   的 `collectChanges`）。三个驱动对整数列交的都是 `int64`（mattn/go-sqlite3 实测、
+   lib/pq 的 `decode`、go-sql-driver 的 `readRow` 都读过源码确认），所以任何整数
+   主键的 UPDATE/DELETE 都以 `unsupported value of type int64` 失败，「导出为
+   INSERT 语句」同样失败。现在按各驱动真正交来的形状补齐
+   （[internal/db/changes.go:206](file:///D:/tools/db/fynequery/internal/db/changes.go#L206)），
+   并且写成整数而不是先转 float：超过 2^53 的键转成 double 就不再是那个键，
+   WHERE 会指到别的行或哪也不指。根仓没有照搬这三个分支——它够不着：那边每个进
+   `valueLiteral` 的值都过一遍 JSON（`json.NewDecoder(...).Decode(&body)` 解
+   `[][]interface{}`，没有 `UseNumber()`），交回来的动态类型只会是 `float64`，
+   实测见下面的「数字文本的精确路径」。
+2. `ApplyChanges` 失败时返回一路累加到那儿的半截计数，跟它自己那句
+   "nothing was committed" 相互矛盾；界面只显示错误，所以这个数没流到用户眼前，
+   但一个说谎的返回值不该留在那里。现在失败一律返回 0
+   （[internal/db/changes.go:501](file:///D:/tools/db/fynequery/internal/db/changes.go#L501)）。
+
+顺带把 MySQL 连接设成 `ClientFoundRows`
+（[internal/db/store_connect.go:126](file:///D:/tools/db/fynequery/internal/db/store_connect.go#L126)）：
+驱动默认报的是「字节真的变了」的行数，把同一个值再存一次就是 0，会被那条
+「匹配不到行」的守卫当成丢行而整批中止。参照系这边只测得动 SQLite：
+`TestIdenticalValueUpdateCountsAsOneRow` 实测它报的是匹配到的那一行；PostgreSQL 与
+MySQL 各自答什么，本地没有 server 可以问，所以这一半留给下面契约组的
+「an unchanged value still counts the matched row」，由 CI 第一次真跑时回答。
+
+负对照：把 `int64` 分支临时改成返回错误后，9 条测试变红；而
+`TestInsertScriptBuilderMatchesTheOldRendererByteForByte` 依旧绿——新旧两个渲染器共用
+同一个 `valueLiteral`，一起报错、一起返回空串，「逐字节相等」这条断言就看不见缺陷
+了。原因写在
+[internal/db/exportsql_test.go:81](file:///D:/tools/db/fynequery/internal/db/exportsql_test.go#L81)
+那段注释里，补上的 `TestInsertScriptExportsRowsAsRead` 才是有牙齿的那条。
+
+### 数字文本的精确路径
+
+同一条 2^53 的悬崖，另一侧是**文本**：单元格里敲进去的键与过滤框走的是
+`valueLiteral` 的字符串分支，而它把文本 `ParseFloat` 之后再 `numberLiteral`——
+double 只有 53 位尾数，用户拼对了键，服务端拿到的是另一个数。改前实测（表驱动
+用例即这几条）：
+
+| 文本 | 旧渲染 | 是用户写的吗 |
+| --- | --- | --- |
+| `9007199254740993` | `9007199254740992` | 差 1 |
+| `18446744073709551615` | `18446744073709552000` | 差 1 |
+| `18446744073709551616` | `18446744073709552000` | 差 1 |
+| `-99999999999999999999` | `-100000000000000000000` | 同样差 1，只是差在高位 |
+
+危害不是「报错」而是**改错行**：夹具里 `9007199254740993` 与 `9007199254740992`
+两行都在，旧路径把 UPDATE 落到了邻行，`ApplyChanges` 返回 applied=1、一句错误都
+没有——连「匹配不到行」那道守卫都不会响，因为它匹配到了，只是不是那一行。这条
+断言在两仓各有一份真库测试
+（[internal/db/changes_apply_test.go:185](file:///D:/tools/db/fynequery/internal/db/changes_apply_test.go#L185)、
+根仓 `../TableProGo/apply_test.go:159`）。
+
+现在认得的只有「一个可选符号加一串数字」这一种形状，认得就原样写
+（[internal/db/changes.go:192](file:///D:/tools/db/fynequery/internal/db/changes.go#L192)）：
+64 位装得下的走 `ParseInt/ParseUint` 顺带把 `007`、`+7` 归一化，装不下的**照写数字**，
+既不四舍五入也不由客户端拒绝——`DECIMAL(30,0)` 真装得下 20 位，而 `bigint` 会用自己
+的 out-of-range 错误回答，那个错误响亮且点名列名，客户端没权限替服务端先把它舍掉。
+（这里修正了我先前的提案「超 19 位就拒绝」：那会误伤合法的大 DECIMAL 列。）
+`1e3`、`1.50`、`0x10` 一律走老路，文字列的 `007` 仍是 `'007'`。
+
+负对照分两层。把字符串分支里这次调用短路（`false && whole`，等价于改回旧写法）：4 条
+表驱动断言加那条真库测试红，红出的正是上面表格里的四个数。再把形状扫描关掉（循环条件
+改成 `i < 0`，等于什么都认）：6 条红，其中一条是原本
+就存在的「`twelve` 必须被拒」——没有这道扫描，数字列里任何文本都会被当作**未加引号
+的字面量**发给服务端，这才是这道扫描真正挡的东西，注释里写明了。
+
+根仓那边补的是同一份 helper（两仓 `wholeNumberLiteral` 逐字节相同，39 行），但根仓
+**没有**加 `int64/uint64/float32` 分支：它够不着。实测——把 `int64`、`uint64`、
+`float32` marshal 成 JSON 再解回 `interface{}`，四个值的动态类型全是 `float64`；根仓
+每个入口都是 `json.NewDecoder(r.Body).Decode(&body)` 解 `[][]interface{}`
+（`api.go:37`/`api.go:118`，没有 `UseNumber()`），前端一律 `post('/api/…')`
+（`frontend/src/api.ts:175`、`:254`），Go 侧构造 `RowChange` 的只有测试且自己就写成
+`7.0`（`changes_test.go:16`）。所以那边的悬崖在更外一层：读回来的 `bigint` 主键经
+JSON 到浏览器就已经是 double 了，>2^53 在网页里就丢了，`valueLiteral` 修不了它——
+要修得改查询结果的序列化与前端，本次没做。手打的键与过滤条件（文本）则两仓都修好了。
+
+### 行数上限的截断探针
+
+上限绑上之后，屏幕上「刚好 N 行」有两种解释：表里正好 N 行，或者后面还有行没被
+取出来。行数本身分不出这两者——改之前这两条路径的状态栏字节完全相同（上限 3，
+表里 3 行与表里 5 行都写「返回 3 行」）。所以 `Execute` 多要一行：窗口渲染成
+`limit+1`，取回来真超过上限就裁回 `limit` 并把 `Truncated` 置真
+（[internal/db/query.go:168](file:///D:/tools/db/fynequery/internal/db/query.go#L168)）。
+这一位只在客户端自己注入的窗口上才会亮：语句自带 `LIMIT` 时按原样执行，多给几行
+也不谎称上限生效（[internal/db/core.go:73](file:///D:/tools/db/fynequery/internal/db/core.go#L73)、
+措辞在 [ui_query.go:473](file:///D:/tools/db/fynequery/ui_query.go#L473)）。
+
+代价是一行。用 SQLite 文件库把「取 50 行」和「取 5050 行」各跑两轮，差值 ÷5000
+≈ 1.9–2.0 µs/行；而一次 `Execute` 的地板值是 0.31–0.43 ms（两轮里两个探针臂各自
+都当过一次更快的那个），多取一行落在往返噪声之下。
+
+测试：
+[internal/db/query_test.go:72](file:///D:/tools/db/fynequery/internal/db/query_test.go#L72)
+的 `TestExecuteRowCapProbe` 对着真实库跑五种形状——恰好满上限、被砍、探针行不得
+留在切片里、自带窗口、无限制；
+[ui_paging_test.go:354](file:///D:/tools/db/fynequery/ui_paging_test.go#L354)
+的 `TestRowCapTruncatedIsReported` 验状态栏那句措辞（同一份 120 行的夹具换到上限
+500 必须不再说截断）；[integration_test.go:69](file:///D:/tools/db/fynequery/integration_test.go#L69)
+补了「上限 1 覆盖 2 行必须报截断」。
+
+负对照（三组，各自临时改生产代码再跑，跑完还原）：
+
+1. 去掉那个 `+1`：3 条红，红的是「砍了却没说出来」。
+2. 留着 `+1` 但去掉裁剪：同样 3 条红，而且红得难看——101 行进进了只该显示 100 行
+   的网格，`RowCount` 报 4。
+3. 去掉「窗口是我们注入的」这个条件：1 条红——`LIMIT 5` 在上限 3 之下被裁成 3 行，
+   还被说成上限生效。这条只有新增的「自带窗口比上限更宽」用例有牙齿，原先那个
+   `LIMIT 2` 用例（2 行 < 上限 3）压根碰不到这条守卫。
+
+分页浏览这条路没动：翻页条本来就把答案说成窗口（「第 X 页 · 本页 N 行」，整页就
+置亮下一页），再补一句「还有更多行」是把同一件事说两遍。外键候选用的
+`RowCount >= limit`（[internal/db/fk.go:295](file:///D:/tools/db/fynequery/internal/db/fk.go#L295)，
+根仓 `fkvalues.go` 同款的老捷径）在「答案恰好等于上限」时也会亮，这次没有把它
+搬进 `Execute`。
+
+真机那一侧也补了一句：契约组的「上限 5 覆盖 25 行」现在除了数行数，还断言
+`Truncated`（[internal/db/contract_test.go:616](file:///D:/tools/db/fynequery/internal/db/contract_test.go#L616)）。
+本地没有 server 可问，这条跟写路径那组一样，要等 CI 第一次真跑才算被回答。
+
+### 真机契约测试
+
+`internal/db` 的单测证明方言表是完整的、渲染出的 SQL 与它声称的一致；但「目录
+SQL 真机上答回来的形状，正好是客户端读回去的形状」这一层没法用单测伪造。
+`internal/db/contract_test.go` 就是打真库的：`Databases`/`Tables`/`Columns`/
+`ForeignKeys`/`TableIndexes`/`SearchInDatabase`/`TableName`/`TableDDL` 八条目录
+读，加一页窗口互不重叠且合起来覆盖 fixture 的 25 行、行数上限真的截断、驱动
+返回的字节渲染成文本而不是 `[112 97 …]`。fixture 是 parent/child + 外键 +
+非唯一索引 + 视图——正好是 `dialect.go` 里每条目录查询冲着写的形状。
+
+写路径同样有一组（`TestContractMySQLWritePath`/`TestContractPostgresWritePath`，
+4 个子测试按网格的顺序共用一份 fixture）：把服务器自己返回的行原样交回
+`ApplyChanges`，改一次名字；再把同一个值写第二次，断言它仍算「命中 1 行」——
+这是 `execInTx` 那句「matched no row, nothing was committed」守卫的地基，而这条
+规则每台 server 各答各的，SQLite 替不了 MySQL；第三条插一条重复主键，让批次在
+第 2 条语句上死掉，回读确认第 1 条已写的行也没留下；第四条在回滚之后再存一次，
+专抓 PostgreSQL 那个「current transaction is aborted」——事务没回干净的话，连接
+之后每条语句都是红的。这一组刻意不断言值的 Go 类型：读回来的单元格是什么类型，
+归驱动决定——lib/pq 把所有整数宽度解成 `int64`，go-sql-driver 的文本协议把无符号
+BIGINT 解成 `uint64`、把 FLOAT 解成 `float32`、把字符串与 DECIMAL 解成包字节。
+不管它是哪一种，原样回到 WHERE 里才是契约要验的事，而这只有真库说得上话。
+
+它们默认跳过，并且把要设的变量打印出来：`FYNE_CONTRACT_MYSQL_HOST`（以及同族
+的 `_PORT/_USER/_PASSWORD`）、`FYNE_CONTRACT_PG_HOST`。想让缺失变成失败，设
+`FYNE_CONTRACT_REQUIRED=mysql,postgres`——CI 就是这么跑的，否则一个服务变量写错
+会让契约悄悄退回绿色。跳过与失败这两条都有负对照：无 server 时 6 条全 skip，
+设了 `REQUIRED` 或把 host 指到 `127.0.0.1:1` 都是红（6 条全红），不是 skip。
+
+契约第一次被跑起来就抓到一处：MySQL 的索引目录查询只 SELECT 了 4 列，而
+`scanIndexRow` 要 5 个落点，于是真 MySQL 上每次 `TableIndexes` 都在 scan 处报错
+（[internal/db/dialect.go:291](file:///D:/tools/db/fynequery/internal/db/dialect.go#L291)
+起的闭包）。已改：主键标志由 `INDEX_NAME = 'PRIMARY'` 在 SQL 里答。共享包里是
+同一段查询文本（`../TableProGo/tableprosql/catalog.go:213`），根仓的 scan 同样
+要 5 个落点（`../TableProGo/catalog.go:427`），那一侧还没跟着改。
+
+CI 的 `contract` job 用 service 容器起 `mysql:8.0` 与 `postgres:16`，只跑
+`./internal/db`（它需要 cgo 但不需要 UI 的 GL 头），并设
+`FYNE_CONTRACT_WAIT_SECONDS=90`——镜像的健康检查可能在 MySQL 还处在「初始化用、
+不监听网络」的临时实例阶段就转绿，这一段等待让它在 CI 里读起来是慢而不是坏，
+本地手打错地址则照旧立刻失败。选 8.0 是因为它的默认认证
+`mysql_native_password` 在未加密连接上必过；8.4 换成 caching_sha2 之后要不要再
+配 TLS，本机没有 server 可以验，所以没在 CI 里赌这件事。诚实说一句：这一组契约
+在我这台机器上一次都没真跑过（没有 server，也不便往你 WSL 的 docker 上拉镜像），
+CI 那次 run 才是它第一次被执行——和 `release.yml` 里的 msys2 步骤同属「写了但还
+没被真实 run 验证」的环节。
+
+### 发版
+
+本地一份：`task release`，产物名带 `git describe` 的版本与目标平台，同时
+`-s -w` 剥符号（实测 76,375,647 → 45,992,448 字节，少 39.8%）并把 tag 注进
+标题里的版本号。公开那份：`git tag v1.4.0 && git push --tags`，
+`.github/workflows/release.yml` 出 Windows/Linux 两个产物、校验和与 Release 页。
+窗口标题读的是 `main.appVersion`，源码里的默认值是给 `go run .` 看的，发布产物
+一律由 `-X main.appVersion=${tag}` 覆盖——所以标题说的版本就是被发布的那个。
+workflow 在上传前用两条断言替这个说法背书：`go version -m` 里能找到 tag，
+`objdump -p` 里子系统必须是 `Windows GUI`（拿不带 flag 的产物做负对照，第二条会
+失败）。Windows 那一行的 C 工具链步骤（`msys2/setup-msys2`）是唯一还没有真实
+run 验证过的环节，它后面紧跟一步 `gcc --version`，环境不对就在那里失败，不会
+静默产出空 release。
 
 ## 使用说明
 
