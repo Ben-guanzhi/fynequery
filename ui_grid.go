@@ -13,6 +13,8 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/Ben-guanzhi/TableProGo/tableprosql"
+
 	"tablepro-fyne/internal/db"
 )
 
@@ -101,6 +103,13 @@ func (c *Client) writeGridFile(f fyne.URIWriteCloser) error {
 	case ".xlsx":
 		return c.writeWorkbookFile(f)
 	default:
+		// The BOM is what makes Excel on Windows read the file as UTF-8;
+		// without it a plain UTF-8 CSV is assumed ANSI and Chinese text in
+		// every cell turns to mojibake. JSON deliberately gets none - parsers
+		// reject it.
+		if _, err := f.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+			return err
+		}
 		return db.WriteCSV(f, c.grid.header, c.grid.rows)
 	}
 }
@@ -161,9 +170,12 @@ func (c *Client) copyCell() {
 	c.setStatus("已复制单元格内容")
 }
 
-// sortGrid sorts the current result rows by the tapped column. Numbers compare
-// numerically, text lexicographically; NULLs always sort last regardless of
-// direction. Tapping the sorted column again flips ascending/descending.
+// sortGrid sorts the current result rows by the tapped column. NULLs always
+// sort last regardless of direction. Tapping the sorted column again flips
+// ascending/descending. Numbers compare numerically only when the column's
+// declared type is numeric (or unknown, when the grid holds no types): a text
+// column that happens to contain digits must not suddenly reorder them - for
+// "10", "2", "abc" the natural reading of a text column is lexicographic.
 func (c *Client) sortGrid(col int) {
 	if col < 0 || col >= len(c.grid.header) {
 		return
@@ -179,6 +191,10 @@ func (c *Client) sortGrid(col int) {
 		c.grid.sortAsc = true
 	}
 	asc := c.grid.sortAsc
+	numeric := true
+	if col < len(c.grid.colTypes) && c.grid.colTypes[col] != "" {
+		numeric = tableprosql.NewColumnType(c.grid.colTypes[col]).IsNumeric()
+	}
 	sort.SliceStable(c.grid.rows, func(i, j int) bool {
 		if col >= len(c.grid.rows[i]) || col >= len(c.grid.rows[j]) {
 			return false
@@ -191,13 +207,15 @@ func (c *Client) sortGrid(col int) {
 		if aNull {
 			return false
 		}
-		fa, ea := strconv.ParseFloat(a, 64)
-		fb, eb := strconv.ParseFloat(b, 64)
-		if ea == nil && eb == nil {
-			if asc {
-				return fa < fb
+		if numeric {
+			fa, ea := strconv.ParseFloat(a, 64)
+			fb, eb := strconv.ParseFloat(b, 64)
+			if ea == nil && eb == nil {
+				if asc {
+					return fa < fb
+				}
+				return fa > fb
 			}
-			return fa > fb
 		}
 		if asc {
 			return a < b

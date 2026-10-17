@@ -43,3 +43,32 @@ func TestSortGrid(t *testing.T) {
 		t.Fatalf("string asc: %v", got)
 	}
 }
+
+// TestSortGridTextColumnStaysLexicographic pins the type-aware half of the
+// comparison: a column whose declared type is text keeps digits in string
+// order ("10" < "2"), which is what a reader of a text column expects;
+// the numeric path is reserved for numeric types and the typeless fallback.
+func TestSortGridTextColumnStaysLexicographic(t *testing.T) {
+	newRows := func() [][]string {
+		return [][]string{
+			{"10"}, {"2"}, {"1"}, {"abc"},
+		}
+	}
+
+	c := &Client{grid: gridState{header: []string{"code"}, rows: newRows(),
+		colTypes: []string{"varchar(20)"}, sortCol: -1}}
+	c.sortGrid(0)
+	got := []string{c.grid.rows[0][0], c.grid.rows[1][0], c.grid.rows[2][0], c.grid.rows[3][0]}
+	if got[0] != "1" || got[1] != "10" || got[2] != "2" || got[3] != "abc" {
+		t.Fatalf("text column asc = %v, want lexicographic [1 10 2 abc]", got)
+	}
+
+	// A numeric type keeps the numeric order the bare test pins.
+	c2 := &Client{grid: gridState{header: []string{"n"}, rows: newRows(),
+		colTypes: []string{"int"}, sortCol: -1}}
+	c2.sortGrid(0)
+	got = []string{c2.grid.rows[0][0], c2.grid.rows[1][0], c2.grid.rows[2][0], c2.grid.rows[3][0]}
+	if got[0] != "1" || got[1] != "2" || got[2] != "10" || got[3] != "abc" {
+		t.Fatalf("numeric column asc = %v, want [1 2 10 abc]", got)
+	}
+}

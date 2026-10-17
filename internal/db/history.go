@@ -109,17 +109,30 @@ func (c *Store) RecordStatement(connID, database, query string, res QueryResult)
 // historyPersistDelay bounds how often the whole statement log is rewritten.
 // Every executed statement used to trigger a full rewrite of up to 500 entries,
 // which is a lot of identical writes for a log the user reads occasionally: a
-// burst now writes once and the tail goes out when the window closes. The cost
-// is stated honestly - a process killed before that flush loses at most the
-// statements recorded inside one delay.
-const historyPersistDelay = 5 * time.Second
+// burst now writes once and the tail goes out when the window closes (see
+// persistHistorySoon). It is a variable only so tests can shrink it.
+var historyPersistDelay = 5 * time.Second
 
 // persistHistorySoon records that the log changed and writes it unless one
-// delay has already passed since the last write.
+// delay has already passed since the last write. Inside the window the write
+// is deferred to a trailing timer instead of being left to luck: the old
+// behaviour kept the tail dirty until the next statement or a clean quit, so
+// a burst followed by a crash - or just an idle window - lost it after all.
+// One timer is kept pending; a flush that happens first leaves it to fire on
+// a clean log, where persistHistoryNow is a no-op.
 func (c *Store) persistHistorySoon() {
 	c.mu.Lock()
 	c.historyDirty = true
-	recent := !c.historyFlushed.IsZero() && time.Since(c.historyFlushed) < historyPersistDelay
+	elapsed := time.Since(c.historyFlushed)
+	recent := !c.historyFlushed.IsZero() && elapsed < historyPersistDelay
+	if recent {
+		if c.historyTimer != nil {
+			c.historyTimer.Stop()
+		}
+		c.historyTimer = time.AfterFunc(historyPersistDelay-elapsed, func() {
+			c.persistHistoryNow(true)
+		})
+	}
 	c.mu.Unlock()
 	if !recent {
 		c.PersistHistory()

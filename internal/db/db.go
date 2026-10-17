@@ -102,6 +102,11 @@ type Store struct {
 	// when they last were, which is what the write delay is measured from.
 	historyDirty   bool
 	historyFlushed time.Time
+	// historyTimer is the trailing flush of a throttled burst: it fires when
+	// the delay has passed with the log still dirty, so the tail reaches disk
+	// even if no further statement runs and the app never gets a clean quit
+	// (crash, power loss).
+	historyTimer *time.Timer
 }
 
 // NewStore loads the persisted connections and history from beside the

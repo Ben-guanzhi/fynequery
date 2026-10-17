@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestHistoryWriteIsThrottled pins what the statement log costs on disk: the
@@ -59,4 +60,35 @@ func readHistoryFile(t *testing.T, file string) []HistoryEntry {
 		t.Fatalf("decode: %v", err)
 	}
 	return entries
+}
+
+// TestHistoryTrailingFlush pins the tail of a throttled burst reaching disk
+// without a second statement or a clean quit: a burst whose write was deferred
+// must be flushed by the timer when the delay passes, which is the case a
+// crash or an idle window used to lose.
+func TestHistoryTrailingFlush(t *testing.T) {
+	prev := historyPersistDelay
+	historyPersistDelay = 60 * time.Millisecond
+	t.Cleanup(func() { historyPersistDelay = prev })
+
+	file := filepath.Join(t.TempDir(), "history.json")
+	s := &Store{live: make(map[string]*Conn), historyFile: file}
+
+	s.RecordStatement("c0", "db", "SELECT 1", QueryResult{})
+	s.RecordStatement("c0", "db", "SELECT 2", QueryResult{})
+	if got := readHistoryFile(t, file); len(got) != 1 {
+		t.Fatalf("on-disk entries inside the delay = %d, want 1", len(got))
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := readHistoryFile(t, file); len(got) == 2 {
+			if got[1].SQL != "SELECT 2" {
+				t.Fatalf("trailing flush wrote %+v, want SELECT 2 last", got)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the trailing flush never wrote the deferred statement")
 }
