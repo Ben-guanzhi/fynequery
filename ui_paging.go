@@ -176,6 +176,8 @@ func (c *Client) afterRunPaging(stmt string, res db.QueryResult, note string, si
 // refreshPageBar redraws the bar from the current page state. Nothing to page
 // means nothing to show.
 func (c *Client) refreshPageBar() {
+	// 面包屑的 < > 与表名跟分页条读同一份状态，一起刷新（内部自带 nil 守卫）。
+	c.refreshCrumb()
 	if c.page.bar == nil {
 		return
 	}

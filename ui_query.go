@@ -26,11 +26,14 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	toolbar := c.buildQueryToolbar()
 	editorArea := c.buildEditorArea()
 	c.buildResultGrid()
-	bottom := container.NewVBox(c.buildCellBar(), c.buildStatusBar())
+	bottom := c.buildBottomBar()
 
-	// The page bar rides above the grid and is hidden unless the result on
-	// screen is a paged one, so a normal query costs no vertical space.
-	gridArea := container.NewBorder(c.buildPageBar(), nil, nil, nil, c.grid.table)
+	// The breadcrumb rides above the grid with the page bar directly under it;
+	// the page bar stays hidden unless the result on screen is a paged one, so
+	// a normal query costs no vertical space beyond the crumb row.
+	gridArea := container.NewBorder(
+		container.NewVBox(c.buildCrumbBar(), c.buildPageBar()),
+		nil, nil, nil, c.grid.table)
 	split := container.NewVSplit(
 		editorArea,
 		gridArea,
@@ -41,7 +44,8 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	}
 	c.vSplit = split
 
-	return container.NewBorder(toolbar, bottom, nil, nil, split)
+	// 右侧详情栏默认隐藏，由面包屑的「详情」按钮开（见 ui_details.go）。
+	return container.NewBorder(toolbar, bottom, nil, c.buildDetailsPane(), split)
 }
 
 // buildEditorArea creates the query tabs plus the strip that hosts new/close
@@ -228,12 +232,24 @@ func (c *Client) buildResultGrid() {
 			c.grid.view.SetText(c.gridCell(id))
 		}
 		c.updateEditButtons()
+		c.refreshDetails() // 右侧详情栏跟随选中行
 	}
 }
 
-// buildCellBar builds the row under the grid: the full value of the selected
-// cell on the left, the in-result search and the copy actions on the right.
-func (c *Client) buildCellBar() fyne.CanvasObject {
+// buildBottomBar is the single bottom strip. It folds the two rows this used to
+// be — 单元格 row on top, status row below — into one, matching the single
+// bottom bar the embedded copy shipped for the TablePlus layout.
+//
+// Left is the status, centre carries the selected cell's full value plus the
+// in-result search and copy actions, right holds the row/change actions. Those
+// stay disabled unless the result is a writable SELECT * of one table (see
+// setEditContext).
+//
+// Two things the embedded copy's bar had are deliberately NOT duplicated: the
+// range text (独立版 already shows it in the page bar over the grid — see
+// ui_paging.go) and the 数据/结构/索引 segment (独立版 opens 结构 as a dialog
+// from the schema tree; an inline segment waits for the P3 index pane).
+func (c *Client) buildBottomBar() fyne.CanvasObject {
 	c.grid.view = newKeyedEntry()
 	c.grid.view.SetPlaceHolder("选中一个单元格查看完整值")
 	c.grid.view.TextStyle = fyne.TextStyle{Monospace: true}
@@ -253,19 +269,7 @@ func (c *Client) buildCellBar() fyne.CanvasObject {
 		c.copySelectedRow()
 	})
 	rowCopyBtn.Importance = widget.LowImportance
-	return container.NewBorder(
-		nil,
-		nil,
-		widget.NewLabel("单元格"),
-		container.NewHBox(c.find.entry, c.find.label, copyBtn, rowCopyBtn),
-		c.grid.view,
-	)
-}
 
-// buildStatusBar builds TablePro's signature bottom bar: status on the left,
-// the row and change actions on the right. The buttons stay disabled unless the
-// result is a writable SELECT * of one table (see setEditContext).
-func (c *Client) buildStatusBar() fyne.CanvasObject {
 	c.status = widget.NewLabel("就绪")
 	c.act.filter = widget.NewButtonWithIcon("过滤", theme.SearchIcon(), func() {
 		c.showFilterDialog()
@@ -282,7 +286,6 @@ func (c *Client) buildStatusBar() fyne.CanvasObject {
 	c.act.saveChanges = widget.NewButtonWithIcon("保存", theme.ConfirmIcon(), func() {
 		c.saveChanges()
 	})
-	c.act.saveChanges.Importance = widget.HighImportance
 	c.act.discard = widget.NewButtonWithIcon("放弃", theme.CancelIcon(), func() {
 		c.discardChanges()
 	})
@@ -295,7 +298,13 @@ func (c *Client) buildStatusBar() fyne.CanvasObject {
 		c.act.insertRow, c.act.deleteRow,
 		c.act.saveChanges, c.act.discard,
 	)
-	return container.NewBorder(nil, nil, c.status, editActions)
+
+	centre := container.NewHBox(
+		widget.NewLabel("单元格"), c.grid.view,
+		c.find.entry, c.find.label,
+		copyBtn, rowCopyBtn,
+	)
+	return container.NewBorder(nil, nil, c.status, editActions, centre)
 }
 
 // limitValue parses the chosen row limit; "无限制" means no cap (0).
@@ -510,6 +519,7 @@ func (c *Client) runTracked(busy string, work func(context.Context) (db.QueryRes
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c.busy = true
+	c.runGen++ // 新一轮开跑：正在流式渲染的旧批次据此作废
 	c.cancelFn = cancel
 	c.mu.Unlock()
 	c.setRunning(true)

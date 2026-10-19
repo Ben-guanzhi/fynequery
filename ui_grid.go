@@ -344,8 +344,14 @@ func (c *Client) renderResult(res db.QueryResult) {
 		}
 		rows = append(rows, row)
 	}
+	msg := fmt.Sprintf("返回 %d 行 × %d 列，耗时 %.2fs", res.RowCount, len(res.Columns), res.ExecutionTime)
+	if c.gridEditable() {
+		msg += " · 可编辑表 " + c.grid.src.Table
+	} else if res.RowCount > 0 {
+		msg += " · 只读（编辑需 SELECT * 单表）"
+	}
+
 	c.grid.header = header
-	c.grid.rows = rows
 	c.grid.cols = res.Columns
 	c.grid.colTypes = res.ColTypes
 	c.grid.hasCell = false
@@ -354,14 +360,55 @@ func (c *Client) renderResult(res db.QueryResult) {
 	if c.grid.view != nil {
 		c.grid.view.SetText("")
 	}
+	// 大结果走流式：先按全量算列宽，行再分批推进（见 renderRowsStreamed）。
+	if len(rows) > streamThreshold && c.dispatch != nil {
+		c.applyColumnWidths(header, rows)
+		c.grid.rows = nil
+		c.grid.table.Refresh()
+		c.renderRowsStreamed(rows, msg)
+		return
+	}
+	c.grid.rows = rows
 	c.applyColumnWidths(header, rows)
 	c.grid.table.Refresh()
 	c.updateEditButtons()
-	msg := fmt.Sprintf("返回 %d 行 × %d 列，耗时 %.2fs", res.RowCount, len(res.Columns), res.ExecutionTime)
-	if c.gridEditable() {
-		msg += " · 可编辑表 " + c.grid.src.Table
-	} else if res.RowCount > 0 {
-		msg += " · 只读（编辑需 SELECT * 单表）"
+	c.setStatus(msg)
+}
+
+// 流式渲染的阈值与批大小（移植自内置版 query.go:480-506 的分批 + 代际守卫）。
+//
+// 独立版默认限 1000 行、且分页走服务端，所以只有「无限制」之类的大结果才会
+// 越过阈值走这条路径；小结果仍一次性装载，行为与移植前完全一致（既有测试全
+// 部走这条同步路径）。
+const (
+	streamThreshold = 2000
+	streamBatch     = 1000
+)
+
+// renderRowsStreamed 把大结果分批推进网格：每批 append 一次并 Refresh，让界面
+// 边装边画，而不是整批装完才动。带代际守卫：新一轮开跑后，旧批次直接丢弃。
+func (c *Client) renderRowsStreamed(rows [][]string, msg string) {
+	c.mu.Lock()
+	gen := c.runGen
+	c.mu.Unlock()
+
+	for from := 0; from < len(rows); from += streamBatch {
+		start := from
+		c.dispatch(func() {
+			c.mu.Lock()
+			stale := c.runGen != gen
+			c.mu.Unlock()
+			if stale {
+				return // 已被新一轮取代，这批不再落地
+			}
+			to := start + streamBatch
+			if to > len(rows) {
+				to = len(rows)
+			}
+			c.grid.rows = append(c.grid.rows, rows[start:to]...)
+			c.grid.table.Refresh()
+		})
 	}
+	c.updateEditButtons()
 	c.setStatus(msg)
 }

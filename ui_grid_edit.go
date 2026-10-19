@@ -193,6 +193,7 @@ func (c *Client) setEditContext(query string, res db.QueryResult) {
 		c.grid.src = c.store.QuerySource(c.currentID, query, c.resolveDB())
 	}
 	c.updateEditButtons()
+	c.refreshCrumb()
 }
 
 // gridEditable reports whether the current result can be written back.

@@ -175,8 +175,12 @@ type Client struct {
 	// re-query: without the guard it started a second run that overwrote cancelFn,
 	// so 取消 stopped the newest run and let the old one land on top of it, and the
 	// grid ended up showing page A under a bar that said page B.
-	busy  bool
-	cache memoCache
+	busy bool
+	// runGen is the run generation. Streaming rendering stamps the generation it
+	// started with and drops its batches once a newer run has begun, so a slow
+	// big result cannot land on top of the query that replaced it.
+	runGen int
+	cache  memoCache
 
 	// The rest is UI-thread state, grouped by what moves together: the sidebar
 	// pickers, the schema navigator, the history panel and the editor tabs.
@@ -200,6 +204,12 @@ type Client struct {
 	grid gridState
 	// bottom-bar actions, enabled while the result is a writable table
 	act rowActions
+	// crumb is the breadcrumb row over the grid (see ui_crumb.go): the < >
+	// page steppers reusing the server-side pager, and the centred table name.
+	crumb crumbState
+	// details is the right-hand TablePlus details pane (see ui_details.go):
+	// the selected row's field values, or the table's catalog counts.
+	details detailsState
 
 	status *widget.Label
 

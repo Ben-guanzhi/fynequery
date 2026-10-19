@@ -45,7 +45,11 @@ func (c *Client) showBranchNodeMenu(uid string, pos fyne.Position) {
 	if !ok {
 		return
 	}
-	menu := fyne.NewMenu("", fyne.NewMenuItem("新建表", func() { c.newTableTab(nd) }))
+	menu := fyne.NewMenu("",
+		fyne.NewMenuItem("新建表", func() { c.newTableTab(nd) }),
+		// ER 图是库级的：把这一支下的表与它们之间的外键画出来。
+		fyne.NewMenuItem("ER 图", func() { c.showERDiagram(nd.db, nd.schema) }),
+	)
 	widget.NewPopUpMenu(menu, c.win.Canvas()).ShowAtPosition(pos)
 }
 
