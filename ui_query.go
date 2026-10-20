@@ -115,6 +115,8 @@ func (c *Client) buildQueryToolbar() *fyne.Container {
 	// button over the dialog that bindKey documents (see ui_keys.go).
 	keysBtn := widget.NewButtonWithIcon("快捷键", theme.HelpIcon(), c.showKeysDialog)
 	keysBtn.Importance = widget.LowImportance
+	fmtBtn := widget.NewButtonWithIcon("格式化", theme.MenuIcon(), c.formatCurrentSQL)
+	fmtBtn.Importance = widget.LowImportance
 
 	limitSel := widget.NewSelect(rowLimitOptions, func(s string) {
 		c.page.limitText = s
@@ -165,7 +167,7 @@ func (c *Client) buildQueryToolbar() *fyne.Container {
 	}
 	return container.NewHBox(
 		c.dbs.sel,
-		runBtn, cancelRunBtn, clearBtn, keysBtn,
+		runBtn, cancelRunBtn, clearBtn, keysBtn, fmtBtn,
 		widget.NewSeparator(),
 		widget.NewLabel("行数上限"),
 		limitSel, c.page.check,

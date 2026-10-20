@@ -12,6 +12,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/test"
 )
 
 // threeStatements is a script whose every line is independently runnable, so
@@ -147,6 +148,51 @@ func TestSelectingTheWholeEditorRunsEveryStatement(t *testing.T) {
 
 	if ran := historySQL(c); len(ran) != 3 {
 		t.Fatalf("history = %v, want a whole-tab selection to run all three", ran)
+	}
+}
+
+// TestCtrlShiftFReformatsTheActiveTab pins the keystroke rather than the
+// function behind it: F alone is taken by the result search, so the binding
+// only matters if the Shift flavour is registered in the same table.
+func TestCtrlShiftFReformatsTheActiveTab(t *testing.T) {
+	a := test.NewApp()
+	w := a.NewWindow("t")
+	c := newTestClient(a, w)
+	w.SetContent(c.buildUI())
+
+	c.tabs.entry.setTextSilently("select id, name from t where id = 1")
+	c.tabs.entry.TypedShortcut(&desktop.CustomShortcut{
+		KeyName:  fyne.KeyF,
+		Modifier: fyne.KeyModifierControl | fyne.KeyModifierShift,
+	})
+
+	if got, want := c.tabs.entry.Text, "SELECT id, name\nFROM t\nWHERE id = 1"; got != want {
+		t.Fatalf("editor text = %q, want %q", got, want)
+	}
+	if !strings.Contains(c.status.Text, "已格式化") {
+		t.Fatalf("status = %q, want the format confirmation", c.status.Text)
+	}
+}
+
+// TestControlFStillFocusesTheSearchBox: the plain combo must keep meaning what
+// it has always meant, or a new binding has stolen one.
+func TestControlFStillFocusesTheSearchBox(t *testing.T) {
+	a := test.NewApp()
+	w := a.NewWindow("t")
+	c := newTestClient(a, w)
+	w.SetContent(c.buildUI())
+
+	c.tabs.entry.setTextSilently("SELECT 1")
+	c.tabs.entry.TypedShortcut(&desktop.CustomShortcut{
+		KeyName:  fyne.KeyF,
+		Modifier: fyne.KeyModifierControl,
+	})
+
+	if c.win.Canvas().Focused() != c.find.entry {
+		t.Fatalf("Ctrl+F did not hand the keyboard to the search box")
+	}
+	if strings.Contains(c.status.Text, "已格式化") {
+		t.Fatal("Ctrl+F triggered the formatter")
 	}
 }
 

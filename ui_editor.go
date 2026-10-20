@@ -104,6 +104,28 @@ func (c *Client) newTableTab(nd *nodeData) {
 	c.setStatus("新建表草案已打开，改完名字和字段再执行")
 }
 
+// formatCurrentSQL rewrites the active tab's SQL into the one layout: one
+// clause per line, keywords upper-cased. It is a text edit, not an execution -
+// no history entry, and no completion pass, because the words in the script
+// have not changed and only their spacing has.
+//
+// Nothing runs against the server and the tab is not marked dirty: the ● marker
+// means "you changed this since you last ran it", and a reformat is not a
+// change you could accidentally lose.
+func (c *Client) formatCurrentSQL() {
+	e := c.tabs.entry
+	if e == nil || strings.TrimSpace(e.Text) == "" {
+		return
+	}
+	out := db.FormatSQL(e.Text)
+	if out == e.Text {
+		c.setStatus("格式化：这段 SQL 已经是这个布局了")
+		return
+	}
+	e.setTextSilently(out)
+	c.setStatus("已格式化当前标签的 SQL")
+}
+
 // restoreQueryTabs refills the freshly built tab strip from the persisted
 // drafts: the first draft lands in the tab addQueryTab already created, the
 // rest append new tabs. setTextSilently keeps the restore from looking like

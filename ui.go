@@ -356,6 +356,10 @@ func (c *Client) buildUI() fyne.CanvasObject {
 	c.bindKey(fyne.KeyO, "打开 .sql 脚本到当前标签", func() { c.showOpenScriptDialog() })
 	c.bindKey(fyne.KeyS, "把当前标签保存为 .sql 脚本", func() { c.showSaveScriptDialog() })
 	c.bindKey(fyne.KeyF, "聚焦「在结果中搜索」", c.focusResultSearch)
+	c.bindKeyMod(fyne.KeyF, []fyne.KeyModifier{
+		fyne.KeyModifierControl | fyne.KeyModifierShift,
+		fyne.KeyModifierSuper | fyne.KeyModifierShift,
+	}, "格式化当前标签的 SQL", c.formatCurrentSQL)
 	c.docKey("Tab    在编辑器内插入缩进（两个空格，不跳出编辑器）")
 	// Copy stays a canvas-level registration on purpose: an entry that claimed
 	// Ctrl+C from the table could no longer copy its own selection.
