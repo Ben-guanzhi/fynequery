@@ -302,7 +302,7 @@ func (c *Client) addErrorNode(nd *nodeData, err error) {
 	}
 	nd.children = []string{uid}
 	c.mu.Unlock()
-	c.setStatus("加载失败：" + err.Error())
+	c.setStatusError("加载失败：" + err.Error())
 }
 
 // retrySchemaNode clears a failed load and expands the parent again.

@@ -170,7 +170,7 @@ func (c *Client) closeActiveTab() {
 	item := c.tabs.bar.CurrentTab()
 	tab := c.tabByItem(item)
 	if tab != nil && tab.dirty {
-		dialog.ShowConfirm("关闭标签",
+		dialog.ShowConfirm("确认关闭标签",
 			"该标签的 SQL 已修改但尚未执行，确定关闭吗？",
 			func(ok bool) {
 				if ok {

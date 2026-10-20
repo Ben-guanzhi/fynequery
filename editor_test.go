@@ -145,7 +145,11 @@ func TestSplitLineForEnter(t *testing.T) {
 		wantOK   bool
 	}{
 		{"BEGIN", 0, 5, "BEGIN\n  ", 2, true},
-		{"  IF x = 1;", 0, 11, "  IF x = 1;\n  ", 2, true},
+		// The line's own indent is carried onto the new line: a trigger word
+		// adds a level RELATIVE to it, a non-trigger keeps it verbatim.
+		{"  IF x = 1;", 0, 11, "  IF x = 1;\n    ", 4, true},
+		{"  BEGIN", 0, 7, "  BEGIN\n    ", 4, true},
+		{"    WHERE x = 1", 0, 15, "    WHERE x = 1\n    ", 4, true},
 		{"LOOP", 0, 4, "LOOP\n  ", 2, true},
 		{"WHILE", 0, 5, "WHILE\n  ", 2, true},
 		{"EXCEPTION", 0, 9, "EXCEPTION\n  ", 2, true},
@@ -204,5 +208,33 @@ func TestSmartIndentEnter(t *testing.T) {
 	s.TypedKey(&fyne.KeyEvent{Name: fyne.KeyEnter})
 	if s.Entry.Text != "SELECT * FROM" {
 		t.Fatalf("enter accepted nothing: %q", s.Entry.Text)
+	}
+}
+
+// TestIndentTab pins that Tab inside the editor indents the caret instead of
+// tabbing focus away: two spaces land at the caret and the caret advances
+// past them. An out-of-range caret leaves the key to its default meaning.
+func TestIndentTab(t *testing.T) {
+	s := newTestEntry()
+	s.Entry.SetText("SELECT 1")
+	s.Entry.CursorRow, s.Entry.CursorColumn = 0, 2
+	s.TypedKey(&fyne.KeyEvent{Name: fyne.KeyTab})
+	if s.Entry.Text != "SE  LECT 1" {
+		t.Fatalf("tab = %q, want two spaces at the caret", s.Entry.Text)
+	}
+	if s.Entry.CursorRow != 0 || s.Entry.CursorColumn != 4 {
+		t.Fatalf("cursor = %d:%d, want 0:4", s.Entry.CursorRow, s.Entry.CursorColumn)
+	}
+
+	// A caret past the end of the text is not inside it, so Tab must not be
+	// claimed and the text must stay put.
+	s2 := newTestEntry()
+	s2.Entry.SetText("abc")
+	s2.Entry.CursorRow, s2.Entry.CursorColumn = 5, 0
+	if s2.indentTab() {
+		t.Fatal("an out-of-range caret must not be indented")
+	}
+	if s2.Entry.Text != "abc" {
+		t.Fatalf("text changed on an out-of-range tab: %q", s2.Entry.Text)
 	}
 }

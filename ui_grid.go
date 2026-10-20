@@ -42,12 +42,12 @@ func (c *Client) copySelectedRow() {
 // sorted grid exports in sorted order.
 func (c *Client) exportGrid() {
 	if len(c.grid.header) == 0 {
-		c.setStatus("没有可导出的结果")
+		c.setStatusWarn("没有可导出的结果")
 		return
 	}
 	d := dialog.NewFileSave(func(f fyne.URIWriteCloser, err error) {
 		if err != nil {
-			c.setStatus("导出失败：" + err.Error())
+			c.setStatusError("导出失败：" + err.Error())
 			return
 		}
 		if f == nil {
@@ -56,7 +56,7 @@ func (c *Client) exportGrid() {
 		name := f.URI().Name()
 		report := func(werr error) {
 			if werr != nil {
-				c.setStatus("导出失败：" + werr.Error())
+				c.setStatusError("导出失败：" + werr.Error())
 				return
 			}
 			c.setStatus(fmt.Sprintf("已导出 %d 行到 %s", len(c.grid.rows), name))
@@ -70,18 +70,21 @@ func (c *Client) exportGrid() {
 		}
 		// The INSERT export is the one format that needs the catalog, for the
 		// column types. That read goes off the event thread, and its callback
-		// writes and closes the file - the handle may not be closed early.
+		// writes and closes the file - the handle may not be closed early. A
+		// second export abandons the first (and its open file) up front.
+		c.releaseExport()
 		var (
 			dbType string
 			types  map[string]string
 			tErr   error
 		)
 		connID, ref := c.currentID, c.grid.src
+		c.exportFile = f
 		c.setStatus("导出中 ...")
-		c.background(func(ctx context.Context) {
+		c.exportCancel = c.background(func(ctx context.Context) {
 			dbType, types, tErr = c.insertColumnTypes(ctx, connID, ref.Database, ref.Schema, ref.Table)
 		}, func() {
-			defer f.Close()
+			defer c.releaseExport()
 			if tErr != nil {
 				report(tErr)
 				return
@@ -91,6 +94,20 @@ func (c *Client) exportGrid() {
 	}, c.win)
 	d.SetFileName("result.csv")
 	d.Show()
+}
+
+// releaseExport abandons a still-running INSERT export: it drops the catalog
+// read and closes the file it has open, then clears both handles. A finished
+// export clears them in its own callback, so this is a no-op there.
+func (c *Client) releaseExport() {
+	if c.exportCancel != nil {
+		c.exportCancel()
+		c.exportCancel = nil
+	}
+	if c.exportFile != nil {
+		c.exportFile.Close()
+		c.exportFile = nil
+	}
 }
 
 // writeGridFile renders the result into the chosen file format. Everything it
@@ -176,12 +193,17 @@ func (c *Client) copyCell() {
 // declared type is numeric (or unknown, when the grid holds no types): a text
 // column that happens to contain digits must not suddenly reorder them - for
 // "10", "2", "abc" the natural reading of a text column is lexicographic.
+//
+// The same permutation is applied to lastRows: the edit queue and the NULL
+// test address base rows by display index, so a sort that moved the strings
+// but not the raw rows would point UPDATE/DELETE WHERE clauses at a
+// neighbouring row.
 func (c *Client) sortGrid(col int) {
 	if col < 0 || col >= len(c.grid.header) {
 		return
 	}
 	if c.grid.edits.any() {
-		c.setStatus("有未保存的更改，先保存或放弃再排序")
+		c.setStatusWarn("有未保存的更改，先保存或放弃再排序")
 		return
 	}
 	if c.grid.sortCol == col {
@@ -195,12 +217,17 @@ func (c *Client) sortGrid(col int) {
 	if col < len(c.grid.colTypes) && c.grid.colTypes[col] != "" {
 		numeric = tableprosql.NewColumnType(c.grid.colTypes[col]).IsNumeric()
 	}
-	sort.SliceStable(c.grid.rows, func(i, j int) bool {
+	idx := make([]int, len(c.grid.rows))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(x, y int) bool {
+		i, j := idx[x], idx[y]
 		if col >= len(c.grid.rows[i]) || col >= len(c.grid.rows[j]) {
 			return false
 		}
 		a, b := c.grid.rows[i][col], c.grid.rows[j][col]
-		aNull, bNull := a == "NULL", b == "NULL"
+		aNull, bNull := c.cellIsNull(i, col), c.cellIsNull(j, col)
 		if aNull != bNull {
 			return !aNull // non-NULL first; NULLs always sink to the bottom
 		}
@@ -222,6 +249,18 @@ func (c *Client) sortGrid(col int) {
 		}
 		return a > b
 	})
+	sorted := make([][]string, len(idx))
+	for x, i := range idx {
+		sorted[x] = c.grid.rows[i]
+	}
+	c.grid.rows = sorted
+	if len(c.grid.lastRows) == len(idx) {
+		sortedRaw := make([][]interface{}, len(idx))
+		for x, i := range idx {
+			sortedRaw[x] = c.grid.lastRows[i]
+		}
+		c.grid.lastRows = sortedRaw
+	}
 	if c.grid.table != nil {
 		// Row order just changed, so any active search must re-collect hits.
 		c.rescanGridSearch()
@@ -238,10 +277,56 @@ func (c *Client) gridDims() (int, int) {
 	return rows, len(c.grid.header)
 }
 
+// applyGridRowHeight pins every visible row to one fixed height, so the grid
+// reads as an even table (the TablePlus look) instead of following each cell's
+// content. It is called wherever the row count can change.
+func (c *Client) applyGridRowHeight() {
+	const gridRowHeight = 28.0
+	if c.grid.table == nil {
+		return
+	}
+	rows, _ := c.gridDims()
+	for r := 0; r < rows; r++ {
+		c.grid.table.SetRowHeight(r, gridRowHeight)
+	}
+}
+
 // gridCell returns the effective display text of one cell.
 func (c *Client) gridCell(id widget.TableCellID) string {
 	text, _ := c.gridCellState(id.Row, id.Col)
 	return text
+}
+
+// cellIsNull reports whether the base result value behind a cell is a real SQL
+// NULL. The displayed text is lossy - a text column can legitimately hold the
+// string "NULL" - so only the raw result rows are a reliable answer.
+func (c *Client) cellIsNull(row, col int) bool {
+	if row < 0 || col < 0 || row >= len(c.grid.lastRows) {
+		return false
+	}
+	r := c.grid.lastRows[row]
+	return col < len(r) && r[col] == nil
+}
+
+// colAlignsRight reports whether a column's values render right-aligned:
+// numeric columns only, matching the sort rule that treats a column as numbers
+// only when its declared type says so.
+func (c *Client) colAlignsRight(col int) bool {
+	if col < 0 || col >= len(c.grid.alignRight) {
+		return false
+	}
+	return c.grid.alignRight[col]
+}
+
+// alignRightFor decides which columns render right-aligned: exactly the ones
+// whose declared type is numeric, so a text column that happens to hold digits
+// keeps the left edge it was meant for. Unknown types align left.
+func alignRightFor(colTypes []string) []bool {
+	out := make([]bool, len(colTypes))
+	for i, t := range colTypes {
+		out[i] = t != "" && tableprosql.NewColumnType(t).IsNumeric()
+	}
+	return out
 }
 
 // applyColumnWidths sizes every column to fit its content (header + sampled
@@ -315,7 +400,7 @@ func displayWidth(s string) int {
 // renderResult turns a db.QueryResult into the grid + status line.
 func (c *Client) renderResult(res db.QueryResult) {
 	if res.Error != "" {
-		c.setStatus("错误：" + res.Error)
+		c.setStatusError("错误：" + res.Error)
 		return
 	}
 	if len(res.Columns) == 0 {
@@ -354,6 +439,7 @@ func (c *Client) renderResult(res db.QueryResult) {
 	c.grid.header = header
 	c.grid.cols = res.Columns
 	c.grid.colTypes = res.ColTypes
+	c.grid.alignRight = alignRightFor(res.ColTypes)
 	c.grid.hasCell = false
 	c.grid.sortCol = -1
 	c.clearGridSearch()
@@ -370,6 +456,7 @@ func (c *Client) renderResult(res db.QueryResult) {
 	}
 	c.grid.rows = rows
 	c.applyColumnWidths(header, rows)
+	c.applyGridRowHeight()
 	c.grid.table.Refresh()
 	c.updateEditButtons()
 	c.setStatus(msg)
@@ -406,6 +493,7 @@ func (c *Client) renderRowsStreamed(rows [][]string, msg string) {
 				to = len(rows)
 			}
 			c.grid.rows = append(c.grid.rows, rows[start:to]...)
+			c.applyGridRowHeight()
 			c.grid.table.Refresh()
 		})
 	}

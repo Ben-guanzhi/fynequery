@@ -192,6 +192,31 @@ func (c *Store) ClearHistory() int {
 	return n
 }
 
+// DeleteHistory removes one recorded statement by its assigned ID and
+// persists. It reports whether an entry was found: an ID the log has already
+// trimmed away answers false, so the caller can say so instead of pretending.
+func (c *Store) DeleteHistory(id int64) bool {
+	c.mu.Lock()
+	out := make([]HistoryEntry, 0, len(c.history))
+	found := false
+	for _, e := range c.history {
+		if e.ID == id {
+			found = true
+			continue
+		}
+		out = append(out, e)
+	}
+	if !found {
+		c.mu.Unlock()
+		return false
+	}
+	c.history = out
+	c.historyDirty = true
+	c.mu.Unlock()
+	c.persistHistoryNow(false)
+	return true
+}
+
 // sqlCommentRe strips comments and string literals so a keyword inside them
 // cannot be mistaken for a table reference.
 var sqlCommentRe = regexp.MustCompile(`(--[^\n]*)|(/\*.*?\*/)|('(?:[^']|'')*')`)

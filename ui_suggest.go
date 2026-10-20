@@ -131,7 +131,48 @@ func (s *suggestEntry) TypedKey(k *fyne.KeyEvent) {
 	if (k.Name == fyne.KeyEnter || k.Name == fyne.KeyReturn) && s.enter() {
 		return
 	}
+	if k.Name == fyne.KeyTab && s.indentTab() {
+		// Tab indents instead of escaping the editor to the next widget: the
+		// SQL pane keeps the keyboard, which is what a code editor owes the
+		// cursor. The caret had to sit in the text at all, else the key keeps
+		// its default meaning.
+		return
+	}
 	s.Entry.TypedKey(k)
+}
+
+// indentTab inserts one smartIndentStep at the caret. It reports false only
+// when the caret is not inside the text, in which case Tab must do whatever
+// fyne normally does with it.
+func (s *suggestEntry) indentTab() bool {
+	offset := caretOffset(s.Entry.Text, s.CursorRow, s.CursorColumn)
+	if offset < 0 {
+		return false
+	}
+	before, after := s.Entry.Text[:offset], s.Entry.Text[offset:]
+	cb := s.OnChanged
+	s.OnChanged = nil
+	s.Entry.SetText(before + smartIndentStep + after)
+	s.OnChanged = cb
+	s.Entry.CursorRow = s.CursorRow
+	s.Entry.CursorColumn = s.CursorColumn + len(smartIndentStep)
+	return true
+}
+
+// caretOffset turns a (row, column) caret into a byte offset into text; column
+// counts runes of its line. -1 means the caret is not inside the text.
+func caretOffset(text string, row, col int) int {
+	offset := 0
+	for i, l := range strings.Split(text, "\n") {
+		if i == row {
+			if col < 0 || col > utf8.RuneCountInString(l) {
+				return -1
+			}
+			return offset + len(string([]rune(l)[:col]))
+		}
+		offset += len(l) + 1
+	}
+	return -1
 }
 
 // TypedShortcut implements fyne.Shortcutable. The glfw driver routes shortcuts
@@ -287,10 +328,14 @@ func firstCodeWord(line string) string {
 }
 
 // splitLineForEnter is what Enter does at (row, col): break the line there and
-// carry one indent level onto the new line when the broken line's first word is
-// a smartIndentWord. It returns the replacement text, the caret column of the
-// new line, and ok - false when the caret is outside the text and the key must
-// keep its default behaviour.
+// carry the current line's own indent onto the new one, plus a further level
+// when the broken line's first word is a smartIndentWord. Returning the
+// replacement text and the caret column of the new line keeps the gutter and
+// the completion pass honest.
+//
+// The "plus" matters: BEGIN indents its body RELATIVE to itself, so a nested
+// block gets two levels - the old behaviour indented from zero and flattened
+// any nesting the user had already built.
 func splitLineForEnter(text string, row, col int) (string, int, bool) {
 	lines := strings.Split(text, "\n")
 	if row < 0 || row >= len(lines) {
@@ -300,17 +345,25 @@ func splitLineForEnter(text string, row, col int) (string, int, bool) {
 	if col < 0 || col > len(line) {
 		return "", 0, false
 	}
-	indent := ""
-	caretCol := 0
+	indent := leadingWhitespace(lines[row])
 	if smartIndentWords[firstCodeWord(lines[row])] {
-		indent = smartIndentStep
-		caretCol = len(smartIndentStep)
+		indent += smartIndentStep
 	}
+	caretCol := len(indent)
 	head := append([]string{}, lines[:row]...)
 	tail := append([]string{}, lines[row+1:]...)
 	head = append(head, string(line[:col]))
 	tail = append([]string{indent + string(line[col:])}, tail...)
 	return strings.Join(head, "\n") + "\n" + strings.Join(tail, "\n"), caretCol, true
+}
+
+// leadingWhitespace reports the run of spaces/tabs that opens a line.
+func leadingWhitespace(s string) string {
+	end := 0
+	for end < len(s) && (s[end] == ' ' || s[end] == '\t') {
+		end++
+	}
+	return s[:end]
 }
 
 // enter types the newline itself, so a line that is not a smart-indent trigger

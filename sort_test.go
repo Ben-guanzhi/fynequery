@@ -13,9 +13,20 @@ func TestSortGrid(t *testing.T) {
 			{"NULL", "zebra", "b"},
 		}
 	}
+	// The raw rows behind the display: the "NULL" in column 0 of the last
+	// row is a real SQL NULL (nil) and is what the sort sinks to the
+	// bottom; the "NULL" text in column 2 of the first row is data.
+	newRaw := func() [][]interface{} {
+		return [][]interface{}{
+			{int64(10), "banana", "NULL"},
+			{int64(2), "apple", "x"},
+			{int64(1), "cherry", "a"},
+			{nil, "zebra", "b"},
+		}
+	}
 
 	// Numeric ascending on column 0.
-	c := &Client{grid: gridState{header: []string{"n", "s", "t"}, rows: newRows(), sortCol: -1}}
+	c := &Client{grid: gridState{header: []string{"n", "s", "t"}, rows: newRows(), lastRows: newRaw(), sortCol: -1}}
 	c.sortGrid(0)
 	if !c.grid.sortAsc || c.grid.sortCol != 0 {
 		t.Fatalf("expected asc sort col 0, got col=%d asc=%v", c.grid.sortCol, c.grid.sortAsc)
@@ -23,6 +34,14 @@ func TestSortGrid(t *testing.T) {
 	got := []string{c.grid.rows[0][0], c.grid.rows[1][0], c.grid.rows[2][0], c.grid.rows[3][0]}
 	if got[0] != "1" || got[1] != "2" || got[2] != "10" || got[3] != "NULL" {
 		t.Fatalf("numeric asc + NULL last: %v", got)
+	}
+	// The raw rows must follow the displayed order, or the edit queue's
+	// WHERE clauses would point at the wrong rows.
+	if c.grid.lastRows[3][0] != nil {
+		t.Fatalf("the real NULL no longer sorts last in the raw rows: %v", c.grid.lastRows)
+	}
+	if c.grid.lastRows[0][0] != int64(1) {
+		t.Fatalf("raw rows out of step with the display: %v", c.grid.lastRows)
 	}
 
 	// Toggle to descending.

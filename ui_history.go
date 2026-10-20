@@ -74,6 +74,7 @@ func (c *Client) buildHistoryPanel() fyne.CanvasObject {
 		if id < 0 || id >= len(c.hist.view) {
 			return
 		}
+		c.hist.selected = id
 		e := c.hist.view[id]
 		c.tabs.entry.setTextSilently(e.SQL)
 		if e.Database != "" {
@@ -83,14 +84,18 @@ func (c *Client) buildHistoryPanel() fyne.CanvasObject {
 		c.focusEditor()
 	}
 
-	rerunBtn := widget.NewButtonWithIcon("", theme.MediaPlayIcon(), func() {
+	rerunInner := widget.NewButtonWithIcon("", theme.MediaPlayIcon(), func() {
 		if c.tabs.entry.Text != "" {
 			c.runCurrent()
 		}
 	})
-	rerunBtn.Importance = widget.LowImportance
-	clearBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
-		dialog.ShowConfirm("清空历史", "确定清空全部查询历史吗？", func(ok bool) {
+	rerunInner.Importance = widget.LowImportance
+	rerunBtn := attachTooltip(rerunInner, "重跑当前编辑器中的语句")
+	delInner := widget.NewButtonWithIcon("", theme.DeleteIcon(), c.deleteSelectedHistory)
+	delInner.Importance = widget.LowImportance
+	delBtn := attachTooltip(delInner, "删除选中项")
+	clearInner := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+		dialog.ShowConfirm("确认清空历史", "确定清空全部查询历史吗？", func(ok bool) {
 			if !ok {
 				return
 			}
@@ -99,21 +104,42 @@ func (c *Client) buildHistoryPanel() fyne.CanvasObject {
 			c.setStatus("历史已清空")
 		}, c.win)
 	})
-	clearBtn.Importance = widget.LowImportance
+	clearInner.Importance = widget.LowImportance
+	clearBtn := attachTooltip(clearInner, "清空全部历史")
 
 	header := container.NewBorder(nil, nil, widget.NewLabel("历史"),
-		container.NewHBox(rerunBtn, clearBtn), c.hist.filterEntry)
+		container.NewHBox(rerunBtn, delBtn, clearBtn), c.hist.filterEntry)
 	// The sidebar's bottom slot takes this panel's min height; a deterministic
 	// fixed-height layout keeps the band stable no matter what the list reports.
 	historyPanel := container.NewBorder(header, nil, nil, nil, c.hist.list)
 	return container.New(&fixedHeightLayout{height: 150}, historyPanel)
 }
 
+// deleteSelectedHistory removes the one history row currently selected from
+// the log and re-renders. Entries are addressed by their stable ID, so the
+// filtered view the user is looking at and the on-disk log stay in step.
+func (c *Client) deleteSelectedHistory() {
+	if c.hist.selected < 0 || c.hist.selected >= len(c.hist.view) {
+		c.setStatusWarn("先选中一条历史再删除")
+		return
+	}
+	id := c.hist.view[c.hist.selected].ID
+	if !c.store.DeleteHistory(id) {
+		c.setStatusWarn("该条历史已不在日志中")
+		return
+	}
+	c.hist.selected = -1
+	c.refreshHistory()
+	c.setStatus("已删除一条历史")
+}
+
 // rebuildHistoryView recomputes the filtered newest-first view the history
-// list renders. Called whenever the log or the filter changes.
+// list renders. Called whenever the log or the filter changes. A rebuilt view
+// renumbers its rows, so the recorded selection is dropped with it.
 func (c *Client) rebuildHistoryView() {
 	entries := c.store.History()
 	c.mu.Lock()
+	c.hist.selected = -1
 	view := make([]db.HistoryEntry, 0, len(entries))
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -24,6 +25,10 @@ func (c *Client) showConnDialog(edit *db.ConnConfig) {
 	var d *dialog.CustomDialog
 
 	save := func() {
+		if err := f.validate(); err != nil {
+			dialog.ShowInformation("无法保存", err.Error(), c.win)
+			return
+		}
 		cfg := f.config()
 		cfg.Options = map[string]string{}
 		refilter := false
@@ -52,6 +57,10 @@ func (c *Client) showConnDialog(edit *db.ConnConfig) {
 	}
 
 	test := func() {
+		if err := f.validate(); err != nil {
+			dialog.ShowInformation("无法测试", err.Error(), c.win)
+			return
+		}
 		c.testAndReport(f.config())
 	}
 
@@ -155,6 +164,37 @@ func (c *Client) newConnFields(edit *db.ConnConfig) *connFields {
 		f.sslStored = sslValueFor(sslChoicesFor(engineType(f.typeSel.Selected)), label)
 	}
 
+	// The three field checks read the 类型 dropdown live, so the closures
+	// stay right after an engine switch; re-running them only repaints.
+	f.hostE.Validator = f.hostValidator
+	f.portE.Validator = f.portValidator
+	f.dbE.Validator = f.dbValidator
+	f.applyEngineDefaults(edit)
+
+	// Friendly default ports per engine when creating a new connection.
+	f.typeSel.OnChanged = func(t string) {
+		f.updatePicker()
+		// Each engine asks for its own encryption vocabulary.
+		f.applyEngineSSL(f.sslStored)
+		// The field rules moved with the engine (SQLite: no host, no port);
+		// force a re-check so a carried-over value turns red instead of
+		// waiting for the next keystroke.
+		f.hostE.Validate()
+		f.portE.Validate()
+		f.dbE.Validate()
+		if edit != nil {
+			return
+		}
+		f.portE.SetText(defaultPortFor(engineType(t)))
+	}
+	f.updatePicker()
+	return f
+}
+
+// applyEngineDefaults seeds the fields from an existing connection, or from
+// the create-mode defaults. It runs while typeSel.OnChanged is still nil, so
+// SetSelected here cannot repaint the form before the seed is complete.
+func (f *connFields) applyEngineDefaults(edit *db.ConnConfig) {
 	if edit != nil {
 		f.nameE.SetText(edit.Name)
 		f.typeSel.SetSelected(engineName(edit.Type))
@@ -168,24 +208,11 @@ func (c *Client) newConnFields(edit *db.ConnConfig) *connFields {
 		f.includeE.SetText(renderPatterns(edit.DatabaseFilter.Include))
 		f.excludeE.SetText(renderPatterns(edit.DatabaseFilter.Exclude))
 		f.applyEngineSSL(edit.SSLMode)
-	} else {
-		f.typeSel.SetSelected("MySQL")
-		f.portE.SetText(defaultPortFor(db.DbTypeMySQL))
-		f.applyEngineSSL("")
+		return
 	}
-
-	// Friendly default ports per engine when creating a new connection.
-	f.typeSel.OnChanged = func(t string) {
-		f.updatePicker()
-		// Each engine asks for its own encryption vocabulary.
-		f.applyEngineSSL(f.sslStored)
-		if edit != nil {
-			return
-		}
-		f.portE.SetText(defaultPortFor(engineType(t)))
-	}
-	f.updatePicker()
-	return f
+	f.typeSel.SetSelected("MySQL")
+	f.portE.SetText(defaultPortFor(db.DbTypeMySQL))
+	f.applyEngineSSL("")
 }
 
 // form is the create/edit form body.
@@ -236,6 +263,70 @@ func (f *connFields) updatePicker() {
 			e.Enable()
 		}
 	}
+}
+
+// isSQLite answers whether the form currently names a file engine, whose
+// fields are the ones other engines' rules would get wrong (host unused,
+// port absent, 数据库 = file path).
+func (f *connFields) isSQLite() bool {
+	return engineType(f.typeSel.Selected) == db.DbTypeSQLite
+}
+
+// hostValidator flags the one case a server connection cannot dial: an empty
+// 主机. SQLite reads a file, so there the field is unused and never a fault.
+func (f *connFields) hostValidator(s string) error {
+	if f.isSQLite() {
+		return nil
+	}
+	if strings.TrimSpace(s) == "" {
+		return errors.New("主机不能为空")
+	}
+	return nil
+}
+
+// portValidator answers what is wrong with 端口 for the engine on screen:
+// a server needs a number in range, and SQLite has no port at all - a value
+// left over from a type switch is a fault there, not a default.
+func (f *connFields) portValidator(s string) error {
+	s = strings.TrimSpace(s)
+	if f.isSQLite() {
+		if s != "" {
+			return errors.New("SQLite 没有端口，请清空此项")
+		}
+		return nil
+	}
+	if s == "" {
+		return errors.New("端口不能为空")
+	}
+	if n, err := strconv.Atoi(s); err != nil || n < 1 || n > 65535 {
+		return errors.New("端口需为 1–65535 的数字")
+	}
+	return nil
+}
+
+// dbValidator is the SQLite-only rule: a file engine's 数据库 field is the
+// file itself, so it must name something the picker or the user filled in.
+func (f *connFields) dbValidator(s string) error {
+	if f.isSQLite() && strings.TrimSpace(s) == "" {
+		return errors.New("SQLite 需要指定数据库文件路径")
+	}
+	return nil
+}
+
+// validate forces every field check to run and reports all current problems
+// in one line: 保存 / 测试 must not fire on a half-typed form, and the
+// per-field red text the entries just rendered is the where.
+func (f *connFields) validate() error {
+	var problems []string
+	for _, e := range []*widget.Entry{f.hostE, f.portE, f.dbE} {
+		if err := e.Validate(); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(problems, "；"))
 }
 
 // config reads the form controls into a db.ConnConfig.

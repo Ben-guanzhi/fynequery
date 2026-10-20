@@ -161,11 +161,12 @@ func TestKeyDialogDocumentsEveryBinding(t *testing.T) {
 	}
 
 	// One line per documented combo plus the combos written by hand: Ctrl+C
-	// (canvas-level only), the search box's Enter / Shift+Enter, and the
-	// Ctrl+1…9 tab run, which nine table entries share instead of documenting
-	// nine near-identical lines. The dialog is the only place the keys are still
-	// spelled out, so a stale or missing line is a real defect.
-	if want := len(documented) + 3; len(c.keyDocs) != want {
+	// (canvas-level only), the search box's Enter / Shift+Enter, the editor's
+	// Tab (indent, claimed in the editor's TypedKey not the shortcut table),
+	// and the Ctrl+1…9 tab run, which nine table entries share instead of
+	// documenting nine near-identical lines. The dialog is the only place the
+	// keys are still spelled out, so a stale or missing line is a real defect.
+	if want := len(documented) + 4; len(c.keyDocs) != want {
 		t.Fatalf("dialog has %d lines, want %d: %q", len(c.keyDocs), want, c.keyDocs)
 	}
 	if !strings.Contains(text, "1 … 9") {

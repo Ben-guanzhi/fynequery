@@ -15,7 +15,6 @@ import (
 	"context"
 	"image/color"
 	"strconv"
-	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -80,7 +79,11 @@ func (c *Client) buildDetailsPane() fyne.CanvasObject {
 	}
 
 	c.details.pane = container.NewStack(c.details.tabs)
-	c.details.pane.Hide()
+	if c.uiSet.DetailsOn {
+		c.details.on = true
+	} else {
+		c.details.pane.Hide()
+	}
 	return c.details.pane
 }
 
@@ -90,6 +93,7 @@ func (c *Client) toggleDetails() {
 		return
 	}
 	c.details.on = !c.details.on
+	c.uiSet.DetailsOn = c.details.on
 	if !c.details.on {
 		c.details.pane.Hide()
 		return
@@ -240,12 +244,6 @@ func hintLabel(s string) fyne.CanvasObject {
 	l := widget.NewLabelWithStyle(s, fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
 	l.Wrapping = fyne.TextWrapWord
 	return l
-}
-
-// isDateTimeType 报告某列是否适合给 NOW() 之类的时间快捷赋值。
-func isDateTimeType(t string) bool {
-	t = strings.ToLower(t)
-	return strings.Contains(t, "date") || strings.Contains(t, "time")
 }
 
 // staticBox 是只读数值框：没有点击、没有 chevron。

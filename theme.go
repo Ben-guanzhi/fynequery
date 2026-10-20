@@ -22,5 +22,11 @@ func crumbBorder() color.Color { return theme.Color(theme.ColorNameShadow) }
 // detailsBG 是右侧详情栏面板的底色。
 func detailsBG() color.Color { return theme.Color(theme.ColorNameMenuBackground) }
 
-// dividerColor 是详情栏属性行之间的分隔线颜色。
-func dividerColor() color.Color { return theme.Color(theme.ColorNameSeparator) }
+// zebraColor 是结果网格隔行条纹的颜色：前景色压到很低的 alpha 叠在底色上。
+// 取前景而不是某个固定浅灰，是为了明暗主题下都只轻微偏移背景；半透明则保证
+// 表格自己的选中高亮从条纹底下透出来，不会被不透明条纹盖掉。
+func zebraColor() color.Color {
+	fg := theme.Color(theme.ColorNameForeground)
+	r, g, b, _ := fg.RGBA()
+	return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: 14}
+}

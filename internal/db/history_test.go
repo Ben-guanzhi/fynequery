@@ -92,3 +92,41 @@ func TestHistoryTrailingFlush(t *testing.T) {
 	}
 	t.Fatal("the trailing flush never wrote the deferred statement")
 }
+
+// TestDeleteHistoryRemovesOneEntry pins that deleting a single statement
+// removes exactly that entry - both from the live log and from disk - while
+// every other statement survives, and that an unknown ID reports the miss.
+func TestDeleteHistoryRemovesOneEntry(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "history.json")
+	s := &Store{live: make(map[string]*Conn), historyFile: file}
+
+	for _, q := range []string{"SELECT 1", "SELECT 2", "SELECT 3"} {
+		s.RecordStatement("c0", "db", q, QueryResult{})
+	}
+	ids := make([]int64, 0, 3)
+	for _, e := range s.History() {
+		ids = append(ids, e.ID)
+	}
+
+	if !s.DeleteHistory(ids[1]) {
+		t.Fatal("deleting a recorded entry reported a miss")
+	}
+	got := s.History()
+	if len(got) != 2 {
+		t.Fatalf("entries after one delete = %d, want 2", len(got))
+	}
+	for _, e := range got {
+		if e.ID == ids[1] {
+			t.Fatalf("the deleted entry survived: %+v", got)
+		}
+	}
+	if disk := readHistoryFile(t, file); len(disk) != 2 {
+		t.Fatalf("on-disk entries after a delete = %d, want 2", len(disk))
+	}
+	if s.DeleteHistory(ids[1]) {
+		t.Fatal("deleting the same ID twice answered a hit")
+	}
+	if s.DeleteHistory(424242) {
+		t.Fatal("an unknown ID answered a hit")
+	}
+}

@@ -58,7 +58,10 @@ func (c *Client) showERDiagram(database, schema string) {
 			tables = tables[:erdMaxTables]
 		}
 		for _, t := range tables {
-			list, err := c.store.ForeignKeys(ctx, c.currentID, database, t.Schema, t.Name)
+			// 走 clientstore 的外键 memo（clientstore.go），而不是直连 store：
+			// 打开同一张 ER 图（或 ER 图 + 结构查看器 + 单元格编辑）时，每个表的
+			// 外键只打一次目录，其余从会话缓存取。单表取失败仍不阻断整图。
+			list, err := c.foreignKeys(ctx, c.currentID, database, t.Schema, t.Name)
 			if err != nil {
 				continue
 			}

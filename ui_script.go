@@ -49,7 +49,7 @@ func (c *Client) saveScript(w io.Writer) error {
 func (c *Client) showOpenScriptDialog() {
 	dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
 		if err != nil {
-			c.setStatus("打开失败：" + err.Error())
+			c.setStatusError("打开失败：" + err.Error())
 			return
 		}
 		if r == nil {
@@ -58,7 +58,7 @@ func (c *Client) showOpenScriptDialog() {
 		defer r.Close()
 		name := r.URI().Name()
 		if err := c.loadScript(r); err != nil {
-			c.setStatus("打开失败：" + err.Error())
+			c.setStatusError("打开失败：" + err.Error())
 			return
 		}
 		c.setStatus("已载入脚本 " + name)
@@ -68,7 +68,7 @@ func (c *Client) showOpenScriptDialog() {
 func (c *Client) showSaveScriptDialog() {
 	d := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
 		if err != nil {
-			c.setStatus("保存失败：" + err.Error())
+			c.setStatusError("保存失败：" + err.Error())
 			return
 		}
 		if w == nil {
@@ -80,7 +80,7 @@ func (c *Client) showSaveScriptDialog() {
 			werr = cerr
 		}
 		if werr != nil {
-			c.setStatus("保存失败：" + werr.Error())
+			c.setStatusError("保存失败：" + werr.Error())
 			return
 		}
 		c.setStatus("已保存脚本 " + name)

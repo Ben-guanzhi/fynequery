@@ -31,6 +31,21 @@ var pageSizes = []string{"10", "20", "50", "100", "200", "500"}
 
 const defaultPageSize = 100
 
+// rowLimitOptions is the 行数上限 dropdown's choices; "无限制" is the no-cap
+// sentinel limitValue answers as 0.
+var rowLimitOptions = []string{"100", "500", "1000", "5000", "无限制"}
+
+// validRowLimit accepts only the choices the dropdown offers, so a ui.json
+// holding a stale or hand-edited value falls back to the default.
+func validRowLimit(s string) bool {
+	for _, o := range rowLimitOptions {
+		if s == o {
+			return true
+		}
+	}
+	return false
+}
+
 // buildPageBar assembles the strip over the grid: page and row count on the
 // left, the window size and the turn buttons on the right. It starts hidden
 // because paging is opt-in and only a pageable result shows it.
@@ -64,6 +79,7 @@ func (c *Client) buildPageBar() *fyne.Container {
 func (c *Client) buildPagingCheck() *widget.Check {
 	check := widget.NewCheck("分页浏览", func(on bool) {
 		c.page.on = on
+		c.uiSet.PagingOn = on
 		if on {
 			c.page.limitSel.Disable()
 			return
@@ -168,7 +184,7 @@ func (c *Client) afterRunPaging(stmt string, res db.QueryResult, note string, si
 		c.page.stmt = stmt
 		c.page.note = note
 	} else if why != "" {
-		c.setStatus(why + "，本次结果未分页")
+		c.setStatusWarn(why + "，本次结果未分页")
 	}
 	c.refreshPageBar()
 }
@@ -214,7 +230,7 @@ func (c *Client) onPageSizeChange(s string) {
 		return
 	}
 	if c.grid.edits.any() {
-		c.setStatus(fmt.Sprintf("已设为每页 %d 行；有未保存的更改，先保存或放弃再翻页", n))
+		c.setStatusWarn(fmt.Sprintf("已设为每页 %d 行；有未保存的更改，先保存或放弃再翻页", n))
 		return
 	}
 	c.runPage(1)
@@ -226,7 +242,7 @@ func (c *Client) stepPage(delta int) {
 		return
 	}
 	if c.grid.edits.any() {
-		c.setStatus("有未保存的更改，先保存或放弃再翻页")
+		c.setStatusWarn("有未保存的更改，先保存或放弃再翻页")
 		return
 	}
 	target := c.page.no + delta
@@ -243,7 +259,7 @@ func (c *Client) runPage(pageNo int) {
 	connID, dbName, pageSize := c.querySession()
 	conn, err := c.store.OpenConn(connID)
 	if err != nil {
-		c.setStatus("错误：" + err.Error())
+		c.setStatusError("错误：" + err.Error())
 		return
 	}
 	stmt := c.page.stmt

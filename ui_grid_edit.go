@@ -226,7 +226,7 @@ func (c *Client) editSelectedCell() {
 	}
 	column := c.grid.cols[id.Col]
 	if c.grid.edits.isDeleted(id.Row) {
-		c.setStatus("该行已标记删除")
+		c.setStatusWarn("该行已标记删除")
 		return
 	}
 
@@ -307,6 +307,13 @@ func (c *Client) editSelectedCell() {
 		})
 		fkSelect.PlaceHolder = "从 " + cands.RefTable + " 选择"
 		form.AppendItem(widget.NewFormItem("", fkSelect))
+		if cands.Truncated {
+			// The picker list is a capped SELECT; say when it is, or the
+			// user assumes the box holds every reference value.
+			note := widget.NewLabel("候选已截断，未列全——可直接输入需要的值")
+			note.Importance = widget.LowImportance
+			form.AppendItem(widget.NewFormItem("", note))
+		}
 	})
 	d.SetOnClosed(giveUp)
 }
@@ -315,7 +322,12 @@ func (c *Client) editSelectedCell() {
 func (c *Client) afterEditQueued() {
 	// Displayed values just changed, so an active search re-collects its hits.
 	c.rescanGridSearch()
-	c.setStatus(c.editStatusText())
+	// 有未落库的改动时这一行是提醒（警告色），空闲的「就绪」仍是普通汇报。
+	if c.grid.edits.any() {
+		c.setStatusWarn(c.editStatusText())
+	} else {
+		c.setStatus(c.editStatusText())
+	}
 	c.updateEditButtons()
 }
 
@@ -344,6 +356,7 @@ func (c *Client) insertRow() {
 		return
 	}
 	c.grid.edits.inserts = append(c.grid.edits.inserts, make(map[string]string))
+	c.applyGridRowHeight()
 	c.afterEditQueued()
 }
 

@@ -88,17 +88,3 @@ func TestDetailsStaticBoxRendersNull(t *testing.T) {
 		t.Fatalf("非空值渲染 = %q, want %q", got, "Ann")
 	}
 }
-
-// TestIsDateTimeType covers the helper the deferred NOW() quick value keys off.
-func TestIsDateTimeType(t *testing.T) {
-	for _, s := range []string{"datetime", "DATE", "timestamp"} {
-		if !isDateTimeType(s) {
-			t.Fatalf("%q 应判定为日期时间类型", s)
-		}
-	}
-	for _, s := range []string{"int", "varchar", ""} {
-		if isDateTimeType(s) {
-			t.Fatalf("%q 不应判定为日期时间类型", s)
-		}
-	}
-}

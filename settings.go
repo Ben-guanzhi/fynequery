@@ -15,14 +15,23 @@ import (
 // like connections.json, and is written only on close (single UI-thread
 // writer), so no locking is needed here.
 type uiSettings struct {
-	Theme        string          `json:"theme"` // "" = follow system, "light", "dark"
-	WindowWidth  float32         `json:"windowWidth"`
-	WindowHeight float32         `json:"windowHeight"`
-	SidebarRatio float32         `json:"sidebarRatio"`
-	EditorRatio  float32         `json:"editorRatio"`
-	ActiveTab    int             `json:"activeTab"`
-	PageSize     int             `json:"pageSize,omitempty"`
-	Tabs         []queryTabDraft `json:"tabs,omitempty"`
+	Theme        string  `json:"theme"` // "" = follow system, "light", "dark"
+	WindowWidth  float32 `json:"windowWidth"`
+	WindowHeight float32 `json:"windowHeight"`
+	SidebarRatio float32 `json:"sidebarRatio"`
+	EditorRatio  float32 `json:"editorRatio"`
+	ActiveTab    int     `json:"activeTab"`
+	PageSize     int     `json:"pageSize,omitempty"`
+	// Toolbar choices that used to reset on every start: the 分页浏览 switch,
+	// the 行数上限 selection ("" = default) and the details pane's open state.
+	PagingOn  bool   `json:"pagingOn,omitempty"`
+	RowLimit  string `json:"rowLimit,omitempty"`
+	DetailsOn bool   `json:"detailsOn,omitempty"`
+	// The session's last standing, pre-selected on start - the picker shows it
+	// but the connection is not opened, 连接 still gets the tap.
+	LastConnectionID string          `json:"lastConnectionID,omitempty"`
+	LastDatabase     string          `json:"lastDatabase,omitempty"`
+	Tabs             []queryTabDraft `json:"tabs,omitempty"`
 }
 
 // queryTabDraft is one editor tab's unsaved work: the SQL text plus whether

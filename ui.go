@@ -62,12 +62,15 @@ type gridState struct {
 	table *widget.Table
 	// header and rows are what the grid shows; cols holds the plain column
 	// names and colTypes the declared types the header was derived from.
-	// lastRows keeps the unformatted result the edit queue diffs against.
-	header   []string
-	rows     [][]string
-	cols     []string
-	colTypes []string
-	lastRows [][]interface{}
+	// lastRows keeps the unformatted result the edit queue diffs against -
+	// and it is what tells a real SQL NULL from a text column that happens
+	// to hold the string "NULL".
+	header     []string
+	rows       [][]string
+	cols       []string
+	colTypes   []string
+	lastRows   [][]interface{}
+	alignRight []bool // per-column right alignment, cached when the header is set
 	// src names the single table a writable result came from; edits queues the
 	// changes to write back (see changes.go).
 	src   db.TableRef
@@ -108,10 +111,12 @@ type memoCache struct {
 }
 
 // pickerState is the sidebar's connection picker: the selector, the 连接/断开
-// toggle beside it, and the list index it currently stands for (-1 for none).
+// toggle beside it, the 测试 button, and the list index it currently stands
+// for (-1 for none).
 type pickerState struct {
 	sel    *widget.Select
 	toggle *widget.Button
+	test   *widget.Button
 	idx    int
 }
 
@@ -145,6 +150,8 @@ type histState struct {
 	filter      string
 	view        []db.HistoryEntry
 	filterEntry *keyedEntry
+	// selected is the list row the 删除选中 button acts on; -1 for none.
+	selected int
 }
 
 // tabStack is the query editor stack: independent editors sharing one result
@@ -189,6 +196,20 @@ type Client struct {
 	tree   treeState
 	hist   histState
 	tabs   tabStack
+
+	// testCancel and connectCancel hold the abandon handles of in-flight
+	// handshakes (Client.background's return value). Both are UI-thread
+	// owned: 停止 clicks read them, and only the handshake's own callback
+	// or a stop click ever clears them.
+	testCancel    func()
+	connectCancel func()
+	// exportCancel abandons a running INSERT export (its catalog read) when a
+	// new export starts, so a slow first export cannot linger behind a second.
+	// exportFile is the handle the in-flight INSERT export still holds open;
+	// abandoning it must close that too, since the dropped callback would
+	// otherwise leak the writer.
+	exportCancel func()
+	exportFile   fyne.URIWriteCloser
 
 	// app-level keyboard shortcuts, consulted by the canvas and by every entry
 	// that can hold focus (see ui_keys.go); keyDocs renders the 快捷键 dialog
@@ -281,9 +302,10 @@ func newClient(a fyne.App, w fyne.Window) *Client {
 	return c
 }
 
-// closeAll flushes what the throttled writes left pending and closes every live
-// database pool before quitting.
+// closeAll flushes what the throttled writes left pending, abandons any
+// in-flight export, and closes every live database pool before quitting.
 func (c *Client) closeAll() {
+	c.releaseExport()
 	c.store.PersistHistory()
 	c.store.CloseAll()
 	c.mu.Lock()
@@ -322,6 +344,8 @@ func (c *Client) buildUI() fyne.CanvasObject {
 	c.bindKey(fyne.KeyEnter, "", func() { c.runCurrent() }) // same action, numpad Enter
 	c.bindKey(fyne.KeyO, "打开 .sql 脚本到当前标签", func() { c.showOpenScriptDialog() })
 	c.bindKey(fyne.KeyS, "把当前标签保存为 .sql 脚本", func() { c.showSaveScriptDialog() })
+	c.bindKey(fyne.KeyF, "聚焦「在结果中搜索」", c.focusResultSearch)
+	c.docKey("Tab    在编辑器内插入缩进（两个空格，不跳出编辑器）")
 	// Copy stays a canvas-level registration on purpose: an entry that claimed
 	// Ctrl+C from the table could no longer copy its own selection.
 	copySel := &desktop.CustomShortcut{KeyName: fyne.KeyC, Modifier: fyne.KeyModifierControl}
@@ -333,6 +357,12 @@ func (c *Client) buildUI() fyne.CanvasObject {
 	split := container.NewHSplit(sidebar, query)
 	split.Offset = 0.22
 	c.refreshConnections()
+	if c.uiSet.LastDatabase != "" {
+		// The 数据库 dropdown restores itself from the live catalog once a
+		// connection is open; remembering the choice keeps the picker's own
+		// target in step between starts.
+		c.currentDB = c.uiSet.LastDatabase
+	}
 	c.refreshHistory()
 	c.refreshSchema() // shows the 未连接 root until a connection is opened
 
@@ -372,27 +402,6 @@ func (c *Client) saveWindowSettings(w fyne.Window) {
 	saveUISettings(uiSettingsPath(), s)
 }
 
-// runAsync runs work off the UI thread and marshals the follow-up back to the
-// main goroutine (fyne.Do in production, inline in tests) with work's result.
-// The window stays responsive while network/catalog work happens.
-func (c *Client) runAsync(work func(), after func()) {
-	if c.dispatch == nil {
-		work()
-		if after != nil {
-			after()
-		}
-		return
-	}
-	go func() {
-		work()
-		c.dispatch(func() {
-			if after != nil {
-				after()
-			}
-		})
-	}()
-}
-
 // background runs one server round trip off the event thread and hands back
 // the way to give up on it. Every catalog reader takes a context now, so each
 // caller needs a thread to run it on and a way to stop: on a remote server a
@@ -410,7 +419,7 @@ func (c *Client) runAsync(work func(), after func()) {
 // had already finished still reports, because the next one is queued behind it
 // and cannot be overtaken by it.
 //
-// Like runAsync and loadChildren, it stays inline when asyncRun is off: a test
+// Like loadChildren, it stays inline when asyncRun is off: a test
 // gets a deterministic call instead of a goroutine it would have to wait for.
 func (c *Client) background(work func(context.Context), after func()) (cancel func()) {
 	ctx, stop := context.WithCancel(context.Background())
@@ -445,11 +454,43 @@ func (c *Client) focusEditor() {
 	}
 }
 
-// setStatus updates the bottom status bar.
-func (c *Client) setStatus(text string) {
-	if c.status != nil {
-		c.status.SetText(text)
+// focusResultSearch hands the keyboard to the 在结果中搜索 box (Ctrl+F): it
+// sits in the cell bar under the grid and is otherwise only found by eye.
+func (c *Client) focusResultSearch() {
+	if c.find.entry != nil && c.win != nil {
+		c.win.Canvas().Focus(c.find.entry)
 	}
+}
+
+// setStatus updates the bottom status bar with an informational line. Every
+// call resets the importance, so a red error line cannot linger while an
+// informational message follows it.
+func (c *Client) setStatus(text string) {
+	if c.status == nil {
+		return
+	}
+	c.status.Importance = widget.MediumImportance
+	c.status.SetText(text)
+}
+
+// setStatusError writes the same line in danger red: failures (连接/测试/
+// 导出/脚本读写) are the messages the eye should find first in the strip.
+func (c *Client) setStatusError(text string) {
+	if c.status == nil {
+		return
+	}
+	c.status.Importance = widget.DangerImportance
+	c.status.SetText(text)
+}
+
+// setStatusWarn writes an attention line (warnings, blocked actions) in the
+// theme's warning colour - more urgent than info, less than a failure.
+func (c *Client) setStatusWarn(text string) {
+	if c.status == nil {
+		return
+	}
+	c.status.Importance = widget.WarningImportance
+	c.status.SetText(text)
 }
 
 // appendStatus extends the line just written, for the verdict a plain "返回 N 行"

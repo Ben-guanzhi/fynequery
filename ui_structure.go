@@ -119,9 +119,9 @@ func (c *Client) showStructureDialogBody(data structureData) {
 	}
 	switch {
 	case data.idxErr != nil:
-		c.setStatus("索引读取失败：" + data.idxErr.Error())
+		c.setStatusWarn("索引读取失败：" + data.idxErr.Error())
 	case data.fkErr != nil:
-		c.setStatus("外键读取失败：" + data.fkErr.Error())
+		c.setStatusWarn("外键读取失败：" + data.fkErr.Error())
 	default:
 		c.setStatus("就绪")
 	}

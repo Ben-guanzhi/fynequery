@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"strconv"
 	"strings"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
@@ -104,19 +106,26 @@ func (c *Client) buildQueryToolbar() *fyne.Container {
 	cancelRunBtn.Importance = widget.HighImportance
 	cancelRunBtn.Disable()
 	c.cancelRunBtn = cancelRunBtn
-	clearBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+	// 清空只有图标、没有文字，工具栏上不可发现，挂一个悬停提示（见 ui_tooltip.go）。
+	clearBtn := attachTooltip(widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
 		c.tabs.entry.SetText("")
-	})
+	}), "清空编辑器")
 	// The shortcut hint used to be a 300px label here, which alone pushed the
 	// toolbar past the width of the main pane and clipped 导出/主题. It is now a
 	// button over the dialog that bindKey documents (see ui_keys.go).
 	keysBtn := widget.NewButtonWithIcon("快捷键", theme.HelpIcon(), c.showKeysDialog)
 	keysBtn.Importance = widget.LowImportance
 
-	limitSel := widget.NewSelect([]string{"100", "500", "1000", "5000", "无限制"}, func(s string) {
+	limitSel := widget.NewSelect(rowLimitOptions, func(s string) {
 		c.page.limitText = s
+		c.uiSet.RowLimit = s
 	})
-	limitSel.SetSelected("1000")
+	if validRowLimit(c.uiSet.RowLimit) {
+		limitSel.SetSelected(c.uiSet.RowLimit)
+	} else {
+		limitSel.SetSelected("1000")
+	}
+	c.page.limitText = limitSel.Selected
 	c.page.limitSel = limitSel
 
 	exportBtn := widget.NewButtonWithIcon("导出", theme.DownloadIcon(), func() {
@@ -143,6 +152,17 @@ func (c *Client) buildQueryToolbar() *fyne.Container {
 	}
 
 	c.page.check = c.buildPagingCheck()
+	if c.uiSet.PagingOn {
+		// The switch itself restores its look; the callback's side effects
+		// (greyed-out limit, reset page state) are replayed by hand, because
+		// SetChecked does not fire the toggle.
+		c.page.on = true
+		c.page.stmt = ""
+		c.page.note = ""
+		c.page.no = 1
+		c.page.check.SetChecked(true)
+		limitSel.Disable()
+	}
 	return container.NewHBox(
 		c.dbs.sel,
 		runBtn, cancelRunBtn, clearBtn, keysBtn,
@@ -158,13 +178,24 @@ func (c *Client) buildQueryToolbar() *fyne.Container {
 
 // buildResultGrid builds the shared result table: header cells are buttons so a
 // column header can be tapped to sort, and each cell's style comes from
-// gridCellState (edits, deletes, NULLs, search hits).
+// gridCellState (edits, deletes, NULLs, search hits). Cells are a translucent
+// zebra rectangle under the label - see zebraColor for why it must stay
+// translucent - and numeric columns align to the trailing edge like TablePlus.
 func (c *Client) buildResultGrid() {
 	c.grid.table = widget.NewTable(
 		func() (int, int) { return c.gridDims() },
-		func() fyne.CanvasObject { return widget.NewLabel("") },
+		func() fyne.CanvasObject {
+			stripe := canvas.NewRectangle(color.Transparent)
+			stripe.CornerRadius = 0
+			return container.NewStack(stripe, widget.NewLabel(""))
+		},
 		func(id widget.TableCellID, obj fyne.CanvasObject) {
-			label := obj.(*widget.Label)
+			pair, ok := obj.(*fyne.Container)
+			if !ok || len(pair.Objects) != 2 {
+				return
+			}
+			stripe, _ := pair.Objects[0].(*canvas.Rectangle)
+			label, _ := pair.Objects[1].(*widget.Label)
 			text, state := c.gridCellState(id.Row, id.Col)
 			label.Truncation = fyne.TextTruncateEllipsis
 			label.Alignment = fyne.TextAlignLeading
@@ -180,7 +211,7 @@ func (c *Client) buildResultGrid() {
 			case cellInserted:
 				label.Importance = widget.HighImportance
 			}
-			if state == cellNormal && text == "NULL" {
+			if state == cellNormal && c.cellIsNull(id.Row, id.Col) {
 				// NULLs render dim and italic so they read as empty, not as the
 				// literal string "NULL".
 				label.TextStyle = fyne.TextStyle{Italic: true}
@@ -189,6 +220,17 @@ func (c *Client) buildResultGrid() {
 			if state == cellNormal && c.isSearchHit(id.Row, id.Col) {
 				label.TextStyle = fyne.TextStyle{Bold: true}
 				label.Importance = widget.HighImportance
+			}
+			if c.colAlignsRight(id.Col) {
+				label.Alignment = fyne.TextAlignTrailing
+			}
+			// Zebra stripes only on data cells: header and the row-number column
+			// keep their own plain look.
+			if stripe != nil && id.Col >= 0 && id.Row%2 == 1 && state != cellEdited &&
+				state != cellDeleted && state != cellInserted {
+				stripe.FillColor = zebraColor()
+			} else if stripe != nil {
+				stripe.FillColor = color.Transparent
 			}
 			// SetText refreshes the cell internally; no extra Refresh needed.
 			label.SetText(text)
@@ -341,7 +383,7 @@ func (c *Client) dbSelRefresh() {
 	}, func() {
 		if dbErr != nil {
 			c.dbs.sel.Enable()
-			c.setStatus("数据库列表加载失败：" + dbErr.Error())
+			c.setStatusError("数据库列表加载失败：" + dbErr.Error())
 			return
 		}
 		if len(dbs) == 0 {
@@ -405,7 +447,7 @@ func (c *Client) runCurrent() {
 	}
 	stmts := db.SplitStatements(q)
 	if len(stmts) == 0 {
-		c.setStatus("没有可执行的语句（只有注释或空白）")
+		c.setStatusWarn("没有可执行的语句（只有注释或空白）")
 		return
 	}
 	// A new result replaces the grid and setEditContext resets the edit queue
@@ -413,7 +455,7 @@ func (c *Client) runCurrent() {
 	// Paging and sorting already refuse to move while changes are pending;
 	// execution is the one path that could still drop them, so it asks first.
 	if c.grid.edits.any() {
-		dialog.ShowConfirm("有未保存的更改",
+		dialog.ShowConfirm("确认执行",
 			"结果表上有未保存的更改，执行新查询会把它们丢弃。仍要执行吗？",
 			func(ok bool) {
 				if ok {
@@ -433,7 +475,7 @@ func (c *Client) runStatements(stmts []string) {
 	connID, dbName, pageSize := c.querySession()
 	conn, err := c.store.OpenConn(connID)
 	if err != nil {
-		c.setStatus("错误：" + err.Error())
+		c.setStatusError("错误：" + err.Error())
 		return
 	}
 	limit := c.limitValue()
@@ -514,7 +556,7 @@ func (c *Client) runTracked(busy string, work func(context.Context) (db.QueryRes
 	c.mu.Lock()
 	if c.busy {
 		c.mu.Unlock()
-		c.setStatus("已有查询在执行，请等待或点「取消」")
+		c.setStatusWarn("已有查询在执行，请等待或点「取消」")
 		return false
 	}
 	ctx, cancel := context.WithCancel(context.Background())

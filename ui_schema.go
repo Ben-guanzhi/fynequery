@@ -25,10 +25,11 @@ func (c *Client) buildSchemaView() fyne.CanvasObject {
 	c.tree.rows = container.NewVBox()
 	c.tree.term = ""
 
-	newBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
+	newInner := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
 		c.showConnDialog(nil)
 	})
-	newBtn.Importance = widget.LowImportance
+	newInner.Importance = widget.LowImportance
+	newBtn := attachTooltip(newInner, "新建连接")
 	header := container.NewBorder(nil, nil, nil, newBtn,
 		widget.NewLabelWithStyle("导航", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
 
@@ -36,14 +37,16 @@ func (c *Client) buildSchemaView() fyne.CanvasObject {
 	c.tree.filterEntry.PlaceHolder = "过滤已加载对象"
 	c.tree.filterEntry.onShortcut = c.entryShortcut
 	c.tree.filterEntry.OnChanged = func(string) { c.setTreeFilter(c.tree.filterEntry.Text) }
-	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
+	refreshInner := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
 		c.refreshSchema()
 	})
-	refreshBtn.Importance = widget.LowImportance
-	searchBtn := widget.NewButtonWithIcon("", theme.SearchIcon(), func() {
+	refreshInner.Importance = widget.LowImportance
+	refreshBtn := attachTooltip(refreshInner, "重新加载结构树")
+	searchInner := widget.NewButtonWithIcon("", theme.SearchIcon(), func() {
 		c.showSearchDialog()
 	})
-	searchBtn.Importance = widget.LowImportance
+	searchInner.Importance = widget.LowImportance
+	searchBtn := attachTooltip(searchInner, "按名称跨库快速找表（Ctrl+P）")
 	filterRow := container.NewBorder(nil, nil, nil,
 		container.NewHBox(searchBtn, refreshBtn), c.tree.filterEntry)
 

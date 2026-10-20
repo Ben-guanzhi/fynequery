@@ -1,8 +1,10 @@
 package db
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mssqlEncrypt must always return a value go-mssqldb's msdsn parser accepts
@@ -139,5 +141,38 @@ func TestPgURLEscapesCredentials(t *testing.T) {
 	want := "postgres://u:p%40ss%20w%3A1@h:5432/db?sslmode=require"
 	if dsn != want {
 		t.Errorf("pgURL = %q, want %q", dsn, want)
+	}
+}
+
+// TestTestConnectionHonorCancel pins the whole point of ctx: against a host
+// that never answers (a non-routable address, so the dial just sits there) a
+// canceled context must make TestConnection give up quickly instead of
+// hanging the 停止 button until the OS times out the dial.
+func TestTestConnectionHonorCancel(t *testing.T) {
+	// 10.255.255.1 is RFC1918 and black-holed on ordinary networks: a TCP
+	// connect to it neither succeeds nor gets a fast RST, so without
+	// cancellation the handshake would outlive any reasonable wait.
+	cfg := ConnConfig{
+		Type:     DbTypeMySQL,
+		Host:     "10.255.255.1",
+		Port:     3306,
+		Username: "u",
+		Password: "p",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	db, err := TestConnection(ctx, cfg)
+	if db != nil {
+		db.Close()
+	}
+	if err == nil {
+		t.Fatal("a canceled handshake against a dead host answered success")
+	}
+	if elapsed := time.Since(start); elapsed > 15*time.Second {
+		t.Fatalf("cancellation did not bound the handshake: took %s", elapsed)
 	}
 }

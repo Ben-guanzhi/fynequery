@@ -14,13 +14,19 @@ import (
 )
 
 // TestConnection opens the DSN and pings; the caller closes the handle.
-func TestConnection(cfg ConnConfig) (*sql.DB, error) {
+// ctx bounds the handshake: a server that never answers is abandoned when the
+// caller cancels (the 停止 button does that) instead of waiting on the OS
+// dial forever.
+func TestConnection(ctx context.Context, cfg ConnConfig) (*sql.DB, error) {
 	db, err := createConnection(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connection failed: %w", err)
 	}
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("connection test canceled")
+		}
 		return nil, fmt.Errorf("connection failed: %w", err)
 	}
 	return db, nil
@@ -28,7 +34,14 @@ func TestConnection(cfg ConnConfig) (*sql.DB, error) {
 
 // connect opens and caches a live connection, closing any previous one.
 func (c *Store) Connect(cfg ConnConfig) error {
-	db, err := TestConnection(cfg)
+	return c.ConnectContext(context.Background(), cfg)
+}
+
+// ConnectContext is Connect with a caller-owned handshake budget: the UI runs
+// it on its background primitive so a dead server surfaces as a cancel, not a
+// frozen 连接 button.
+func (c *Store) ConnectContext(ctx context.Context, cfg ConnConfig) error {
+	db, err := TestConnection(ctx, cfg)
 	if err != nil {
 		return err
 	}
