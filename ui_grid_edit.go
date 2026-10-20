@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -23,6 +24,10 @@ import (
 // updates keyed by row then column, deleted rows, and queued new rows.
 type gridEditState struct {
 	updates map[int]map[string]string
+	// nulls marks which queued values mean SQL NULL. The queue stores
+	// strings, where "" on its own already means NULL - so writing an empty
+	// STRING (a perfectly good value in most engines) needs the distinction.
+	nulls   map[int]map[string]bool
 	deletes map[int]bool
 	inserts []map[string]string
 }
@@ -30,6 +35,7 @@ type gridEditState struct {
 func newGridEditState() *gridEditState {
 	return &gridEditState{
 		updates: make(map[int]map[string]string),
+		nulls:   make(map[int]map[string]bool),
 		deletes: make(map[int]bool),
 	}
 }
@@ -65,6 +71,36 @@ func (g *gridEditState) isDeleted(row int) bool {
 // the inserts slice.
 func (g *gridEditState) setInsertEdit(i int, column, value string) {
 	g.inserts[i][column] = value
+}
+
+// setCellValue queues one cell change without a dialog: the entry point behind
+// the details pane's 设为 NULL / 设为空串, and what a programmatic edit needs.
+// An empty value means NULL; that is the queue's own convention, so a column can
+// be set to NULL but not to an empty string. The limit predates this entry point
+// and stays: redefining "" is a write-path change, not a polish.
+//
+// It reports the reason it refused, or "" when the edit was queued.
+func (c *Client) setCellValue(row, col int, value string) string {
+	if !c.gridEditable() {
+		return "该结果不可编辑（编辑需 SELECT * 单表）"
+	}
+	if col < 0 || col >= len(c.grid.cols) {
+		return "该列不在这个结果里"
+	}
+	if c.grid.edits.isDeleted(row) {
+		return "该行已标记删除，先取消删除再改值"
+	}
+	if row < len(c.grid.rows) {
+		c.grid.edits.setUpdate(row, c.grid.cols[col], value)
+		return ""
+	}
+	i := row - len(c.grid.rows)
+	if i < 0 || i >= len(c.grid.edits.inserts) {
+		return "该新行已不在队列里"
+	}
+	c.grid.edits.setInsertEdit(i, c.grid.cols[col], value)
+	c.afterEditQueued()
+	return ""
 }
 
 // sortedInts returns map keys in ascending order.
@@ -111,8 +147,9 @@ func (c *Client) collectChanges() []db.RowChange {
 	return out
 }
 
-// editsOf renders one cell map as CellEdits in result-column order. An empty
-// queued value means NULL.
+// editsOf renders one cell map as CellEdits in result-column order. A queued
+// value that is "" means NULL unless it was queued as a value - see
+// gridEditState.nulls.
 func (c *Client) editsOf(cells map[string]string) []db.CellEdit {
 	edits := make([]db.CellEdit, 0, len(cells))
 	for _, col := range c.grid.cols {
@@ -214,6 +251,24 @@ func (c *Client) editableTableName() (string, error) {
 
 // ---- actions ----
 
+// multilineValue says whether a cell's value needs the taller box: a value with
+// line breaks, or one too long to read across a single line. CJK counts wide,
+// like the grid's own column measuring does.
+func multilineValue(s string) bool {
+	if strings.ContainsAny(s, "\n\r") {
+		return true
+	}
+	n := 0
+	for _, r := range s {
+		if utf8.RuneLen(r) >= 3 {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n > 80
+}
+
 // editSelectedCell opens a value dialog for the selected cell and queues the
 // change. An empty input (or the NULL tick) writes NULL.
 func (c *Client) editSelectedCell() {
@@ -237,11 +292,24 @@ func (c *Client) editSelectedCell() {
 		}
 	}
 
-	valueEntry := widget.NewEntry()
-	valueEntry.SetText(current)
-	valueEntry.TextStyle = fyne.TextStyle{Monospace: true}
-	nullCheck := widget.NewCheck("写入 NULL（勾选后忽略输入）", nil)
+	// Two boxes, one of them in use. A JSON blob or a TEXT column that already
+	// holds line breaks is unreadable - and unfixable - in a one-line entry, so
+	// those get the taller box; everything else keeps Enter's meaning inside a
+	// form, which is to submit it.
+	single := widget.NewEntry()
+	single.TextStyle = fyne.TextStyle{Monospace: true}
+	single.SetText(current)
+	multi := widget.NewMultiLineEntry()
+	multi.TextStyle = fyne.TextStyle{Monospace: true}
+	multi.SetText(current)
+	multi.Wrapping = fyne.TextWrapOff
+	useMulti := multilineValue(current)
+	valueEntry := single
+	if useMulti {
+		valueEntry = multi
+	}
 
+	nullCheck := widget.NewCheck("写入 NULL（勾选后忽略输入）", nil)
 	// The picker row is not here yet: its candidates come from another table,
 	// so they are read after the dialog is up (see below).
 	formItems := []*widget.FormItem{
@@ -255,12 +323,11 @@ func (c *Client) editSelectedCell() {
 		if nullCheck.Checked {
 			value = ""
 		}
-		if id.Row < len(c.grid.rows) {
-			c.grid.edits.setUpdate(id.Row, column, value)
-		} else {
-			c.grid.edits.setInsertEdit(id.Row-len(c.grid.rows), column, value)
+		if err := c.setCellValue(id.Row, id.Col, value); err != "" {
+			c.setStatusWarn(err)
+			return
 		}
-		c.afterEditQueued()
+		c.setStatus(column + " 已排队待保存")
 		if d != nil {
 			d.Hide()
 		}
@@ -270,7 +337,11 @@ func (c *Client) editSelectedCell() {
 	form.SubmitText = "应用"
 
 	d = dialog.NewCustom(fmt.Sprintf("编辑 %s", column), "取消", form, c.win)
-	d.Resize(fyne.NewSize(380, 220))
+	if useMulti {
+		d.Resize(fyne.NewSize(480, 320))
+	} else {
+		d.Resize(fyne.NewSize(380, 220))
+	}
 	d.Show()
 
 	// A single-column foreign key gets a picker fed by the referenced table,
@@ -467,7 +538,7 @@ func (c *Client) showChangePreview(set db.ChangeSet, statements []string, err er
 			}
 			c.setStatus(fmt.Sprintf("已提交 %d 行更改，正在刷新 ...", applied))
 			d.Hide()
-			c.runCurrent() // re-reads the table and resets the queue
+			c.runAllStatements() // re-reads the table and resets the queue
 		})
 	}
 	buttons := container.NewHBox(applyBtn)

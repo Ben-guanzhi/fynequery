@@ -313,6 +313,11 @@ func (c *Client) buildBottomBar() fyne.CanvasObject {
 		c.copySelectedRow()
 	})
 	rowCopyBtn.Importance = widget.LowImportance
+	// 复制为 keeps the export formats but skips the file dialog: the grid goes
+	// straight to the clipboard, which is where it is usually wanted next.
+	copyAsBtn := widget.NewButtonWithIcon("复制为", theme.ContentCopyIcon(), nil)
+	copyAsBtn.Importance = widget.LowImportance
+	copyAsBtn.OnTapped = func() { c.showCopyAsMenu(copyAsBtn) }
 
 	c.status = widget.NewLabel("就绪")
 	c.act.filter = widget.NewButtonWithIcon("过滤", theme.SearchIcon(), func() {
@@ -346,7 +351,7 @@ func (c *Client) buildBottomBar() fyne.CanvasObject {
 	centre := container.NewHBox(
 		widget.NewLabel("单元格"), c.grid.view,
 		c.find.entry, c.find.label,
-		copyBtn, rowCopyBtn,
+		copyBtn, rowCopyBtn, copyAsBtn,
 	)
 	return container.NewBorder(nil, nil, c.status, editActions, centre)
 }
@@ -482,7 +487,46 @@ func (c *Client) runWithScope(scope runScope) {
 		c.setStatusWarn("没有可执行的语句（光标在只有注释或空白的地方）")
 		return
 	}
+	if warn := c.destructiveWarning(plan); warn != "" {
+		dialog.ShowConfirm("确认执行破坏性语句", warn, func(confirmed bool) {
+			if !confirmed {
+				c.setStatusWarn("已取消：破坏性语句没有执行")
+				return
+			}
+			c.confirmPendingEdits(plan)
+		}, c.win)
+		return
+	}
 	c.confirmPendingEdits(plan)
+}
+
+// destructiveWarning describes why a plan is destructive, or returns "" when
+// it is not (or when it cannot tell - see db.DestructiveRisk). The statement
+// goes in the dialog so the user is confirming text they can read, not a
+// summary somebody else wrote.
+func (c *Client) destructiveWarning(plan runPlan) string {
+	var first, reason, kinds string
+	n := 0
+	for _, s := range plan.stmts {
+		kind, why := db.DestructiveRisk(s)
+		if kind == db.RiskNone {
+			continue
+		}
+		n++
+		if n == 1 {
+			first, reason, kinds = s, why, string(kind)
+		} else {
+			kinds += " / " + string(kind)
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	head := reason
+	if n > 1 {
+		head = fmt.Sprintf("这批语句里有 %d 条是破坏性的（%s）：%s", n, kinds, reason)
+	}
+	return head + "\n\n" + first
 }
 
 // confirmPendingEdits runs the plan, asking first if the grid holds changes

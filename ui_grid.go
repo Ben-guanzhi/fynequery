@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sort"
@@ -152,26 +153,105 @@ func (c *Client) insertColumnTypes(ctx context.Context, connID, database, schema
 	return typ, types, nil
 }
 
-// writeInsertScript renders the current raw result as INSERT statements for
-// the table the query read from. Only a single-table SELECT * can be turned
-// back into INSERTs; anything else is refused with a reason. The engine and the
-// column types come from insertColumnTypes: the grid shows values, not
-// declarations.
+// writeInsertScript renders the current raw result as INSERT statements and
+// writes them into the chosen file.
 func (c *Client) writeInsertScript(f fyne.URIWriteCloser, dbType string, types map[string]string) error {
-	if c.grid.src.Table == "" {
-		return fmt.Errorf("INSERT 导出需要单表的 SELECT * 查询")
-	}
-	name, err := db.TableName(dbType, c.grid.src.Database,
-		db.DefaultSchema(dbType, c.grid.src.Schema), c.grid.src.Table)
-	if err != nil {
-		return err
-	}
-	script, err := db.InsertScript(dbType, name, c.grid.src.Table, c.grid.cols, types, c.grid.lastRows)
+	script, err := c.renderInsertScript(dbType, types)
 	if err != nil {
 		return err
 	}
 	_, err = f.Write([]byte(script))
 	return err
+}
+
+// renderInsertScript is the text behind both 「导出 → INSERT」 and 「复制为 →
+// INSERT」. Only a single-table SELECT * can be turned back into INSERTs; the
+// engine and the column types come from insertColumnTypes - the grid holds
+// values, not declarations.
+func (c *Client) renderInsertScript(dbType string, types map[string]string) (string, error) {
+	src := c.grid.src
+	if src.Table == "" {
+		return "", fmt.Errorf("INSERT 需要单表的 SELECT * 查询")
+	}
+	name, err := db.TableName(dbType, src.Database,
+		db.DefaultSchema(dbType, src.Schema), src.Table)
+	if err != nil {
+		return "", err
+	}
+	return db.InsertScript(dbType, name, src.Table, c.grid.cols, types, c.grid.lastRows)
+}
+
+// copyResultAs puts the whole grid on the clipboard in one of the export
+// formats. CSV keeps the header and drops the BOM: that prefix exists so Excel
+// reads a FILE as UTF-8, and the clipboard carries text, not bytes. The INSERT
+// form needs each column's declared type, so it is the one round trip in this
+// path - it runs through background, and a second copy abandons the first.
+func (c *Client) copyResultAs(kind string) {
+	if len(c.grid.header) == 0 {
+		c.setStatusWarn("没有可复制的结果")
+		return
+	}
+	if kind == "insert" {
+		if c.grid.src.Table == "" {
+			// Refused before the round trip: with no table name there is
+			// nothing to render, and guessing one would write into a table
+			// nobody chose.
+			c.setStatusWarn("复制为 INSERT 需要单表的 SELECT * 查询")
+			return
+		}
+		c.releaseExport()
+		connID, ref := c.currentID, c.grid.src
+		var (
+			dbType string
+			types  map[string]string
+			err    error
+			script string
+		)
+		c.setStatus("生成 INSERT 语句 ...")
+		c.exportCancel = c.background(func(ctx context.Context) {
+			dbType, types, err = c.insertColumnTypes(ctx, connID, ref.Database, ref.Schema, ref.Table)
+			if err == nil {
+				script, err = c.renderInsertScript(dbType, types)
+			}
+		}, func() {
+			defer c.releaseExport()
+			if err != nil {
+				c.setStatusError("复制失败：" + err.Error())
+				return
+			}
+			fyne.CurrentApp().Clipboard().SetContent(script)
+			c.setStatus(fmt.Sprintf("已复制 %d 行（INSERT）", len(c.grid.rows)))
+		})
+		return
+	}
+	var buf bytes.Buffer
+	var err error
+	switch kind {
+	case "json":
+		err = db.WriteJSON(&buf, c.grid.header, c.grid.rows)
+	default:
+		err = db.WriteCSV(&buf, c.grid.header, c.grid.rows)
+	}
+	if err != nil {
+		c.setStatusError("复制失败：" + err.Error())
+		return
+	}
+	fyne.CurrentApp().Clipboard().SetContent(buf.String())
+	c.setStatus(fmt.Sprintf("已复制 %d 行（%s）", len(c.grid.rows), strings.ToUpper(kind)))
+}
+
+// showCopyAsMenu opens the 复制为 menu under its button. The three entries are
+// the export formats the file dialog offers, minus the dialog.
+func (c *Client) showCopyAsMenu(anchor fyne.CanvasObject) {
+	menu := fyne.NewMenu("",
+		fyne.NewMenuItem("CSV（带表头）", func() { c.copyResultAs("csv") }),
+		fyne.NewMenuItem("JSON", func() { c.copyResultAs("json") }),
+		fyne.NewMenuItem("INSERT 语句", func() { c.copyResultAs("insert") }),
+	)
+	pop := widget.NewPopUpMenu(menu, c.win.Canvas())
+	pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(anchor)
+	pos.Y += anchor.Size().Height
+	pop.ShowAtPosition(pos)
 }
 
 // copyCell copies the selected cell's full value to the clipboard.

@@ -215,12 +215,23 @@ func (c *Client) detailsFieldRow(f detailsField, row int) fyne.CanvasObject {
 	return container.NewBorder(nil, nil, left, nil, vb)
 }
 
-// showQuickValues 是数值框右侧 chevron 的菜单。
+// assignCell 把某一格直接排队成 NULL（空串即 NULL，见 setCellValue 的注释），
+// 走的是编辑器对话框用的同一条队列，所以落库前照样有预览、照样在一个事务里提交。
+func (c *Client) assignCell(f detailsField, row int) {
+	if err := c.setCellValue(row, f.Col, ""); err != "" {
+		c.setStatusWarn(err)
+		return
+	}
+	c.setStatus(f.Name + " 已设为 NULL")
+}
+
+// showQuickValues 是数值框右侧 chevron 的菜单。四条动作全部走既有写入路径：
+// 复制值、打开编辑器（对话框驱动）、直接把这一格排队成 NULL 或空串。
 //
-// 只放两条走既有写入路径的安全动作：复制值、打开编辑器。内置版的
-// NULL / 空串 / NOW() 直接赋值需要一条「不经对话框改 edits 队列」的入口，
-// 独立版目前没有（editSelectedCell 是对话框驱动的），因此暂不搬，留待补上
-// 程序化 setCell 后再加。
+// 后两条当年是搁着的：内置版的 NULL / 空串 / NOW() 直接赋值要一条「不经对话框改
+// edits 队列」的入口，而 editSelectedCell 那时是对话框驱动的。现在有了
+// setCellValue，但「空串即 NULL」这层约定仍在，所以 NULL 走 isNull 标志、空串走
+// 显式值，各归各的那一格。
 func (c *Client) showQuickValues(f detailsField, row int, pos fyne.Position) {
 	if f.Col < 0 || row < 0 {
 		return
@@ -234,6 +245,8 @@ func (c *Client) showQuickValues(f detailsField, row int, pos fyne.Position) {
 			c.grid.table.Select(widget.TableCellID{Row: row, Col: f.Col})
 			c.editSelectedCell()
 		}),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("设为 NULL", func() { c.assignCell(f, row) }),
 	)
 	m := widget.NewPopUpMenu(menu, c.win.Canvas())
 	m.ShowAtPosition(pos)

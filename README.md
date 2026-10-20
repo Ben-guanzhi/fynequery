@@ -21,11 +21,17 @@
   会让驱动报 ParseBool 错，所以列表里不提供（`TestMssqlDSNReachesTheDialer`
   钉住这一点）。MySQL 只在选「加密」时打开 TLS，PostgreSQL 用
   `disable`/`prefer`/`require`/`verify-ca`/`verify-full`
-- **查询编辑器**：多行 SQL 输入，支持 `Ctrl+Enter` / `Cmd+Enter` 执行，
+- **查询编辑器**：多行 SQL 输入，`Ctrl/Cmd+Enter` 执行**光标所在的那条语句**
+  （有选区则执行选区），`Ctrl/Cmd+Shift+Enter` 执行整个标签；
   关键字 / 库名 / 表名自动补全，可限制返回行数；
+  `Ctrl/Cmd+Shift+F` 一键格式化当前标签的 SQL；
   支持多语句脚本（按引号/注释感知的方式切分，逐条执行、失败即停并报出序号）；
   `Ctrl+O` / `Ctrl+S`（或标签操作条上的「打开脚本 / 保存脚本」）读写 `.sql` 文件，
   保存时统一为 LF，载入超过 8MB 或含 NUL 的文件会被拒绝
+- **安全模式**：编辑器里跑 `UPDATE` / `DELETE` 而语句没有 `WHERE`、
+  或跑 `DROP` / `TRUNCATE` / `ALTER … DROP`，执行前一律先弹确认并
+  显示将要执行的语句与原因。判定不到的一律放过——宁可不拦，也不误拦正常的语句
+  （与 `SplitStatements` 同样的限制：不认 `WHERE 1 = 1` 这类写法）
 - **结果表格**：动态列宽，表头显示列名与类型（点击排序），错误信息展示在状态栏；
   单元格栏内置「在结果中搜索」——输入片段即时高亮全部命中并定位首个，
   `Enter` 下一个、`Shift+Enter` 上一个（循环），命中计数 `n/N`，换结果自动清空
@@ -51,7 +57,10 @@
   引用字段 / ON DELETE / ON UPDATE）与 DDL（重构的 CREATE TABLE + 索引/外键，
   一键复制）分页展示
 - **导出**：CSV / JSON / INSERT 脚本（.sql，需单表 SELECT *）/
-  Excel（.xlsx，数值与日期为真实类型单元格，冻结表头、自适应列宽）
+  Excel（.xlsx，数值与日期为真实类型单元格，冻结表头、自适应列宽）。
+  底栏的「复制为」把同一批渲染器接到剪贴板——CSV 带表头、**不加 BOM**
+  （那个前缀是让 Excel 把**文件**读成 UTF-8 用的，剪贴板传的是文本不是字节），
+  INSERT 那条要走一次目录读，所以同样可放弃、可取消
 - **结构浏览**：左侧树形浏览 数据库 → 模式 → 表/视图（过滤框实时筛选），
   点击表自动生成 `SELECT * FROM …` 预览，右键可 浏览数据（直接出结果）/
   查看结构 / 删除 / 清空 / 重命名
@@ -86,9 +95,11 @@
   ORDER BY 的原样使用；单表 `SELECT *` 自动补上主键排序（复合键按全部键列排序，
   翻页条写明「已按主键 … 排序」，键太长只报列数以免挤掉翻页按钮）；
   其余形状（投影、聚合、无主键）不猜排序，翻页条标 ⚠ 并说明可能重复/漏行
-- **快捷键**：`Ctrl/Cmd+Enter` 执行、`Ctrl/Cmd+N` 新标签、`Ctrl/Cmd+W` 关闭当前标签、
+- **快捷键**：`Ctrl/Cmd+Enter` 执行光标所在语句、`Ctrl/Cmd+Shift+Enter` 执行全部、
+  `Ctrl/Cmd+N` 新标签、`Ctrl/Cmd+W` 关闭当前标签、
   `Ctrl/Cmd+1…9` 切到第 N 个标签（超出标签数不环绕、不动作）、`Ctrl/Cmd+P` 快速打开、
-  `Ctrl/Cmd+O` / `Ctrl/Cmd+S` 读写脚本——光标在编辑器、过滤框或搜索框内同样生效
+  `Ctrl/Cmd+O` / `Ctrl/Cmd+S` 读写脚本、`Ctrl/Cmd+F` 聚焦结果搜索、
+  `Ctrl/Cmd+Shift+F` 格式化——光标在编辑器、过滤框或搜索框内同样生效
   （Fyne 会把快捷键先交给聚焦控件，故每个输入框都查同一张 `ui_keys.go` 绑定表；
   `Ctrl+C` 除外，输入框保留自身复制语义）。工具条上的「快捷键」按钮列出全部组合键，
   说明文字与绑定同处登记，加一个绑定就多一行——只有 `Ctrl/Cmd+1…9` 那九个绑定
@@ -133,7 +144,7 @@ fynequery/
 ├── clientstore.go          # Client→Store 薄包装：连接生命周期、外键缓存、XLSX 落盘
 ├── settings.go             # 界面状态持久化（主题/窗口/分割位/标签草稿/工具条选择/上次连接）
 ├── ui.go                   # Client 状态与主布局（侧栏+主区装配）
-├── ui_keys.go              # 快捷键表：bindKey 登记 + 各输入框共用 entryShortcut + 快捷键对话框（Ctrl+F 聚焦搜索、Tab 缩进）
+├── ui_keys.go              # 快捷键表：bindKey/bindKeyMod 登记 + 各输入框共用 entryShortcut + 快捷键对话框（Ctrl+F 聚焦搜索、Ctrl+Shift+F 格式化、Tab 缩进）
 ├── ui_tooltip.go           # 轻量悬停提示：纯图标按钮的 hover 浮层（无内置 tooltip）
 ├── ui_connections.go       # 连接面板（下拉/连接/管理）
 ├── ui_connections_dialog.go# 连接新建/编辑对话框（SQLite 文件选择器、库过滤掩码）
@@ -156,6 +167,8 @@ fynequery/
     ├── store_connect.go    # 打开/测试连接、按库缓存连接池、DSN 构造
     ├── query.go            # 查询执行（SELECT/命令）、多语句脚本、标识符引用
     ├── paging.go           # 行窗口分页：可分页判定、PageSQL/WithOrderBy 渲染、ExecutePage 重查
+    ├── format.go           # SQL 格式化（reformatter）：子句换行、关键字大写、括号缩进
+    ├── risk.go             # 破坏性语句判定（安全模式）：无 WHERE 的写、DROP/TRUNCATE/ALTER DROP
     ├── dialect.go          # 引擎方言操作表：各引擎目录 SQL 集中于此
     ├── browse.go           # 结构浏览：数据库/模式/表（方言表的 apply-generic）
     ├── browse_columns.go   # 列元数据、索引聚合
@@ -483,6 +496,81 @@ PRIMARY 就算主键」补了缺的第四列）。本仓当时躲过这一枪只
 `Truncated`（[internal/db/contract_test.go:616](file:///D:/tools/db/fynequery/internal/db/contract_test.go#L616)）。
 本地没有 server 可问，这条跟写路径那组一样，要等 CI 第一次真跑才算被回答。
 
+### 编辑器与写操作前的那道闸
+
+这一节记第二轮盘点（对照 TablePlus 主页的 “smart query editor” 九宫格与
+Beekeeper Studio 文档的能力面）之后补的四处。骨架是齐的——内联编辑、过滤器、
+保存前预览（等于 TablePlus 的 Code review）、服务端行窗口分页、跨库过滤都有，
+差的正是编辑器本身与「手写的语句直接就跑」这一条。
+
+**① `Ctrl/Cmd+Enter` 只执行光标所在的那条语句。** 改之前 `runCurrent` 把整个
+标签交给 `db.SplitStatements` 从头跑到尾：标签里放着 3 条语句、只想重跑改过的
+第 2 条时，只能删掉另两条或全跑一遍。难点不是切分而是**定位**——光标可以停在
+字符串或注释中间，所以「哪一条语句」不能靠找最近的分号来回答。为此给
+`internal/db/script.go` 加了带 span 的切分器
+`SplitStatementsSpans`，`SplitStatements` 退化成它的包装（**输出逐字节不变**，
+`script_test.go` 一行没动），再在它上面放两个纯函数：
+`StmtAt(script, off)` 与 `StmtsInRange(script, start, end)`。判定规则钉死：
+span 是从该语句第一个字符到终止分号之后；落在 `[Start, End]` 内取该条；落在段间
+空白或纯注释块**取前一条**（没有前一条才取后一条——这也意味着注释归属它后面
+那条语句，与 `SplitStatements` 一直以来的行为一致）。选区那条路是
+妥协：fyne 只给出选中的**文本**、不给起点，所以 `selectionRange` 用光标
+位置 + 选区长度两头各试一次；重复文本（比如 `SELECT 1; SELECT 1`）会让这
+件事有歧义，这时退回「把选区本身当脚本跑」，只是不再吸附到整条边界。
+整个标签的旧行为一个不丢：`Ctrl/Cmd+Shift+Enter` 执行全部，网格保存后的重读
+与列过滤（ui_grid_edit.go:470 / ui_filter.go:133）也照样走全量——它们要重跑的正是
+当初产出屏幕上这份网格的那件事，不能变成「光标今天在哪」。
+
+**② SQL 格式化。** 新增 `internal/db/format.go` 的 `FormatSQL`，纯文本、无 fyne
+依赖。词法复用 `script.go` 的 `skipQuoted` 与 `--` / `/* */` 扫描 ——
+「字符串在哪结束」整个包只该有一种意见，多一份就会漂。规则集刻意保守：
+子句关键字各自占一行并大写（`SELECT` / `FROM` / `WHERE` / `HAVING` / `LIMIT` /
+`OFFSET` / `UNION [ALL]` / `INSERT INTO` / `VALUES` / `UPDATE` / `SET` /
+`DELETE FROM` / `[LEFT|RIGHT|INNER|FULL|CROSS] [OUTER] JOIN` / `ON` / `AND` / `OR` /
+`WITH` / `RETURNING`，外加原地大写的 `AS` / `ASC` / `DESC` / `DISTINCT` 等）；
+括号按深度缩进 2 格（与 `smartIndentStep` 同宽）；空白压成一个、行尾不留；
+行注释后必须换行（否则会吃掉后面一整段代码，这是正确性不是美观）。
+**不改**：认不出的词原样放过；逗号列表不拆行；不做列对齐填充；不处理
+`CASE WHEN` 与 `BEGIN…END` / 存储过程体；不增删分号。
+`VALUES` / `SET` 只在 `INSERT` / `UPDATE` 语句内部算关键字（有些引擎把
+它们留作标识符），所以先给每个 token 标上它所属语句的开头词（`statementHeads`）。
+幂等是硬要求（`FormatSQL(FormatSQL(x)) == FormatSQL(x)`），每条表用例自动跑两遍。
+
+**③ 安全模式。** 新增 `internal/db/risk.go` 的 `DestructiveRisk`：`UPDATE`/`DELETE`
+没有 `WHERE`、`DROP`、`TRUNCATE`、`ALTER … DROP`。确认框里带上语句本身与原因。
+关键取舍：**判定不到就放过**，绝不反过来拦住正常的语句。找 `WHERE` 时先剥掉
+注释与字符串字面量（用 `sqlCommentRe`），所以 `UPDATE t SET note = 'where'`
+会被正确判成「没有 WHERE」，而 `WHERE 1 = 1` 这种我们认不出来——那就放过。
+只挂在 `runWithScope` 这一处入口；网格写路径本来就有预览确认，不去动它。
+不做全局开关的持久化：默认关闭的安全网等于没有，而一个能持久化的安全开关本身
+很容易被误关。
+
+**④ 剪贴板导出。** 底栏「复制为」：CSV（带表头、无 BOM）/ JSON / INSERT。
+复用 `db.WriteCSV` / `WriteJSON` / `InsertScript`（前两个收 `io.Writer`，第三个
+返回 string），所以剪贴板与文件走的是同一批渲染器。INSERT 那条要列类型，
+是一次目录读 → 走 `background`，新的一次会放弃上一次，连它打开的文件句柄一起收掉。
+
+**⑤ 单元格值。** 值里有换行、或长到一行读不下时，编辑框换成多行的；详情栏
+chevron 菜单补上「设为 NULL」（走 `setCellValue`，与编辑器对话框同一条队列，
+落库前照样有预览、照样在一个事务里提交）。**已知限制**：队列用字符串存
+值，`""` 本身就表示 NULL，所以「空串」这个值写不进去 —— 这是既有约定，
+改它属于写路径的改动，不在这一轮打磨范围内。
+
+### 负对照：这一轮的五组守卫
+
+按仓库惯例，每组守卫都临时改坏一次生产代码、跑测试、记下红在哪，然后当场改回：
+
+| 改坏的守卫 | 结果 |
+| --- | --- |
+| `FormatSQL` 直接 `return s` | `TestFormatSQL` 7 条用例全红（红的是换行与大写）。幂等那条**仍绿**——它只证明「不再变化」，对「什么都不做」是瞎的，所以格式化必须另有断言，不能只靠幂等 |
+| `runCurrent` 退回 `scopeAll` | `TestCtrlEnterRunsOnlyTheStatementUnderTheCaret`、`TestBothRunCombosAreReachableThroughTheKeyTable` 2 条红 |
+| `DestructiveRisk` 一律返回 `RiskNone` | `TestADestructiveRunAsksBeforeItWrites`、`TestAnUnfilteredUpdateAsksToo` 2 条红——历史里出现了没被确认就执行的 DELETE / UPDATE |
+| `multilineValue` 恒为 false | `TestMultilineValueDecidesWhichBoxToShow` 红（含换行的值不再进多行框） |
+| `copyResultAs` 不写剪贴板 | `TestCopyResultAsCSVQuotesWhatNeedsIt`、`TestCopyResultAsJSON` 2 条红 |
+
+「幂等仍绿」那条要留着：它说明这条断言单独看没有牙齿，真正的牙齿是
+`TestFormatSQL` 里那 7 条逐字比较。
+
 ### 真机契约测试
 
 `internal/db` 的单测证明方言表是完整的、渲染出的 SQL 与它声称的一致；但「目录
@@ -649,6 +737,9 @@ run 验证过的环节，它后面紧跟一步 `gcc --version`，环境不对就
 
 其他要点：
 
+- **执行范围**：`Ctrl/Cmd+Enter` 只执行光标所在的那条语句，有选区时执行选区
+  （吸附到整条语句边界）；`Ctrl/Cmd+Shift+Enter` 执行整个标签。多语句脚本
+  逐条执行、失败即停，两条路径都记历史，状态栏指明跑的是「第 M/N 条」
 - **异步连接与查询**：连接握手、表目录加载、SQL 执行均在工作线程进行，界面不冻结；执行中可点「取消」中断长查询（fyne 2.6+ 的 fyne.Do 调度回主线程）
 - **目录读可放弃**：结构页、结构操作（重命名/删除等发出的 DDL）、过滤框、单元格的外键候选、保存的生成语句与落库、搜索遍历、INSERT 导出、侧栏重载与数据库下拉刷新共 10 处，都经 `Client.background` 在工作线程上跑一轮服务器往返并带着 `context`；对话框关闭即放弃那一轮，它的答案不再上屏，已经答完的那轮则照常落地
 - **线程归属**：当前连接 / 当前库 / 每页行数只归 UI 线程所有，工作线程拿的是启动时在 `c.mu` 内取到的快照；`TestQueryGoroutineUsesSessionSnapshot` 在 `go test -race` 下用一条慢查询 + 并发改写会话字段的守卫脚本钉住这条不变量
