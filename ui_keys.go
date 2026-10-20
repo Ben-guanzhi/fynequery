@@ -52,17 +52,39 @@ func keyName(key fyne.KeyName) string {
 // desc keeps the binding out of the 快捷键 dialog, which is right for the
 // alternate spelling of a key already documented (numpad Enter).
 func (c *Client) bindKey(key fyne.KeyName, desc string, fn func()) {
+	c.bindKeyMod(key, []fyne.KeyModifier{fyne.KeyModifierControl, fyne.KeyModifierSuper}, desc, fn)
+}
+
+// bindKeyMod is bindKey for a combo that carries more than Ctrl/Cmd: fyne
+// builds a shortcut's modifier as a bitmask, so Ctrl+Shift+F arrives as one
+// combo of its own and needs an entry of its own in the table.
+//
+// The app only ever binds the Control and Super spellings of anything, so the
+// doc line can say so instead of listing modifiers.
+func (c *Client) bindKeyMod(key fyne.KeyName, mods []fyne.KeyModifier, desc string, fn func()) {
 	if c.keys == nil {
 		c.keys = make(map[keyCombo]keyBinding)
 	}
-	for _, mod := range []fyne.KeyModifier{fyne.KeyModifierControl, fyne.KeyModifierSuper} {
+	for _, mod := range mods {
 		c.keys[keyCombo{key, mod}] = keyBinding{fn: fn, desc: desc}
 		sc := &desktop.CustomShortcut{KeyName: key, Modifier: mod}
 		c.win.Canvas().AddShortcut(sc, func(fyne.Shortcut) { fn() })
 	}
 	if desc != "" {
-		c.docKey(fmt.Sprintf("Ctrl / Cmd + %s    %s", keyName(key), desc))
+		c.docKey(fmt.Sprintf("%s + %s    %s", comboDocName(mods), keyName(key), desc))
 	}
+}
+
+// comboDocName names the modifier set the way the dialog does. Shift is the
+// only extra so far; anything else would have to be spelled out here too, or
+// the dialog would claim a combo the keys table cannot actually answer.
+func comboDocName(mods []fyne.KeyModifier) string {
+	for _, m := range mods {
+		if m&fyne.KeyModifierShift != 0 {
+			return "Ctrl / Cmd + Shift"
+		}
+	}
+	return "Ctrl / Cmd"
 }
 
 // docKey adds a line to the 快捷键 dialog for a combo that is registered

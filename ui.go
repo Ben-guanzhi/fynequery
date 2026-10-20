@@ -340,8 +340,19 @@ func (c *Client) buildUI() fyne.CanvasObject {
 		c.bindKey(key, "", func() { c.selectTab(idx) })
 	}
 	c.docKey("Ctrl / Cmd + 1 … 9    切到第 1-9 个查询标签")
-	c.bindKey(fyne.KeyReturn, "执行编辑器中的 SQL", func() { c.runCurrent() })
+	c.bindKey(fyne.KeyReturn, "执行光标所在的那条语句（有选区则执行选区）", func() { c.runCurrent() })
 	c.bindKey(fyne.KeyEnter, "", func() { c.runCurrent() }) // same action, numpad Enter
+	// Ctrl+Shift+Enter is what Ctrl+Enter used to do unconditionally: run the
+	// tab from top to bottom. It stays reachable because a script that has to
+	// run as a whole still has to run as a whole.
+	c.bindKeyMod(fyne.KeyReturn, []fyne.KeyModifier{
+		fyne.KeyModifierControl | fyne.KeyModifierShift,
+		fyne.KeyModifierSuper | fyne.KeyModifierShift,
+	}, "执行编辑器中的全部语句", c.runAllStatements)
+	c.bindKeyMod(fyne.KeyEnter, []fyne.KeyModifier{
+		fyne.KeyModifierControl | fyne.KeyModifierShift,
+		fyne.KeyModifierSuper | fyne.KeyModifierShift,
+	}, "", c.runAllStatements)
 	c.bindKey(fyne.KeyO, "打开 .sql 脚本到当前标签", func() { c.showOpenScriptDialog() })
 	c.bindKey(fyne.KeyS, "把当前标签保存为 .sql 脚本", func() { c.showSaveScriptDialog() })
 	c.bindKey(fyne.KeyF, "聚焦「在结果中搜索」", c.focusResultSearch)

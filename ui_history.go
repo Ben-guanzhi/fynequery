@@ -86,7 +86,7 @@ func (c *Client) buildHistoryPanel() fyne.CanvasObject {
 
 	rerunInner := widget.NewButtonWithIcon("", theme.MediaPlayIcon(), func() {
 		if c.tabs.entry.Text != "" {
-			c.runCurrent()
+			c.runAllStatements()
 		}
 	})
 	rerunInner.Importance = widget.LowImportance

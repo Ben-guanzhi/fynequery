@@ -398,7 +398,10 @@ func TestScriptResultIsNotClaimedAsAPage(t *testing.T) {
 	c := newPagingClient(t, 25, true, "10")
 	c.tabs.entry.setTextSilently("SELECT 1;\nSELECT * FROM items")
 
-	c.runCurrent()
+	// runAllStatements, because the script path is the thing under test:
+	// Ctrl+Enter now executes only the statement the caret sits in, so this
+	// script has to be run the way Ctrl+Shift+Enter runs it.
+	c.runAllStatements()
 	if c.page.stmt != "" {
 		t.Fatalf("pageStmt = %q, a script result was claimed as page 1", c.page.stmt)
 	}

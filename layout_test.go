@@ -141,13 +141,18 @@ func TestKeyDialogDocumentsEveryBinding(t *testing.T) {
 	w.SetContent(c.buildUI())
 
 	text := strings.Join(c.keyDocs, "\n")
+	// Docs, not table entries: every combo is bound twice (Ctrl and Cmd) and
+	// one doc line covers both, so counting entries would want twice the lines
+	// the dialog actually has.
 	documented := map[string]bool{}
+	docs := map[string]bool{}
 	for combo, b := range c.keys {
 		if b.desc == "" {
 			continue
 		}
 		name := keyName(combo.key)
 		documented[name] = true
+		docs[b.desc] = true
 		if !strings.Contains(text, "+ "+name+" ") {
 			t.Fatalf("combo %s (%q) is bound but not documented: %q", combo.key, b.desc, text)
 		}
@@ -155,9 +160,12 @@ func TestKeyDialogDocumentsEveryBinding(t *testing.T) {
 	if len(documented) < 5 {
 		t.Fatalf("only %d distinct documented combos, expected at least 5", len(documented))
 	}
-	// The numpad Enter shares the run action and must not add a second line.
-	if n := strings.Count(text, "执行编辑器中的 SQL"); n != 1 {
-		t.Fatalf("run action documented %d times, want 1", n)
+	// The numpad Enter shares the run action and must not add a second line -
+	// same for its Shift flavour, which documents one combo, not one per key.
+	for _, line := range []string{"执行光标所在的那条语句", "执行编辑器中的全部语句"} {
+		if n := strings.Count(text, line); n != 1 {
+			t.Fatalf("%q documented %d times, want 1", line, n)
+		}
 	}
 
 	// One line per documented combo plus the combos written by hand: Ctrl+C
@@ -166,7 +174,7 @@ func TestKeyDialogDocumentsEveryBinding(t *testing.T) {
 	// and the Ctrl+1…9 tab run, which nine table entries share instead of
 	// documenting nine near-identical lines. The dialog is the only place the
 	// keys are still spelled out, so a stale or missing line is a real defect.
-	if want := len(documented) + 4; len(c.keyDocs) != want {
+	if want := len(docs) + 4; len(c.keyDocs) != want {
 		t.Fatalf("dialog has %d lines, want %d: %q", len(c.keyDocs), want, c.keyDocs)
 	}
 	if !strings.Contains(text, "1 … 9") {

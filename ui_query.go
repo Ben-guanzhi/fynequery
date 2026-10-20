@@ -425,14 +425,45 @@ func (c *Client) querySession() (connID, database string, pageSize int) {
 	return c.currentID, c.resolveDB(), c.page.size
 }
 
-// runCurrent checks the session and the editor text, then evaluates it: a
-// single statement runs directly, a multi-statement script runs in order and
-// stops at the first failure, with every statement recorded in the history.
-// While 分页浏览 is on and the editor holds one pageable SELECT, that statement
-// runs as page 1 of the chosen row window instead of the 行数上限-capped whole
-// result. Pending grid changes are confirmed away first; the execution itself
-// lives in runStatements.
-func (c *Client) runCurrent() {
+// runScope says what Ctrl+Enter means once the editor can hold more than one
+// statement: the one the caret sits in (or the selection), or the whole tab.
+type runScope int
+
+const (
+	scopeCaret runScope = iota
+	scopeAll
+)
+
+// runPlan is one resolved request to execute something: the statements
+// themselves, how the status bar describes them while they run and what it
+// adds to the result line afterwards, and whether this was the whole tab -
+// the ● marker means "changed since you last ran IT", so only running the
+// whole tab clears it.
+type runPlan struct {
+	stmts []string
+	busy  string // "" keeps the plain 执行中 wording this has always used
+	note  string // appended to the result line, "" for nothing to add
+	whole bool
+}
+
+// runCurrent executes what the caret asks for: with text selected, that
+// selection; otherwise the statement the caret is in. Running the whole tab
+// moved to Ctrl+Shift+Enter (see runAllStatements).
+func (c *Client) runCurrent() { c.runWithScope(scopeCaret) }
+
+// runAllStatements executes every statement in the tab, which is what
+// Ctrl+Enter used to do unconditionally. The in-app re-reads after a write
+// (saving grid changes, applying a column filter) call it deliberately: they
+// re-run whatever produced the grid on screen, and must keep doing exactly
+// that rather than whatever sits under the caret today.
+func (c *Client) runAllStatements() { c.runWithScope(scopeAll) }
+
+// runWithScope checks the session and the editor, resolves the scope into the
+// statements to run, and hands them over. A destructive statement is confirmed
+// once here, in front of the whole plan: a script is one action as far as the
+// user is concerned, so one dangerous statement in it is enough to describe
+// the run.
+func (c *Client) runWithScope(scope runScope) {
 	if c.currentID == "" {
 		dialog.ShowInformation("未连接", "请先在左侧选择一个连接并点击「连接」。", c.win)
 		return
@@ -441,15 +472,20 @@ func (c *Client) runCurrent() {
 		dialog.ShowInformation("未连接", "该连接尚未建立，请先连接。", c.win)
 		return
 	}
-	q := c.tabs.entry.Text
-	if strings.TrimSpace(q) == "" {
+	if strings.TrimSpace(c.tabs.entry.Text) == "" {
 		return
 	}
-	stmts := db.SplitStatements(q)
-	if len(stmts) == 0 {
-		c.setStatusWarn("没有可执行的语句（只有注释或空白）")
+	plan, ok := c.planForScope(scope)
+	if !ok {
+		c.setStatusWarn("没有可执行的语句（光标在只有注释或空白的地方）")
 		return
 	}
+	c.confirmPendingEdits(plan)
+}
+
+// confirmPendingEdits runs the plan, asking first if the grid holds changes
+// that a new result would silently drop.
+func (c *Client) confirmPendingEdits(plan runPlan) {
 	// A new result replaces the grid and setEditContext resets the edit queue
 	// along with it, so unsaved cell changes would vanish without a trace.
 	// Paging and sorting already refuse to move while changes are pending;
@@ -457,21 +493,124 @@ func (c *Client) runCurrent() {
 	if c.grid.edits.any() {
 		dialog.ShowConfirm("确认执行",
 			"结果表上有未保存的更改，执行新查询会把它们丢弃。仍要执行吗？",
-			func(ok bool) {
-				if ok {
-					c.runStatements(stmts)
+			func(confirmed bool) {
+				if confirmed {
+					c.runStatements(plan)
 				}
 			}, c.win)
 		return
 	}
-	c.runStatements(stmts)
+	c.runStatements(plan)
 }
 
-// runStatements executes the parsed statements and renders what they end with.
+// planForScope turns the editor's text into what this keystroke executes.
+//
+// Why the statement, and not its position in the text, decides: the caret can
+// sit in the middle of a string or a comment, so "which statement" cannot be
+// answered by looking for the nearest semicolon - db.StmtAt reads statements
+// the way the splitter does and answers with the one whose span encloses the
+// caret. For a selection there is no span to ask about either, because fyne
+// hands over the selected TEXT but not where it starts; selectionRange recovers
+// the position from the caret and repeated text can make that ambiguous, so a
+// selection whose position cannot be recovered still runs - just without being
+// able to snap to statement bounds.
+func (c *Client) planForScope(scope runScope) (runPlan, bool) {
+	e := c.tabs.entry
+	text := e.Text
+	all := db.SplitStatementsSpans(text)
+	if len(all) == 0 {
+		return runPlan{}, false
+	}
+	if scope == scopeAll {
+		return runPlan{stmts: spanTexts(all), whole: true}, true
+	}
+	caret := caretOffset(text, e.CursorRow, e.CursorColumn)
+	if sel := e.SelectedText(); strings.TrimSpace(sel) != "" {
+		if lo, hi, ok := selectionRange(text, sel, caret); ok {
+			if picked := db.StmtsInRange(text, lo, hi); len(picked) > 0 {
+				return runPlan{stmts: spanTexts(picked), note: selectionNote(len(picked), len(all)),
+					busy: fmt.Sprintf("执行选区中的 %d 条语句", len(picked))}, true
+			}
+		}
+		if picked := db.SplitStatements(sel); len(picked) > 0 {
+			return runPlan{stmts: picked, note: selectionNote(len(picked), len(all)),
+				busy: fmt.Sprintf("执行选区中的 %d 条语句", len(picked))}, true
+		}
+		return runPlan{}, false
+	}
+	if caret < 0 {
+		caret = 0
+	}
+	stmt, ok := db.StmtAt(text, caret)
+	if !ok {
+		return runPlan{}, false
+	}
+	i := spanIndex(all, stmt.Start)
+	if len(all) == 1 {
+		// One statement in the tab: no need to say which of them this was.
+		return runPlan{stmts: []string{stmt.Text}, whole: true}, true
+	}
+	return runPlan{
+		stmts: []string{stmt.Text},
+		busy:  fmt.Sprintf("执行第 %d/%d 条语句", i+1, len(all)),
+		note:  fmt.Sprintf(" · 编辑器共 %d 条语句，这次执行的是第 %d 条", len(all), i+1),
+	}, true
+}
+
+// spanTexts is SplitStatements over already-split statements.
+func spanTexts(spans []db.StmtSpan) []string {
+	out := make([]string, 0, len(spans))
+	for _, s := range spans {
+		out = append(out, s.Text)
+	}
+	return out
+}
+
+// spanIndex finds the position of the statement starting at start.
+func spanIndex(spans []db.StmtSpan, start int) int {
+	for i, s := range spans {
+		if s.Start == start {
+			return i
+		}
+	}
+	return -1
+}
+
+// selectionRange recovers where the selected text starts. fyne gives the
+// selected TEXT but not its offsets, so the caret and the selected length are
+// all there is to go on - and the caret sits at whichever end the drag ended
+// on, hence both attempts. It reports false when neither reading matches, which
+// repeated text ("SELECT 1; SELECT 1") can make ambiguous; the caller then runs
+// the selection as its own script rather than guessing wrong.
+func selectionRange(text, sel string, caret int) (start, end int, ok bool) {
+	if sel == "" || caret < 0 {
+		return 0, 0, false
+	}
+	n := len(sel)
+	if caret >= n && text[caret-n:caret] == sel {
+		return caret - n, caret, true
+	}
+	if caret+n <= len(text) && text[caret:caret+n] == sel {
+		return caret, caret + n, true
+	}
+	return 0, 0, false
+}
+
+// selectionNote explains that only part of the tab ran, which is the one thing
+// the result line cannot say by itself - 返回 3 行 looks the same either way.
+func selectionNote(ran, total int) string {
+	if total <= 1 {
+		return ""
+	}
+	return fmt.Sprintf(" · 编辑器共 %d 条语句，按选区执行了其中 %d 条", total, ran)
+}
+
+// runStatements executes the resolved statements and renders what they end with.
 // The query runs on a background goroutine so the window stays responsive; a
 // cancel button aborts it, and the result is marshalled back to the UI thread
 // before the grid updates.
-func (c *Client) runStatements(stmts []string) {
+func (c *Client) runStatements(plan runPlan) {
+	stmts := plan.stmts
 	connID, dbName, pageSize := c.querySession()
 	conn, err := c.store.OpenConn(connID)
 	if err != nil {
@@ -484,7 +623,11 @@ func (c *Client) runStatements(stmts []string) {
 	paged := c.page.on && len(stmts) == 1 && db.Pageable(conn.Config.Type, stmts[0])
 	var pageNote string
 
-	c.runTracked("执行中 ...（点「取消」可中断）",
+	busy := "执行中 ...（点「取消」可中断）"
+	if plan.busy != "" {
+		busy = plan.busy + " ...（点「取消」可中断）"
+	}
+	c.runTracked(busy,
 		func(ctx context.Context) (db.QueryResult, string) {
 			// The whole query + history-record runs off the UI thread.
 			if paged {
@@ -514,8 +657,11 @@ func (c *Client) runStatements(stmts []string) {
 				// cut short, or the statement never taking the cap at all.
 				c.appendStatus(rowCapNote(conn.Config.Type, lastStmt, limit, res.Truncated))
 			}
+			c.appendStatus(plan.note)
 			c.refreshHistory()
-			c.clearTabDirty(c.tabs.entry)
+			if plan.whole {
+				c.clearTabDirty(c.tabs.entry)
+			}
 			if canceled && res.Error != "" {
 				c.setStatus("查询已取消")
 			}

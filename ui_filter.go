@@ -130,13 +130,13 @@ func (c *Client) showFilterDialog() {
 			}
 			c.tabs.entry.setTextSilently("SELECT * FROM " + base + where)
 			d.Hide()
-			c.runCurrent()
+			c.runAllStatements()
 		})
 	}
 	clear := func() {
 		c.tabs.entry.setTextSilently("SELECT * FROM " + base)
 		d.Hide()
-		c.runCurrent()
+		c.runAllStatements()
 	}
 
 	toolRow := container.NewHBox(
