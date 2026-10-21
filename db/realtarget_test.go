@@ -7,13 +7,18 @@ package db
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestRealPluginsHandshake(t *testing.T) {
 	dir := filepath.Join("..", "dist", "plugins")
-	if _, err := os.Stat(dir); err != nil {
-		t.Skip("dist/plugins not built (run build.ps1 first)")
+	// Skip when the build step hasn't run: the directory is either absent or
+	// exists without any plugin executables (a plain `go test ./...` must never
+	// depend on build.ps1).
+	entries, err := os.ReadDir(dir)
+	if err != nil || !hasPluginExecutable(entries) {
+		t.Skip("dist/plugins has no plugin executables (run build.ps1 first)")
 	}
 	DiscoverPlugins(dir)
 
@@ -39,4 +44,19 @@ func TestRealPluginsHandshake(t *testing.T) {
 		}
 	}
 	Shutdown()
+}
+
+// hasPluginExecutable reports whether entries contains at least one built
+// plugin executable (fq-plugin-*.exe on Windows).
+func hasPluginExecutable(entries []os.DirEntry) bool {
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, "fq-plugin-") && strings.HasSuffix(strings.ToLower(name), ".exe") {
+			return true
+		}
+	}
+	return false
 }

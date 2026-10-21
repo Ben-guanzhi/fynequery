@@ -71,8 +71,12 @@ type palette struct {
 	cellEdited      color.RGBA // an unsaved (edited) cell value
 	rowDeletedBG    color.RGBA // background of a row marked for deletion
 	// server ribbon (green info bar at the top of the workspace)
-	ribbonBG color.RGBA
-	ribbonFG color.RGBA
+	ribbonBG   color.RGBA
+	ribbonFG   color.RGBA
+	ribbonInfo color.RGBA // orange info dot at the ribbon's right edge
+	// toolbar chip groups (rounded white containers around icon buttons)
+	groupBG     color.RGBA
+	groupBorder color.RGBA
 	// query result status dot (bottom "● Query result" line)
 	okDot color.RGBA
 	// breadcrumb nav bar + details pane
@@ -97,22 +101,22 @@ type palette struct {
 
 var lightPalette = palette{
 	bg:              hex("#FFFFFF"),
-	sidebarBG:       hex("#ECECEC"),
-	toolbarBG:       hex("#F7F7F7"),
+	sidebarBG:       hex("#F6F6F6"),
+	toolbarBG:       hex("#F5F5F5"),
 	contentBG:       hex("#FFFFFF"),
-	stripBG:         hex("#F0F0F0"),
-	tabBG:           hex("#F7F7F7"),
+	stripBG:         hex("#F6F6F6"),
+	tabBG:           hex("#F6F6F6"),
 	activeTabBG:     hex("#FFFFFF"),
 	inactiveTabFG:   hex("#8A8A8A"),
 	activeTabFG:     hex("#2B2B2B"),
-	tabUnderline:    hex("#2F7BD9"),
-	line:            hex("#E0E0E0"),
-	dividerLine:     hex("#E05555"),
-	statusBG:        hex("#F0F0F0"),
-	statusSideBG:    hex("#ECECEC"),
-	statusFG:        hex("#555555"),
+	tabUnderline:    hex("#DADADA"),
+	line:            hex("#E6E6E6"),
+	dividerLine:     hex("#E3E3E3"),
+	statusBG:        hex("#F6F6F6"),
+	statusSideBG:    hex("#F6F6F6"),
+	statusFG:        hex("#6B6B6B"),
 	statusLink:      hex("#2F7BD9"),
-	treeSel:         hex("#DDEBF7"),
+	treeSel:         hex("#E8EFF7"),
 	pkHeader:        hex("#8A6D00"),
 	cellInt:         hex("#1F6FEB"),
 	cellFloat:       hex("#00856C"),
@@ -122,30 +126,33 @@ var lightPalette = palette{
 	gridHeaderBG:    hex("#FFFFFF"),
 	gridHeaderFG:    hex("#444444"),
 	gridRowAltBG:    hex("#FBFBFB"),
-	gridRowHoverBG:  hex("#F0F6FF"),
-	gridRowSelectBG: hex("#DDEBF7"),
+	gridRowHoverBG:  hex("#F3F7FC"),
+	gridRowSelectBG: hex("#E8EFF7"),
 	gridCellFG:      hex("#333333"),
 	gridNullFG:      hex("#A0A0A0"),
-	gridLine:        hex("#E0E0E0"),
-	gutterBG:        hex("#F5F5F5"),
+	gridLine:        hex("#E9E9E9"),
+	gutterBG:        hex("#F7F7F7"),
 	cellEdited:      hex("#C05621"),
 	rowDeletedBG:    hex("#FDECEA"),
-	ribbonBG:        hex("#2FA84F"),
-	ribbonFG:        hex("#FFFFFF"),
+	ribbonBG:        hex("#D9EBC9"),
+	ribbonFG:        hex("#2F5B36"),
+	ribbonInfo:      hex("#F0A93B"),
+	groupBG:         hex("#FFFFFF"),
+	groupBorder:     hex("#E7E7E7"),
 	okDot:           hex("#2FB344"),
 	crumbBG:         hex("#FFFFFF"),
-	crumbBorder:     hex("#D9D9D9"),
+	crumbBorder:     hex("#DCDCDC"),
 	detailBG:        hex("#F7F7F7"),
-	detailLine:      hex("#E4E4E4"),
+	detailLine:      hex("#E8E8E8"),
 	metaKeyFG:       hex("#8A8A8A"),
 	metaValFG:       hex("#333333"),
 	foreground:      hex("#333333"),
 	accent:          hex("#2F7BD9"),
 	accentDark:      hex("#1E5AA8"),
-	hover:           hex("#EDF3FB"),
-	segmentBG:       hex("#E8E8E8"),
+	hover:           hex("#EFEFEF"),
+	segmentBG:       hex("#ECECEC"),
 	segmentActive:   hex("#FFFFFF"),
-	segmentFG:       hex("#666666"),
+	segmentFG:       hex("#6B6B6B"),
 	segmentActiveFG: hex("#2B2B2B"),
 	welcomePanelBG:  hex("#F5F5F5"),
 	welcomeFG:       hex("#6B6B6B"),
@@ -153,54 +160,57 @@ var lightPalette = palette{
 
 var darkPalette = palette{
 	bg:              hex("#1E1E1E"),
-	sidebarBG:       hex("#252525"),
-	toolbarBG:       hex("#252525"),
+	sidebarBG:       hex("#232323"),
+	toolbarBG:       hex("#232323"),
 	contentBG:       hex("#1E1E1E"),
-	stripBG:         hex("#626262"),
-	tabBG:           hex("#343535"),
-	activeTabBG:     hex("#343535"),
-	inactiveTabFG:   hex("#BFBFBF"),
+	stripBG:         hex("#232323"),
+	tabBG:           hex("#262626"),
+	activeTabBG:     hex("#363636"),
+	inactiveTabFG:   hex("#A9A9A9"),
 	activeTabFG:     hex("#FFFFFF"),
-	tabUnderline:    hex("#007F3D"),
-	line:            hex("#1C1C1C"),
-	dividerLine:     hex("#FA5151"),
-	statusBG:        hex("#252525"),
-	statusSideBG:    hex("#252525"),
+	tabUnderline:    hex("#4A4A4A"),
+	line:            hex("#333333"),
+	dividerLine:     hex("#3A3A3A"),
+	statusBG:        hex("#232323"),
+	statusSideBG:    hex("#232323"),
 	statusFG:        hex("#A9A9A9"),
-	statusLink:      hex("#007F3D"),
-	treeSel:         hex("#4680A0"),
+	statusLink:      hex("#79BEFF"),
+	treeSel:         hex("#3A5B6E"),
 	pkHeader:        hex("#FFDF9D"),
 	cellInt:         hex("#79BEFF"),
 	cellFloat:       hex("#BEFFDF"),
 	cellDate:        hex("#FFDF9D"),
 	cellStr:         hex("#FFBE79"),
 	cellDefault:     hex("#FFFFFF"),
-	gridHeaderBG:    hex("#343535"),
+	gridHeaderBG:    hex("#2B2B2B"),
 	gridHeaderFG:    hex("#FFFFFF"),
-	gridRowAltBG:    hex("#292929"),
+	gridRowAltBG:    hex("#242424"),
 	gridRowHoverBG:  hex("#2A2A2A"),
-	gridRowSelectBG: hex("#4680A0"),
+	gridRowSelectBG: hex("#3A5B6E"),
 	gridCellFG:      hex("#FFFFFF"),
 	gridNullFG:      hex("#7A7A7A"),
-	gridLine:        hex("#353535"),
-	gutterBG:        hex("#252525"),
+	gridLine:        hex("#333333"),
+	gutterBG:        hex("#232323"),
 	cellEdited:      hex("#E5A15C"),
 	rowDeletedBG:    hex("#4A2A2A"),
-	ribbonBG:        hex("#2FA84F"),
-	ribbonFG:        hex("#FFFFFF"),
+	ribbonBG:        hex("#2E4632"),
+	ribbonFG:        hex("#CFE9CC"),
+	ribbonInfo:      hex("#F0A93B"),
+	groupBG:         hex("#2B2B2B"),
+	groupBorder:     hex("#3A3A3A"),
 	okDot:           hex("#3DD68C"),
 	crumbBG:         hex("#2D2D2D"),
 	crumbBorder:     hex("#3C3C3C"),
-	detailBG:        hex("#252525"),
+	detailBG:        hex("#232323"),
 	detailLine:      hex("#333333"),
 	metaKeyFG:       hex("#8A8A8A"),
 	metaValFG:       hex("#DADADA"),
 	foreground:      hex("#CCCCCC"),
 	accent:          hex("#007F3D"),
 	accentDark:      hex("#0A6938"),
-	hover:           hex("#3A3B3B"),
+	hover:           hex("#333333"),
 	segmentBG:       hex("#333333"),
-	segmentActive:   hex("#007F3D"),
+	segmentActive:   hex("#3D3D3D"),
 	segmentFG:       hex("#A9A9A9"),
 	segmentActiveFG: hex("#FFFFFF"),
 	welcomePanelBG:  hex("#1B1B1B"),
@@ -284,13 +294,15 @@ func (t *tablePlusTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) co
 	case theme.ColorNamePrimary:
 		return p.accent
 	case theme.ColorNameScrollBar:
-		return p.dividerLine
+		return p.line
 	case theme.ColorNameSelection:
 		return p.treeSel
 	case theme.ColorNameSeparator:
 		return p.line
 	case theme.ColorNameShadow:
-		return hex("#00000055")
+		// Fyne paints split dividers (and popup shadows) with the shadow
+		// colour; a flat hairline matches the redesign better than a dark bar.
+		return p.line
 	case theme.ColorNameSuccess:
 		return hex("#4CAF50")
 	case theme.ColorNameWarning:
@@ -319,7 +331,11 @@ func (t *tablePlusTheme) Size(name fyne.ThemeSizeName) float32 {
 		return 11
 	case theme.SizeNameInputBorder:
 		return 1
+	case theme.SizeNameInputRadius:
+		return 7
 	case theme.SizeNameSeparatorThickness:
+		return 1
+	case theme.SizeNameSplitThickness:
 		return 1
 	case theme.SizeNameScrollBar:
 		return 10

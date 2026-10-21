@@ -48,10 +48,30 @@ type Session interface {
 // SQL NULL); pk carries the primary-key columns that identify the target row
 // and must be non-empty. Sessions that do not implement Updater leave the
 // grid read-only.
+//
+// Sessions that also implement BatchUpdater apply a whole commit atomically
+// (single transaction with rollback); otherwise the UI falls back to calling
+// UpdateRow/DeleteRow one statement at a time.
 type Updater interface {
 	UpdateRow(table string, pk, changes map[string]*string) error
 	DeleteRow(table string, pk map[string]*string) error
 	InsertRow(table string, values map[string]*string) error
+}
+
+// RowEdit pairs a primary key with the changed columns for a row update.
+type RowEdit struct {
+	PK      map[string]*string
+	Changes map[string]*string
+}
+
+// BatchUpdater is optionally implemented by Updater sessions that can apply a
+// whole commit inside one transaction. ddl is run as part of the same
+// transaction (MySQL's implicit-commit statements like DDL/DCL still force
+// the transaction to commit server-side, so they are best-effort but kept in
+// order). Returns on the first error and rolls back so no partial change is
+// persisted.
+type BatchUpdater interface {
+	ApplyChanges(table string, updates []RowEdit, deletes []map[string]*string, inserts []map[string]*string, ddl []string) error
 }
 
 // Canceller is optionally implemented by Session types that can terminate

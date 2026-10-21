@@ -137,7 +137,9 @@ func FormatValue(v interface{}) *string {
 	case string:
 		return &x
 	case time.Time:
-		s := x.Format("2006-01-02 15:04:05")
+		// Keep fractional seconds (MySQL datetime(6)/timestamp(6)) so an
+		// edited cell round-trips without silently truncating precision.
+		s := x.Format("2006-01-02 15:04:05.999999999")
 		return &s
 	case float64:
 		s := strconv.FormatFloat(x, 'g', -1, 64)

@@ -66,6 +66,8 @@ type dataTable struct {
 	tableName string
 	onGoto    func(table, column, value string)
 	onPin     func() // optional: pin this result (query pane)
+
+	rows *rowsWidget // the row area, kept so streamed rows can be appended
 }
 
 func newDataTable(d *TableData, status *statusBar) *dataTable {
@@ -127,6 +129,9 @@ func (t *dataTable) setData(d *TableData) {
 	t.findHits = nil
 	t.findHitSet = nil
 	t.findCur = 0
+	if t.rows != nil {
+		t.rows.rebuildRows()
+	}
 	t.Refresh()
 	if t.status != nil {
 		t.status.setRows(d.Fetched, d.Total, d.Approx)
@@ -308,6 +313,12 @@ func (t *dataTable) appendRows(rows [][]*string) {
 	if t.data.Fetched > t.data.Total {
 		t.data.Total = t.data.Fetched
 	}
+	// The row views are built when the grid is painted; append the new ones
+	// explicitly, otherwise a grid created empty (the query pane paints an
+	// empty grid, then streams batches into it) would stay blank.
+	if t.rows != nil {
+		t.rows.syncRows()
+	}
 	t.Refresh()
 	t.rescanFind()
 }
@@ -380,6 +391,7 @@ func (t *dataTable) totalMinWidth() float32 {
 func (t *dataTable) CreateRenderer() fyne.WidgetRenderer {
 	head := newHeaderWidget(t)
 	rows := newRowsWidget(t)
+	t.rows = rows
 	inner := container.NewBorder(head, nil, nil, nil, rows)
 	return widget.NewSimpleRenderer(container.NewHScroll(inner))
 }
@@ -394,6 +406,7 @@ type headerWidget struct {
 	corner    *canvas.Text
 	labels    []*canvas.Text
 	seps      []*canvas.Rectangle
+	titles    []string  // full column titles, fitted to the column on layout
 	colBounds []colSpan // visible column hit-test spans (local coords)
 }
 
@@ -416,6 +429,7 @@ func (h *headerWidget) CreateRenderer() fyne.WidgetRenderer {
 	h.corner.TextSize = 12
 	h.corner.TextStyle.Bold = true
 	objs := []fyne.CanvasObject{h.bg, h.corner}
+	h.titles = make([]string, len(h.t.data.Cols))
 	for range h.t.data.Cols {
 		l := canvas.NewText("", pal().gridHeaderFG)
 		l.TextSize = 12
@@ -449,6 +463,16 @@ func (r *headerRenderer) Layout(size fyne.Size) {
 			continue
 		}
 		lw := widths[i]
+		// Header text is clipped to its column too: with many columns the
+		// natural label width exceeds the column and the names would overlap.
+		full := ""
+		if i < len(r.h.titles) {
+			full = r.h.titles[i]
+		}
+		if full == "" {
+			full = r.h.t.colTitle(i)
+		}
+		l.Text = fitCellText(full, lw-16, l.TextSize, l.TextStyle)
 		lm := l.MinSize()
 		if isNumericType(r.h.t.data.Cols[i].Type) {
 			l.Move(fyne.NewPos(x+lw-14-lm.Width, (headerH-lm.Height)/2))
@@ -497,14 +521,15 @@ func (r *headerRenderer) Refresh() {
 		}
 		l.Show()
 		r.h.seps[i].Show()
-		l.Text = r.h.t.colTitle(i)
+		title := r.h.t.colTitle(i)
 		if r.h.t.sortCol == i {
 			if r.h.t.sortAsc {
-				l.Text += " ▲"
+				title += " ▲"
 			} else {
-				l.Text += " ▼"
+				title += " ▼"
 			}
 		}
+		r.h.titles[i] = title
 		// TablePlus highlights primary-key column headers in gold.
 		if r.h.t.data.Cols[i].Key == "PK" {
 			l.Color = p.pkHeader
@@ -515,6 +540,8 @@ func (r *headerRenderer) Refresh() {
 		r.h.seps[i].FillColor = p.gridLine
 		r.h.seps[i].Refresh()
 	}
+	// Re-fit the (possibly changed) titles and re-place the numeric headers.
+	r.Layout(r.h.Size())
 }
 
 func (r *headerRenderer) Destroy() {}
@@ -535,12 +562,39 @@ func newRowsWidget(t *dataTable) *rowsWidget {
 }
 
 func (rw *rowsWidget) CreateRenderer() fyne.WidgetRenderer {
-	box := container.NewVBox()
-	for i := range rw.t.data.Rows {
-		box.Objects = append(box.Objects, newRowView(rw.t, i))
+	rw.inner = container.NewVBox()
+	rw.rebuildRows()
+	return widget.NewSimpleRenderer(container.NewVScroll(rw.inner))
+}
+
+// rebuildRows recreates every row view, for when the data set (and possibly
+// the column list) changes wholesale.
+func (rw *rowsWidget) rebuildRows() {
+	if rw.inner == nil {
+		return
 	}
-	rw.inner = box
-	return widget.NewSimpleRenderer(container.NewVScroll(box))
+	rw.inner.Objects = rw.inner.Objects[:0]
+	for i := range rw.t.data.Rows {
+		rw.inner.Objects = append(rw.inner.Objects, newRowView(rw.t, i))
+	}
+	rw.inner.Refresh()
+}
+
+// syncRows brings the row views in line with the data: streamed batches add
+// views at the end, a shrinking data set drops the surplus. Rows keep their
+// positional index, so no view needs rebuilding on reorder.
+func (rw *rowsWidget) syncRows() {
+	if rw.inner == nil {
+		return
+	}
+	n := len(rw.t.data.Rows)
+	if n < len(rw.inner.Objects) {
+		rw.inner.Objects = rw.inner.Objects[:n]
+	}
+	for i := len(rw.inner.Objects); i < n; i++ {
+		rw.inner.Objects = append(rw.inner.Objects, newRowView(rw.t, i))
+	}
+	rw.inner.Refresh()
 }
 
 func (rw *rowsWidget) MinSize() fyne.Size {
@@ -702,6 +756,13 @@ type cellRenderer struct {
 	cv   *cellView
 	bg   *canvas.Rectangle
 	text *canvas.Text
+
+	// fit cache: the value before clipping, the width it was fitted to and the
+	// style used. A repaint with the same values skips re-measuring.
+	rawText  string
+	fitRaw   string
+	fitWidth float32
+	fitStyle fyne.TextStyle
 }
 
 func (r *cellRenderer) Objects() []fyne.CanvasObject {
@@ -711,6 +772,22 @@ func (r *cellRenderer) Objects() []fyne.CanvasObject {
 func (r *cellRenderer) Layout(size fyne.Size) {
 	r.bg.Resize(fyne.NewSize(size.Width-1, size.Height))
 	r.text.Resize(fyne.NewSize(size.Width-24, size.Height))
+	r.fitText()
+}
+
+// fitText clips the cell's raw value to the current width. canvas.Text neither
+// wraps nor clips, so an overlong value would otherwise paint over the
+// neighbouring columns and rows.
+func (r *cellRenderer) fitText() {
+	w := r.cv.Size().Width - 24
+	if w < 0 {
+		w = 0
+	}
+	if r.fitRaw == r.rawText && r.fitWidth == w && r.fitStyle == r.text.TextStyle {
+		return
+	}
+	r.fitRaw, r.fitWidth, r.fitStyle = r.rawText, w, r.text.TextStyle
+	r.text.Text = fitCellText(r.rawText, w, r.text.TextSize, r.text.TextStyle)
 }
 
 func (r *cellRenderer) MinSize() fyne.Size { return fyne.NewSize(60, rowHeight) }
@@ -732,28 +809,29 @@ func (r *cellRenderer) Refresh() {
 	isNull := cell == nil
 	numeric := cv.col < len(cv.t.data.Cols) && isNumericType(cv.t.data.Cols[cv.col].Type)
 
+	txt := ""
+	style := fyne.TextStyle{}
 	if isNull {
-		r.text.Text = "NULL"
+		txt = "NULL"
 		r.text.Color = p.gridNullFG
-		r.text.TextStyle = fyne.TextStyle{Italic: true}
+		style.Italic = true
 	} else {
 		// TablePlus color-codes cell values by column type; Query Magics
 		// (__format__ aliases) reshape the text/colour first.
 		raw := *cell
-		r.text.Text = raw
+		txt = raw
 		r.text.Color = cellColor(cv, p)
-		r.text.TextStyle = fyne.TextStyle{}
 		if cv.col < len(cv.t.data.Cols) {
 			_, magic := splitMagic(cv.t.data.Cols[cv.col].Name)
 			if strings.HasPrefix(magic, "goto:") {
 				// a table-jump link (TablePlus foreign-key arrow)
 				r.text.Color = p.statusLink
-				r.text.TextStyle = fyne.TextStyle{Italic: true}
+				style.Italic = true
 			} else if magic != "" {
-				if txt, c, style, ok := renderMagic(magic, raw, p); ok {
-					r.text.Text = txt
+				if mtxt, c, mstyle, ok := renderMagic(magic, raw, p); ok {
+					txt = mtxt
 					r.text.Color = c
-					r.text.TextStyle = style
+					style = mstyle
 				}
 			}
 		}
@@ -768,8 +846,11 @@ func (r *cellRenderer) Refresh() {
 	}
 	if cv.t.isFindHit(cv.row, cv.col) {
 		r.text.Color = findHighlightFG
-		r.text.TextStyle = fyne.TextStyle{Bold: true}
+		style.Bold = true
 	}
+	r.text.TextStyle = style
+	r.rawText = txt
+	r.fitText()
 	switch {
 	case cv.t.deleted[cv.row]:
 		r.bg.FillColor = p.rowDeletedBG
@@ -829,6 +910,82 @@ func cellColor(cv *cellView, p *palette) color.Color {
 }
 
 func (r *cellRenderer) Destroy() {}
+
+// singleLineText flattens a value onto one line. canvas.Text draws embedded
+// newlines and tabs literally, so a pretty-printed JSON (or any multi-line
+// text) would spill into the rows below instead of staying in its cell.
+func singleLineText(s string) string {
+	if !strings.ContainsAny(s, "\n\r\t") &&
+		!strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	space := false
+	for _, r := range s {
+		switch r {
+		case '\n', '\r', '\t':
+			r = ' '
+		}
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		if r == ' ' {
+			if space {
+				continue
+			}
+			space = true
+		} else {
+			space = false
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// fitCellText flattens s to a single line and ellipsizes it to width. Fyne's
+// canvas.Text neither wraps nor clips, so an overlong value (JSON, blobs, long
+// text) would otherwise paint across the neighbouring cells; TablePlus clips
+// the value at the cell edge instead.
+func fitCellText(s string, width, size float32, style fyne.TextStyle) string {
+	s = singleLineText(s)
+	if s == "" || width <= 0 {
+		return ""
+	}
+	if textWidth(s, size, style) <= width {
+		return s
+	}
+	r := []rune(s)
+	if len(r) > 512 {
+		// No cell is wide enough to show more than this; keeping the search
+		// bounded stops a megabyte-sized value from costing log(n) full
+		// measurements on every repaint.
+		r = r[:512]
+	}
+	lo, hi := 0, len(r)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if textWidth(string(r[:mid])+"…", size, style) <= width {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if lo == 0 {
+		return "…"
+	}
+	return string(r[:lo]) + "…"
+}
+
+// textWidth measures s in the current theme's font. Unit tests can run
+// without an app; fall back to a rough estimate there so layout code never
+// panics.
+func textWidth(s string, size float32, style fyne.TextStyle) float32 {
+	if fyne.CurrentApp() == nil {
+		return float32(len([]rune(s))) * size * 0.6
+	}
+	return fyne.MeasureText(s, size, style).Width
+}
 
 func isNumericType(t string) bool {
 	switch t {

@@ -222,7 +222,7 @@ func TestSubstituteParams(t *testing.T) {
 }
 
 func TestAutoLimit(t *testing.T) {
-	if got := autoLimit("SELECT * FROM t", "mysql", 100); got != "SELECT * FROM t LIMIT 100" {
+	if got := autoLimit("SELECT * FROM t", "mysql", 100); got != "SELECT * FROM t\nLIMIT 100" {
 		t.Errorf("autoLimit = %q", got)
 	}
 	if got := autoLimit("SELECT * FROM t LIMIT 5", "mysql", 100); got != "SELECT * FROM t LIMIT 5" {

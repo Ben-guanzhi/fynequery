@@ -45,7 +45,7 @@ func staticBox(v *string) fyne.CanvasObject {
 	border.StrokeWidth = 1
 	text := "NULL"
 	if v != nil {
-		text = *v
+		text = singleLineText(*v)
 	}
 	lbl := widget.NewLabel(text)
 	lbl.Truncation = fyne.TextTruncateEllipsis
@@ -83,7 +83,7 @@ func (vb *valueButton) CreateRenderer() fyne.WidgetRenderer {
 		vb.label.SetText("NULL")
 		vb.label.TextStyle.Italic = true
 	} else {
-		vb.label.SetText(*vb.value)
+		vb.label.SetText(singleLineText(*vb.value))
 	}
 	chevron := widget.NewIcon(theme.MenuDropDownIcon())
 	row := container.NewBorder(nil, nil, nil, chevron, container.NewPadded(vb.label))
@@ -123,9 +123,10 @@ func isDateTimeType(t string) bool {
 
 type detailsPane struct {
 	widget.BaseWidget
-	mode   int // 0 = 详情, 1 = 助理
-	search *widget.Entry
-	slot   *fyne.Container
+	mode     int // 0 = 详情, 1 = 助理
+	search   *widget.Entry
+	slot     *fyne.Container
+	modeBtns []*sideModeButton
 
 	fields []detailsField
 	onEdit func(col int)            // open the full cell editor
@@ -180,21 +181,24 @@ func (d *detailsPane) rebuild() {
 	if d.search != nil {
 		q = strings.ToLower(strings.TrimSpace(d.search.Text))
 	}
-	box := container.NewVBox()
 	if len(d.fields) == 0 {
-		box.Objects = append(box.Objects, hintLabel("打开一个表以查看结构，或选择一行查看字段值"))
-	} else {
-		shown := 0
-		for _, f := range d.fields {
-			if q != "" && !strings.Contains(strings.ToLower(f.Name), q) {
-				continue
-			}
-			box.Objects = append(box.Objects, d.fieldCard(f))
-			shown++
+		empty := widget.NewLabelWithStyle("打开一个表以查看结构，\n或选择一行查看字段值", fyne.TextAlignCenter, fyne.TextStyle{})
+		empty.Importance = widget.LowImportance
+		d.slot.Objects = []fyne.CanvasObject{container.NewCenter(empty)}
+		d.slot.Refresh()
+		return
+	}
+	box := container.NewVBox()
+	shown := 0
+	for _, f := range d.fields {
+		if q != "" && !strings.Contains(strings.ToLower(f.Name), q) {
+			continue
 		}
-		if shown == 0 {
-			box.Objects = append(box.Objects, hintLabel("没有匹配的字段"))
-		}
+		box.Objects = append(box.Objects, d.fieldCard(f))
+		shown++
+	}
+	if shown == 0 {
+		box.Objects = append(box.Objects, hintLabel("没有匹配的字段"))
 	}
 	d.slot.Objects = []fyne.CanvasObject{container.NewScroll(container.NewPadded(box))}
 	d.slot.Refresh()
@@ -259,12 +263,19 @@ func (d *detailsPane) applyValue(col int, v *string) {
 func (d *detailsPane) CreateRenderer() fyne.WidgetRenderer {
 	detailBtn := newSideModeButton("详情", func() { d.setMode(0) })
 	assistBtn := newSideModeButton("助理", func() { d.setMode(1) })
-	modeRow := container.NewGridWithColumns(2, detailBtn, assistBtn)
+	d.modeBtns = []*sideModeButton{detailBtn, assistBtn}
+	for i, b := range d.modeBtns {
+		b.setActive(i == d.mode)
+	}
+	modeRow := container.NewCenter(container.NewHBox(detailBtn, spacerW(4), assistBtn))
 
 	d.search = widget.NewEntry()
 	d.search.PlaceHolder = "搜索字段..."
 	d.search.OnChanged = func(string) { d.rebuild() }
-	searchRow := container.NewHBox(widget.NewIcon(theme.SearchIcon()), d.search)
+	clearBtn := newToolButton(theme.CancelIcon(), func() { d.search.SetText("") })
+	clearBtn.small = true
+	searchRow := container.NewBorder(nil, nil,
+		widget.NewIcon(theme.SearchIcon()), clearBtn, d.search)
 
 	assist := widget.NewLabelWithStyle("（暂无助理）", fyne.TextAlignCenter, fyne.TextStyle{Italic: true})
 
@@ -273,7 +284,7 @@ func (d *detailsPane) CreateRenderer() fyne.WidgetRenderer {
 	body := container.NewStack(d.slot, assist)
 
 	root := container.NewBorder(
-		container.NewVBox(modeRow, widget.NewSeparator(), searchRow),
+		container.NewVBox(container.NewPadded(modeRow), container.NewPadded(searchRow)),
 		nil, nil, nil,
 		body,
 	)
@@ -285,6 +296,9 @@ func (d *detailsPane) CreateRenderer() fyne.WidgetRenderer {
 
 func (d *detailsPane) setMode(m int) {
 	d.mode = m
+	for i, b := range d.modeBtns {
+		b.setActive(i == m)
+	}
 	d.Refresh()
 }
 

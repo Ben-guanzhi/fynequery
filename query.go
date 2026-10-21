@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image/color"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -49,7 +50,9 @@ type queryPane struct {
 	sessFn        func() db.Session
 	onReconnect   func() db.Session              // workspace dials a fresh session (timeout dialog)
 	onRowSelect   func(data *TableData, row int) // a result row was selected
+	onLog         func(string)                   // workspace console sink (optional)
 	colCache      map[string][]string            // table -> column names (completion)
+	colMu         sync.Mutex                     // guards colCache (autocomplete runs concurrently)
 	shortcutBound bool
 
 	// runGen discards result batches from a superseded run (TablePlus
@@ -67,6 +70,18 @@ type queryPane struct {
 	// find box + counter for in-result search on this pane's result grid.
 	findEntry   *gridSearchEntry
 	findCounter *widget.Label
+
+	// as-you-type completion popup (Ctrl+Space still opens the classic menu).
+	autoPop      *widget.PopUp
+	autoProxy    *editorFocusProxy // forwards keys to the editor while popup is open
+	autoList     *fyne.Container
+	autoRows     []*suggestionRow // rows in autoList, for keyboard selection
+	autoWords    []string
+	autoSel      int  // highlighted suggestion (-1 = none)
+	autoStart    int  // rune offset where the replaced word starts
+	autoWordLen  int  // rune length of the word being replaced
+	autoGen      int  // debounce/race guard
+	autoSuppress bool // set while inserting a completion (no re-trigger)
 }
 
 func newQueryPane(w fyne.Window, c Connection, sess db.Session, side *sidebar) *queryPane {
@@ -85,12 +100,35 @@ func (qp *queryPane) session() db.Session {
 	return qp.sess
 }
 
+// logQuery forwards one console line to the workspace (no-op without a hook).
+func (qp *queryPane) logQuery(format string, args ...interface{}) {
+	if qp.onLog != nil {
+		qp.onLog(fmt.Sprintf(format, args...))
+	}
+}
+
+// oneLine collapses a SQL statement to its first line and truncates it so the
+// console stays readable for long scripts.
+func oneLine(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i] + " …"
+	}
+	if r := []rune(s); len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
+}
+
 func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	qp.editor = widget.NewMultiLineEntry()
-	qp.editor.SetPlaceHolder("Write SQL here, e.g.\nSELECT id, name FROM users LIMIT 20;\n\nHint: Ctrl+Space completes keywords, tables and columns.")
-	qp.editor.SetText("SELECT *\nFROM users\nLIMIT 20;")
-	// keep the cursor-position readout roughly current
-	qp.editor.OnChanged = func(string) { qp.refreshPos() }
+	qp.editor.SetPlaceHolder("Write SQL here, e.g.\nSELECT id, name FROM users LIMIT 20;\n\nCtrl+Enter 执行当前语句 · Ctrl+Space 补全关键字 / 表 / 列")
+	// keep the cursor-position readout roughly current and offer completions
+	// while typing (the popup updates as the word under the cursor changes)
+	qp.editor.OnChanged = func(string) {
+		qp.refreshPos()
+		qp.scheduleAutoComplete()
+	}
 
 	qp.posLabel = widget.NewLabel("Line 1, Col 1, Pos 0")
 	qp.limitSel = widget.NewSelect([]string{"100 rows", "500 rows", "1000 rows", "No limit"}, func(string) {})
@@ -150,9 +188,6 @@ func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 		qp.findCounter,
 	)
 
-	split := container.NewVSplit(editorPane, container.NewBorder(nil, qp.status, nil, nil, qp.resultSlot))
-	split.SetOffset(0.5)
-
 	// pinned-result chip row (TablePlus "Pin result"), shown only when there
 	// are pins. Clicking a chip shows that snapshot; its × un-pins it.
 	qp.pinBar = container.NewHBox()
@@ -160,11 +195,22 @@ func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 
 	// search bar sits just above the result grid
 	searchWrap := container.NewBorder(nil, nil, nil, nil, findBox)
-	resultArea := container.NewBorder(nil, nil, nil, nil, split)
-	resultArea = container.NewVBox(qp.pinBar, searchWrap, resultArea)
 
-	qp.bindCompletionShortcut()
-	return widget.NewSimpleRenderer(resultArea)
+	// The result pane stacks the pin/search bars above the grid and the status
+	// bar below it. A Border centre stretches the grid to fill the trailing half
+	// of the split, so there is no dead space underneath the results.
+	resultPane := container.NewBorder(
+		container.NewVBox(qp.pinBar, searchWrap), qp.status, nil, nil, qp.resultSlot)
+
+	// Editor (top) and result (bottom) share one draggable split, so the divider
+	// adjusts both panes' heights. Making the split the root widget lets it fill
+	// the whole tab; wrapping it in a VBox had clamped it to its minimum height
+	// and left a large blank area below the results.
+	split := container.NewVSplit(editorPane, resultPane)
+	split.SetOffset(0.5)
+
+	qp.bindEditorShortcuts()
+	return widget.NewSimpleRenderer(split)
 }
 
 // resultGrid returns the currently displayed result grid, or nil if none.
@@ -337,6 +383,7 @@ func (qp *queryPane) run() {
 	if qp.session() == nil {
 		return
 	}
+	qp.hideAuto()
 	text := qp.editor.Text
 	if sel := strings.TrimSpace(qp.editor.SelectedText()); sel != "" {
 		qp.runChain([]string{sel})
@@ -361,6 +408,7 @@ func (qp *queryPane) runAll() {
 	if qp.running || qp.session() == nil {
 		return
 	}
+	qp.hideAuto()
 	stmts := splitStatementsForRun(qp.editor.Text)
 	if len(stmts) == 0 {
 		showInfo(qp.window, "Run All", "No statements to run.")
@@ -414,6 +462,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 	stmt = autoLimit(stmt, qp.conn.Driver, qp.rowLimit())
 	label := resultName(stmt)
 	sess := qp.session()
+	qp.logQuery("执行：%s", oneLine(stmt, 120))
 	qp.timer.Text = fmt.Sprintf("running %d/%d…", i+1, len(all))
 	qp.timer.Color = pal().statusFG
 	qp.timer.Refresh()
@@ -429,9 +478,11 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 				switch {
 				case errors.Is(err, db.ErrQueryCancelled):
 					qp.timer.Text = "cancelled"
+					qp.logQuery("已取消：%s", oneLine(stmt, 80))
 					qp.finishRun()
 				case looksLikeTimeout(err):
 					qp.timer.Text = "timeout"
+					qp.logQuery("执行超时：%s", oneLine(stmt, 80))
 					qp.finishRun()
 					qp.showTimeoutDialog(stmt, all, i)
 				default:
@@ -440,6 +491,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 						// (TablePlus "Return on Error" inverted).
 						qp.timer.Text = fmt.Sprintf("stmt %d failed, continuing…", i+1)
 						qp.timer.Refresh()
+						qp.logQuery("执行失败（继续）：%v", err)
 						qp.finishRun()
 						go func() {
 							defer func() { recover() }()
@@ -450,6 +502,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 					}
 					qp.timer.Text = "error"
 					qp.timer.Refresh()
+					qp.logQuery("执行失败：%v", err)
 					qp.finishRun()
 					dialog.NewError(err, qp.window).Show()
 				}
@@ -510,9 +563,11 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 			if res.RowsAffected > 0 && total == 0 {
 				noun = "rows affected"
 			}
-			qp.timer.Text = fmt.Sprintf("%d ms · %d %s", res.DurationMS, max64(res.RowsAffected, int64(total)), noun)
+			affected := max64(res.RowsAffected, int64(total))
+			qp.timer.Text = fmt.Sprintf("%d ms · %d %s", res.DurationMS, affected, noun)
 			qp.timer.Color = pal().statusFG
 			qp.timer.Refresh()
+			qp.logQuery("完成：%d %s · %d ms", affected, noun, res.DurationMS)
 			qp.status.setQueryInfo(qp.resultStatusLine(label, len(res.Columns),
 				fmt.Sprintf("%d %s", total, noun)))
 			if qp.side != nil {

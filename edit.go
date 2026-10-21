@@ -449,16 +449,27 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 	progress.Show()
 	safeGo("commit", func() {
 		var ferr error
-		if ok {
+		if batcher, batched := ws.sess.(db.BatchUpdater); batched && ok {
+			// Atomic path: all row edits + DDL run in one transaction, so a
+			// mid-batch error rolls back everything instead of leaving a partial
+			// commit.
+			rowEdits := make([]db.RowEdit, 0, len(updates))
 			for _, u := range updates {
-				if err := up.UpdateRow(table, u.pk, u.changes); err != nil {
-					ferr = err
-					break
+				rowEdits = append(rowEdits, db.RowEdit{PK: u.pk, Changes: u.changes})
+			}
+			ferr = batcher.ApplyChanges(table, rowEdits, deletes, nil, ddl)
+		} else {
+			// Fallback for sessions without transaction support: one statement at
+			// a time (each autocommit).
+			if ok {
+				for _, u := range updates {
+					if err := up.UpdateRow(table, u.pk, u.changes); err != nil {
+						ferr = err
+						break
+					}
 				}
 			}
-		}
-		if ferr == nil {
-			if ok {
+			if ferr == nil && ok {
 				for _, pk := range deletes {
 					if err := up.DeleteRow(table, pk); err != nil {
 						ferr = err
@@ -466,13 +477,13 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 					}
 				}
 			}
-		}
-		// Then the queued structural DDL (ALTER statements).
-		if ferr == nil && len(ddl) > 0 {
-			for _, stmt := range ddl {
-				if _, err := ws.sess.Query(stmt, 1); err != nil {
-					ferr = fmt.Errorf("DDL: %w", err)
-					break
+			// Then the queued structural DDL (ALTER statements).
+			if ferr == nil && len(ddl) > 0 {
+				for _, stmt := range ddl {
+					if _, err := ws.sess.Query(stmt, 1); err != nil {
+						ferr = fmt.Errorf("DDL: %w", err)
+						break
+					}
 				}
 			}
 		}

@@ -38,9 +38,12 @@ func (f *fakeSession) Query(sql string, _ int) (proto.QueryResult, error) {
 
 func TestDumpDatabase(t *testing.T) {
 	sess := &fakeSession{}
-	out, err := dumpDatabase(sess, "mysql", "shop", true)
+	out, warnings, err := dumpDatabase(sess, "mysql", "shop", true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
 	}
 	for _, want := range []string{
 		"DROP TABLE IF EXISTS `users`;",
@@ -112,6 +115,28 @@ func TestSplitStatements(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("stmt %d: %q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSplitStatementsDelimited(t *testing.T) {
+	script := "SET FOREIGN_KEY_CHECKS=0;\n" +
+		"DELIMITER ;;\n" +
+		"CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND;;\n" +
+		"DELIMITER ;\n" +
+		"SET FOREIGN_KEY_CHECKS=1;\n"
+	got := splitStatementsDelimited(script)
+	want := []string{
+		"SET FOREIGN_KEY_CHECKS=0",
+		"CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND",
+		"SET FOREIGN_KEY_CHECKS=1",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d stmts: %#v", len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stmt %d:\n%q\nwant\n%q", i, got[i], want[i])
 		}
 	}
 }

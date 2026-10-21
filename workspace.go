@@ -43,7 +43,6 @@ type workspace struct {
 	queryTabs        []*queryPane      // one independent query pane per SQL tab
 	details          *detailsPane      // right sidebar
 	detailWrap       fyne.CanvasObject // toggled by the toolbar button
-	crumbBox         *crumbBox         // rounded table-name field
 	currentDB        string            // selected database ("" = none yet)
 	dataSlot         *fyne.Container   // holds the current data grid (replaced per table)
 	grid             *dataTable
@@ -63,20 +62,29 @@ type workspace struct {
 	txnRow           *fyne.Container // bottom-bar row holding the transaction strip
 	prevBtn          *flatButton
 	nextBtn          *flatButton
-	crumbBar         fyne.CanvasObject // top nav row (toggled per tab)
 	bottomBar        fyne.CanvasObject // data-view bottom bar (hidden in query tabs)
 	pendingDDL       []string          // queued ALTER TABLE statements (Preview/Commit)
 	findCounterLabel *widget.Label     // "cur/total" counter for the data-grid find box
 	loadingMu        sync.Mutex
 	loadingGen       int // generation counter to discard stale async results
 	// toolbar
-	ribbon        *serverRibbon     // green server-info ribbon (opens connection picker)
+	ribbon        *serverRibbon     // connection ribbon (opens the connection picker)
 	ribbonTLS     string            // TLS version shown in the ribbon ("" = omit)
 	dbSelect      *crumbPill        // database selector pill (opens 打开数据库)
+	sideBtn       *clickableIcon    // toolbar sidebar toggle (selected state)
+	detailBtn     *clickableIcon    // toolbar details toggle
+	consoleBtn    *clickableIcon    // toolbar console toggle
 	sideWrap      fyne.CanvasObject // left sidebar wrapper (toggled by the toolbar)
 	body          fyne.CanvasObject // root container (refreshed after panel toggles)
 	welcomeReturn func()            // brings the welcome window back after close
 	skipWelcome   bool              // suppress welcomeReturn on the next close
+	// bottom console log (mockup "控制台日志")
+	console        *consolePane
+	consoleWrap    fyne.CanvasObject
+	consoleSplit   *container.Split
+	consoleVisible bool
+	// document tab strip; hidden while the data tab is alone
+	tabStrip fyne.CanvasObject
 }
 
 // openWorkspace dials nothing: the caller passes an established session.
@@ -85,7 +93,7 @@ type workspace struct {
 func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, onClose func()) {
 	darkMode = dark
 	w := app.NewWindow("TablePro — " + conn.Name)
-	w.Resize(fyne.NewSize(1280, 800))
+	w.Resize(fyne.NewSize(1360, 860))
 
 	// TablePlus opens at the server level with no database selected. Re-dial
 	// without a default database so the workspace starts in the "未选择数据库"
@@ -142,6 +150,10 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 	// the app theme earlier would make Fyne walk every window's HWND for
 	// dark-mode and panic on any that is not yet shown.
 	applyTheme(w)
+	// The window was sized before the monitor scale was known; re-apply it so
+	// the canvas matches the real client area (otherwise the content is
+	// rendered larger than the window and clipped).
+	fitWindowWhenScaled(w, fyne.NewSize(1360, 860))
 	ws.startKeepAlive()
 }
 
@@ -266,17 +278,13 @@ func (ws *workspace) openMoreMenu() {
 				fmt.Sprintf("每 30 秒向服务器发一次 ping，防止空闲连接被防火墙/SSH 断开。当前：%s。",
 					map[bool]string{true: "开", false: "关"}[keepAliveEnabled]))
 		}),
-		fyne.NewMenuItem(privacyLabel, func() {
-			on := togglePrivacyMode()
-			ws.refreshRibbon()
-			showInfo(ws.window, "隐私模式",
-				fmt.Sprintf("隐私模式已%s。\n主机/端口/库名在界面中显示为 •••。", map[bool]string{true: "开启", false: "关闭"}[on]))
-		}),
+		fyne.NewMenuItem(privacyLabel, func() { ws.togglePrivacy() }),
 		fyne.NewMenuItem("ER Diagram", func() { ws.openERDiagram() }),
 		fyne.NewMenuItem("User Management", func() { ws.openUserManagement() }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("侧边栏 显示/隐藏", func() { ws.toggleSidebar() }),
 		fyne.NewMenuItem("详情面板 显示/隐藏", func() { ws.toggleDetails() }),
+		fyne.NewMenuItem("控制台 显示/隐藏", func() { ws.toggleConsole() }),
 	)
 	pop := widget.NewPopUpMenu(menu, ws.window.Canvas())
 	pop.ShowAtPosition(fyne.NewPos(88, 46))
@@ -292,6 +300,9 @@ func (ws *workspace) toggleSidebar() {
 	} else {
 		ws.sideWrap.Show()
 	}
+	if ws.sideBtn != nil {
+		ws.sideBtn.setSelected(ws.sideWrap.Visible())
+	}
 	ws.body.Refresh()
 }
 
@@ -305,8 +316,53 @@ func (ws *workspace) toggleDetails() {
 	} else {
 		ws.detailWrap.Show()
 	}
+	if ws.detailBtn != nil {
+		ws.detailBtn.setSelected(ws.detailWrap.Visible())
+	}
 	if ws.body != nil {
 		ws.body.Refresh()
+	}
+}
+
+// toggleConsole shows/hides the bottom log console. The split offset is
+// pushed to 1 while hidden so the content reclaims the space.
+func (ws *workspace) toggleConsole() {
+	if ws.consoleWrap == nil {
+		return
+	}
+	ws.consoleVisible = !ws.consoleVisible
+	if ws.consoleVisible {
+		ws.consoleWrap.Show()
+		if ws.consoleSplit != nil {
+			ws.consoleSplit.SetOffset(0.78)
+		}
+	} else {
+		ws.consoleWrap.Hide()
+		if ws.consoleSplit != nil {
+			ws.consoleSplit.SetOffset(1)
+		}
+	}
+	if ws.consoleBtn != nil {
+		ws.consoleBtn.setSelected(ws.consoleVisible)
+	}
+	if ws.body != nil {
+		ws.body.Refresh()
+	}
+}
+
+// togglePrivacy flips privacy mode (host/db redaction) and reports the state.
+func (ws *workspace) togglePrivacy() {
+	on := togglePrivacyMode()
+	ws.refreshRibbon()
+	showInfo(ws.window, "隐私模式",
+		fmt.Sprintf("隐私模式已%s。\n主机/端口/库名在界面中显示为 •••。", map[bool]string{true: "开启", false: "关闭"}[on]))
+}
+
+// logf appends one line to the bottom console. Call from the UI thread
+// (event handlers or safeDo) only.
+func (ws *workspace) logf(format string, args ...interface{}) {
+	if ws.console != nil {
+		ws.console.log(fmt.Sprintf(format, args...))
 	}
 }
 
@@ -343,19 +399,19 @@ func (ws *workspace) switchDatabase(name string) {
 	ws.currentDB = name
 	ws.tableName = ""
 	ws.updateBanner()
+	ws.logf("已选择数据库 %s", name)
 	ws.syncChrome() // blank center until a table is opened
 	ws.loadInventory()
 	ws.loadDatabases()
 	ws.loadTLS()
 }
 
-// sideWidth mirrors TablePlus' sidebar column (~18% of the window, measured
-// 352px in a 1915px live window).
-const sideWidth float32 = 236
+// sideWidth is the initial width of the sidebar column (~18% of the window).
+const sideWidth float32 = 250
 
 // detailWidth is the initial width of the right 详情/助理 pane. Both panels are
 // resizable afterwards by dragging their divider.
-const detailWidth float32 = 280
+const detailWidth float32 = 230
 
 // keep-alive + reconnect helpers (TablePlus "keep connection alive").
 
@@ -455,6 +511,7 @@ func (ws *workspace) build() fyne.CanvasObject {
 		}
 		ws.tabs.setActive(ws.tabs.current)
 		ws.showTab(ws.tabs.current)
+		ws.syncTabStrip()
 	}
 	// seed tabs: one data tab (empty until a table is opened). SQL editor
 	// tabs are only created on demand (SQL button / +), matching TablePlus.
@@ -501,15 +558,21 @@ func (ws *workspace) build() fyne.CanvasObject {
 	// keeps each document tab's view in its own controller.
 	ws.content = container.NewStack(ws.dataStack)
 
-	// ---- crumb bar above the content area ----
-	ws.crumbBar = ws.buildCrumbBar()
-
 	// bottom: single TablePlus-style bar (segment + range text + paging).
 	// Shown only on the data tab; the query tab has its own status bar and,
 	// like TablePlus's query workspace, no 数据/结构/索引 segmented control.
 	ws.bottomBar = container.NewVBox(ws.buildBottomBar())
-	inner := container.NewBorder(ws.crumbBar, nil, nil, nil, ws.content)
-	right := container.NewBorder(nil, ws.bottomBar, nil, nil, inner)
+	centerCol := container.NewBorder(nil, ws.bottomBar, nil, nil, ws.content)
+
+	// Bottom console log (mockup "控制台日志"): part of the centre column so
+	// the sidebars keep running the full window height.
+	ws.console = newConsolePane()
+	ws.consoleWrap = newPanelBackground(ws.console,
+		func() color.Color { return pal().contentBG })
+	ws.consoleVisible = true
+	ws.consoleSplit = container.NewVSplit(centerCol, ws.consoleWrap)
+	ws.consoleSplit.SetOffset(0.78)
+	right := ws.consoleSplit
 
 	// Resizable columns: sidebar | content | details. The split divider is the
 	// accent-coloured border and can be dragged to resize each panel.
@@ -706,66 +769,91 @@ func (ws *workspace) current(gen int) bool {
 	return ws.loadingGen == gen
 }
 
-// buildStrip is the TablePlus top of the workspace:
-//
-//	row 1: toolbar — sidebar toggle | + | history | more | [db ▾] [SQL] |
-//	      connection breadcrumb pill (center) | info, refresh, details toggle
-//	row 2: document tabs (+ add button)
+// buildStrip is the redesigned workspace header: a single light-gray toolbar
+// with white rounded chip groups, the wide connection ribbon in the centre and
+// a document tab strip that only appears when more than the data tab is open.
 func (ws *workspace) buildStrip() fyne.CanvasObject {
-	// ---- green server-info ribbon (click → pick another connection) ----
-	// TablePlus format: "LOCAL | MySQL 5.7.40 : TLSv1.2 : host : db : table".
+	// ---- connection ribbon (tap → pick a connection, dot → connection info) ----
 	ws.ribbon = newServerRibbon()
 	ws.ribbon.onTap = func() { ws.openConnectionPicker() }
+	ws.ribbon.onInfo = func() {
+		showInfo(ws.window, "Connection", ws.connInfoText())
+	}
 	ws.refreshRibbon()
 
-	// ---- database selector pill (click → 打开数据库 sheet) ----
-	dbName := ws.currentDB
-	if dbName == "" {
-		dbName = "Select Database"
-	}
-	ws.dbSelect = newCrumbPill(widget.NewIcon(theme.StorageIcon()), dbName,
-		theme.MenuDropDownIcon(), func() { ws.openDatabasePicker() })
-
-	// ---- left tools ----
-	leftTools := container.NewHBox(
-		newToolButton(theme.MenuIcon(), func() { ws.toggleSidebar() }),
-		newToolButton(theme.ContentAddIcon(), func() { ws.addQueryTab() }),
-		newToolButton(theme.HistoryIcon(), func() { ws.side.setMode(sidebarHistory) }),
+	// ---- left: menu / more, connection switcher, view actions, db + SQL ----
+	ws.sideBtn = newToolButton(theme.MenuIcon(), func() { ws.toggleSidebar() })
+	ws.sideBtn.setSelected(true)
+	menuGroup := newToolGroup(
+		ws.sideBtn,
 		newToolButton(theme.MoreVerticalIcon(), func() { ws.openMoreMenu() }),
 	)
 
-	sqlBtn := newFlatButton("SQL")
-	sqlBtn.onTap = func() { ws.addQueryTab() }
+	connBtn := newRoundToolButton(theme.ComputerIcon(), func() { ws.openConnectionPicker() })
 
-	// ---- right tools ----
+	viewGroup := newToolGroup(
+		newToolButton(theme.ViewRefreshIcon(), func() { ws.reloadTable() }),
+		newToolButton(theme.VisibilityIcon(), func() { ws.togglePrivacy() }),
+		newToolButton(theme.GridIcon(), func() { ws.openERDiagram() }),
+	)
+
+	dbName := ws.currentDB
+	if dbName == "" {
+		dbName = "选择数据库"
+	}
+	ws.dbSelect = newCrumbPill(widget.NewIcon(theme.StorageIcon()), dbName,
+		theme.MenuDropDownIcon(), func() { ws.openDatabasePicker() })
+	dbSQLGroup := newToolGroup(
+		ws.dbSelect,
+		newIconTextButton(theme.DocumentCreateIcon(), "SQL", func() { ws.addQueryTab() }),
+	)
+
+	left := container.NewHBox(menuGroup, spacerW(6), connBtn, spacerW(6),
+		viewGroup, spacerW(6), dbSQLGroup)
+
+	// ---- right: connection/refresh/settings, console/details toggles ----
 	ws.editBtn = newToolButton(theme.DocumentCreateIcon(), func() { ws.toggleEditMode() })
-	rightTools := container.NewHBox(
+	opsGroup := newToolGroup(
 		newToolButton(theme.InfoIcon(), func() {
 			showInfo(ws.window, "Connection", ws.connInfoText())
 		}),
 		ws.editBtn,
-		newToolButton(theme.AccountIcon(), func() {
-			showInfo(ws.window, "Authentication", "This connection has no additional authentication.")
-		}),
-		newToolButton(theme.LoginIcon(), func() { showLicenseDialog(ws.window) }),
-		newToolButton(theme.ViewRefreshIcon(), func() { ws.reloadTable() }),
-		newToolButton(theme.ListIcon(), func() { ws.toggleDetails() }),
+		newToolButton(theme.SettingsIcon(), func() { ws.openMoreMenu() }),
 	)
+	ws.consoleBtn = newToolButton(theme.DocumentIcon(), func() { ws.toggleConsole() })
+	ws.consoleBtn.setSelected(true)
+	ws.detailBtn = newToolButton(theme.ViewRestoreIcon(), func() { ws.toggleDetails() })
+	ws.detailBtn.setSelected(true)
+	paneGroup := newToolGroup(ws.consoleBtn, ws.detailBtn)
+	right := container.NewHBox(opsGroup, spacerW(6), paneGroup)
 
-	toolRow := container.NewBorder(nil, nil,
-		container.NewHBox(leftTools, spacerW(10), ws.dbSelect, spacerW(8), sqlBtn),
-		container.NewPadded(rightTools),
-		container.NewCenter(container.NewPadded(ws.ribbon)),
-	)
+	toolRow := container.NewBorder(nil, nil, left, right,
+		container.NewPadded(ws.ribbon))
 	toolBox := newPanelBackground(container.NewPadded(toolRow),
-		func() color.Color { return pal().stripBG })
+		func() color.Color { return pal().toolbarBG })
 
-	// ---- row 2: document tabs (full-width strip; the tab bar positions the
-	// "+" button right after the last tab itself) ----
-	tabBox := newPanelBackground(container.NewPadded(ws.tabs),
+	// ---- document tabs (hidden while the data tab is alone) ----
+	ws.tabStrip = newPanelBackground(container.NewPadded(ws.tabs),
 		func() color.Color { return pal().stripBG })
+	ws.tabStrip.Hide()
 
-	return container.NewVBox(toolBox, tabBox)
+	return container.NewVBox(toolBox, ws.tabStrip)
+}
+
+// syncTabStrip shows the document tab strip only when there is more than one
+// document (the mockup's clean blank state has no tab row).
+func (ws *workspace) syncTabStrip() {
+	if ws.tabStrip == nil || ws.tabs == nil {
+		return
+	}
+	if len(ws.tabs.tabs) > 1 {
+		ws.tabStrip.Show()
+	} else {
+		ws.tabStrip.Hide()
+	}
+	if ws.body != nil {
+		ws.body.Refresh()
+	}
 }
 
 // bindDataFind wires the data grid's hit counter to the bottom-bar label.
@@ -833,7 +921,7 @@ func (ws *workspace) buildBottomBar() fyne.CanvasObject {
 	row1 := container.NewHBox(container.NewPadded(ws.segment), spacerW(8),
 		addRow, spacerW(6), delRow, spacerW(14), ws.txnRow)
 	row1Box := newPanelBackground(container.NewPadded(row1),
-		func() color.Color { return pal().contentBG })
+		func() color.Color { return pal().toolbarBG })
 
 	// ---- row 2: range text (left) + 筛选器/列 + paging (right) ----
 	ws.prevBtn = newFlatButton("‹")
@@ -841,7 +929,7 @@ func (ws *workspace) buildBottomBar() fyne.CanvasObject {
 	ws.nextBtn = newFlatButton("›")
 	ws.nextBtn.onTap = func() { ws.gotoOffset(ws.offset + browseLimit) }
 	pageMark := newFlatButton("≡")
-	pageMark.onTap = func() {}
+	pageMark.onTap = func() { ws.showColumnsDialog() }
 	filtersBtn := newFlatButton("Filter")
 	filtersBtn.onTap = func() { ws.showFilterDialog() }
 	columnsBtn := newFlatButton("Columns")
@@ -870,26 +958,9 @@ func (ws *workspace) buildBottomBar() fyne.CanvasObject {
 	findBox := container.NewHBox(widget.NewIcon(theme.SearchIcon()), findEntry, ws.findCounterLabel)
 	row2 := newPanelBackground(
 		container.NewBorder(nil, nil, container.NewHBox(findBox, ws.status), row2right, layout.NewSpacer()),
-		func() color.Color { return pal().contentBG })
+		func() color.Color { return pal().toolbarBG })
 
-	return container.NewVBox(row1Box, row2)
-}
-
-// buildCrumbBar is the navigation row above the data area: < > arrows and
-// the rounded current-table field.
-func (ws *workspace) buildCrumbBar() fyne.CanvasObject {
-	p := pal()
-	prev := newToolButton(theme.NavigateBackIcon(), func() { ws.gotoOffset(ws.offset - browseLimit) })
-	next := newToolButton(theme.NavigateNextIcon(), func() { ws.gotoOffset(ws.offset + browseLimit) })
-
-	ws.crumbBox = newCrumbBox("")
-
-	left := container.NewHBox(prev, next, spacerW(6))
-	return container.NewBorder(nil, nil, left, nil,
-		container.NewStack(
-			canvas.NewRectangle(p.contentBG),
-			container.NewPadded(ws.crumbBox),
-		))
+	return container.NewVBox(widget.NewSeparator(), row1Box, row2)
 }
 
 // flatButton: a light bordered button like Columns/Filters.
@@ -972,6 +1043,7 @@ func (ws *workspace) newQueryTabPane() *queryPane {
 	qp.sessFn = func() db.Session { return ws.sess }
 	qp.onReconnect = ws.reconnect
 	qp.onRowSelect = ws.showQueryRow
+	qp.onLog = func(s string) { ws.logf("%s", s) }
 	qp.Hide()
 	return qp
 }
@@ -1007,6 +1079,7 @@ func (ws *workspace) addQueryTabTitled(title, sql string) *queryPane {
 	idx := len(ws.queryTabs) // 1-based tab index (tab 0 is the data tab)
 	ws.tabs.setActive(idx)
 	ws.showTab(idx)
+	ws.syncTabStrip()
 	if sql != "" {
 		safeDo(func() {
 			if qp.editor != nil {
@@ -1178,25 +1251,28 @@ func (ws *workspace) showQueryMenu(q SavedQuery, pos fyne.Position) {
 	widget.ShowPopUpMenuAtPosition(menu, canvas, pos)
 }
 
-// syncChrome shows/hides the data-view chrome (crumb bar + bottom bar). When
-// no table is open on the data tab the center is left blank, like TablePlus
-// right after a database is selected.
+// syncChrome shows/hides the data-view bottom bar. When no table is open on
+// the data tab the centre stays blank (mockup), and query tabs keep their own
+// editor/status chrome.
 func (ws *workspace) syncChrome() {
-	if ws.crumbBar == nil || ws.bottomBar == nil {
+	if ws.bottomBar == nil {
 		return
 	}
 	dataTab := ws.tabs.current == 0
 	hasTable := ws.tableName != ""
-	if dataTab && !hasTable {
-		ws.crumbBar.Hide()
-		ws.bottomBar.Hide()
-		return
-	}
-	ws.crumbBar.Show()
 	if dataTab && hasTable {
 		ws.bottomBar.Show() // data tab: 数据/结构/索引 + paging
 	} else {
-		ws.bottomBar.Hide() // query tab: editor + results only
+		ws.bottomBar.Hide() // blank data tab or query tab: editor + results only
+	}
+	// Keep the centre blank until a table is opened (the empty grid would
+	// otherwise paint its row-number gutter in the middle of the mockup).
+	if ws.dataStack != nil {
+		if dataTab && hasTable {
+			ws.dataStack.Show()
+		} else {
+			ws.dataStack.Hide()
+		}
 	}
 	if ws.body != nil {
 		ws.body.Refresh()
@@ -1215,6 +1291,7 @@ func (ws *workspace) showTab(i int) {
 		if k+1 == i {
 			qp.Show()
 		} else {
+			qp.hideAuto() // the popup is a canvas overlay, not clipped by the hidden pane
 			qp.Hide()
 		}
 	}
@@ -1231,6 +1308,7 @@ func (ws *workspace) openTable(name string) {
 	}
 	ws.tableName = name
 	ws.updateBanner()
+	ws.logf("打开表 %s …", name)
 	if len(ws.tabs.tabs) > 0 {
 		ws.tabs.tabs[0].setTitle(name)
 	}
@@ -1238,9 +1316,6 @@ func (ws *workspace) openTable(name string) {
 	ws.showTab(0)
 	ws.segment.set(0)
 
-	if ws.crumbBox != nil {
-		ws.crumbBox.setText(name)
-	}
 	ws.offset = 0
 	ws.status.setFrom(1)
 	ws.status.setTable(name)
@@ -1271,6 +1346,7 @@ func (ws *workspace) openTable(name string) {
 				return
 			}
 			if err != nil {
+				ws.logf("打开表 %s 失败：%v", name, err)
 				showInfo(ws.window, "Load "+name, err.Error())
 				return
 			}
@@ -1285,6 +1361,7 @@ func (ws *workspace) openTable(name string) {
 			ws.status.setColumns(len(data.Cols))
 			ws.status.setRows(data.Fetched, data.Total, false)
 			ws.updatePaging(false, len(data.Rows) >= browseLimit)
+			ws.logf("已加载表 %s：%d 行", name, len(data.Rows))
 
 			// structure pane + approximate total in the background
 			ws.loadStructure(name, gen)

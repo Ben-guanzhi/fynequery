@@ -88,6 +88,28 @@ func TestDetailsPaneRow(t *testing.T) {
 	}
 }
 
+// TestDetailsValueBoxFlattensMultiLine pins that a multi-line value (a
+// pretty-printed JSON blob, a text field with line breaks) is flattened onto
+// one line in the details value box, matching the grid cell; otherwise the
+// box would grow to fit every line and shove the fields below it around.
+func TestDetailsValueBoxFlattensMultiLine(t *testing.T) {
+	test.NewApp()
+	raw := "{\n  \"name\": \"A  B\",\n  \"age\": 30\n}"
+	vb := newValueButton(&raw)
+	w := test.NewWindow(vb)
+	w.Resize(fyne.NewSize(220, 60))
+	if vb.label == nil {
+		t.Fatal("valueButton renderer did not build its label")
+	}
+	if got := vb.label.Text; strings.ContainsAny(got, "\n\r\t") {
+		t.Fatalf("valueButton did not flatten multi-line value: %q", got)
+	}
+	if got := vb.label.Text; strings.Contains(got, "\n") {
+		t.Fatalf("valueButton kept a newline: %q", got)
+	}
+	w.Close()
+}
+
 func TestIsDateTimeType(t *testing.T) {
 	cases := map[string]bool{
 		"datetime": true, "timestamp": true, "date": true, "time": true,

@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -53,7 +54,7 @@ func showBackupDialog(w fyne.Window, c Connection, sess db.Session) {
 			progress := dialog.NewProgressInfinite("Backup", "Dumping "+c.Name+"…", w)
 			progress.Show()
 			safeGo("backup", func() {
-				script, derr := dumpDatabase(sess, c.Driver, database, includeData)
+				script, warnings, derr := dumpDatabase(sess, c.Driver, database, includeData)
 				if derr == nil {
 					_, derr = wc.Write([]byte(script))
 				}
@@ -66,7 +67,11 @@ func showBackupDialog(w fyne.Window, c Connection, sess db.Session) {
 						dialog.NewError(derr, w).Show()
 						return
 					}
-					showInfo(w, "Backup", fmt.Sprintf("Backup complete.\n%d bytes written.", len(script)))
+					msg := fmt.Sprintf("Backup complete.\n%d bytes written.", len(script))
+					if len(warnings) > 0 {
+						msg += "\n\n" + strings.Join(warnings, "\n")
+					}
+					showInfo(w, "Backup", msg)
 				})
 			})
 		}, w)
@@ -144,17 +149,21 @@ func defaultBackupName(c Connection, database string) string {
 }
 
 // dumpDatabase renders a SQL script for the given database: for each base
-// table a DROP+CREATE, then (optionally) batched INSERTs.
-func dumpDatabase(sess db.Session, driver, database string, includeData bool) (string, error) {
+// table a DROP+CREATE, then (optionally) batched INSERTs. It returns the
+// script plus any warnings about data that could not be fully captured
+// (tables that hit the per-query row cap are flagged instead of silently
+// truncating the backup).
+func dumpDatabase(sess db.Session, driver, database string, includeData bool) (string, []string, error) {
 	switch driver {
 	case "mysql", "mariadb":
 	default:
-		return "", fmt.Errorf("backup currently supports MySQL/MariaDB only (this connection is %s)",
+		return "", nil, fmt.Errorf("backup currently supports MySQL/MariaDB only (this connection is %s)",
 			dbTypeByDriver(driver).Name)
 	}
 	if sess == nil {
-		return "", fmt.Errorf("no active connection")
+		return "", nil, fmt.Errorf("no active connection")
 	}
+	var warnings []string
 
 	var b strings.Builder
 	b.WriteString("-- fynequery backup\n")
@@ -169,7 +178,7 @@ func dumpDatabase(sess db.Session, driver, database string, includeData bool) (s
 	}
 	res, err := sess.Query(showTables, 10000)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	var tables []string
@@ -200,10 +209,16 @@ func dumpDatabase(sess db.Session, driver, database string, includeData bool) (s
 		}
 		data, err := sess.Query("SELECT * FROM "+full, dumpRowLimit)
 		if err != nil {
-			return "", fmt.Errorf("reading %s: %w", t, err)
+			return "", nil, fmt.Errorf("reading %s: %w", t, err)
 		}
 		if len(data.Rows) == 0 {
 			continue
+		}
+		if len(data.Rows) >= dumpRowLimit {
+			warn := fmt.Sprintf("table %q reached the %d-row dump cap; its backup is incomplete —\nre-run with a smaller dataset or dump fewer tables.", t, dumpRowLimit)
+			warnings = append(warnings, warn)
+			b.WriteString("-- WARNING: " + t + " row dump hit the " + strconv.Itoa(dumpRowLimit) +
+				" cap; backup for this table is INCOMPLETE\n")
 		}
 		cols := make([]string, len(data.Columns))
 		for i, cn := range data.Columns {
@@ -229,7 +244,7 @@ func dumpDatabase(sess db.Session, driver, database string, includeData bool) (s
 	}
 
 	b.WriteString("SET FOREIGN_KEY_CHECKS=1;\n")
-	return b.String(), nil
+	return b.String(), warnings, nil
 }
 
 // runSQLScript executes a SQL script statement by statement, returning how
@@ -239,13 +254,123 @@ func runSQLScript(sess db.Session, script string) (int, error) {
 		return 0, fmt.Errorf("no active connection")
 	}
 	n := 0
-	for _, stmt := range splitStatements(script) {
+	for _, stmt := range splitStatementsDelimited(script) {
 		if _, err := sess.Query(stmt, 10); err != nil {
 			return n, fmt.Errorf("statement %d failed: %w", n+1, err)
 		}
 		n++
 	}
 	return n, nil
+}
+
+// splitStatementsDelimited splits a SQL script into statements, honoring
+// DELIMITER directives (as mysqldump emits around stored routines/triggers).
+// Semicolons inside BEGIN…END blocks are kept intact until the active
+// delimiter appears, while string literals, quoted identifiers and -- line
+// comments are respected so a delimiter inside them does not split.
+func splitStatementsDelimited(script string) []string {
+	var out []string
+	var sb strings.Builder
+	delim := ";"
+	var quote byte  // 0, '\'', '"' or '`'
+	atStart := true // sb holds only whitespace so far (statement boundary)
+
+	flush := func() {
+		if s := strings.TrimSpace(sb.String()); s != "" {
+			out = append(out, s)
+		}
+		sb.Reset()
+		atStart = true
+	}
+
+	i, n := 0, len(script)
+	for i < n {
+		// At a statement start look for a DELIMITER directive before anything
+		// else, so routine bodies that use the custom delimiter are kept whole.
+		if atStart {
+			if d, consumed, ok := readDelimiterDirective(script[i:]); ok {
+				flush()
+				delim = d
+				i += consumed
+				continue
+			}
+		}
+
+		c := script[i]
+		if quote != 0 {
+			sb.WriteByte(c)
+			if c == '\\' && quote != '`' && i+1 < n {
+				sb.WriteByte(script[i+1])
+				i += 2
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			i++
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			quote = c
+			sb.WriteByte(c)
+			atStart = false
+		case '-':
+			if i+1 < n && script[i+1] == '-' {
+				for i < n && script[i] != '\n' {
+					i++
+				}
+				sb.WriteByte('\n')
+				continue
+			}
+			sb.WriteByte(c)
+			atStart = false
+		default:
+			if strings.HasPrefix(script[i:], delim) {
+				flush()
+				i += len(delim)
+				continue
+			}
+			sb.WriteByte(c)
+			if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+				atStart = false
+			}
+		}
+		i++
+	}
+	flush()
+	return out
+}
+
+// readDelimiterDirective parses a DELIMITER directive at the start of s and
+// returns the delimiter token plus the number of bytes consumed (through the
+// end of that directive line).
+func readDelimiterDirective(s string) (string, int, bool) {
+	if len(s) < 9 || !strings.EqualFold(s[:9], "DELIMITER") {
+		return "", 0, false
+	}
+	after := 9
+	if after >= len(s) || (s[after] != ' ' && s[after] != '\t' && s[after] != '\r' && s[after] != '\n') {
+		return "", 0, false
+	}
+	for after < len(s) && (s[after] == ' ' || s[after] == '\t' || s[after] == '\r' || s[after] == '\n') {
+		after++
+	}
+	start := after
+	for after < len(s) && s[after] != ' ' && s[after] != '\t' && s[after] != '\r' && s[after] != '\n' {
+		after++
+	}
+	if start == after {
+		return "", 0, false
+	}
+	delim := s[start:after]
+	for after < len(s) && s[after] != '\n' {
+		after++
+	}
+	if after < len(s) {
+		after++ // consume the newline
+	}
+	return delim, after, true
 }
 
 // splitStatements splits a SQL script on semicolons that sit outside string

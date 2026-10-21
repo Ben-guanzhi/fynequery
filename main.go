@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -59,6 +60,37 @@ func applyTheme(w fyne.Window) {
 	if w != nil {
 		w.Content().Refresh()
 	}
+}
+
+// fitWindowToScreen re-applies size once the window is shown: Fyne sets the
+// native size before it can detect the monitor DPI scale, so on scaled
+// displays the canvas ends up larger than the real client area (content
+// clipped at the right/bottom and the toolbar painted off-position). The
+// requested size is clamped to the monitor work area, then the window is
+// centred so it cannot open partly off-screen.
+func fitWindowToScreen(w fyne.Window, size fyne.Size) {
+	const margin = 48
+	if avail := screenWorkArea(w.Canvas().Scale()); avail.Width > 0 && avail.Height > 0 {
+		if maxW := avail.Width - margin; size.Width > maxW {
+			size.Width = maxW
+		}
+		if maxH := avail.Height - margin; size.Height > maxH {
+			size.Height = maxH
+		}
+	}
+	w.Resize(size)
+	w.CenterOnScreen()
+}
+
+// fitWindowWhenScaled applies the size immediately (so the first frame is not
+// clipped) and again after the first frame, when Fyne has detected and
+// rounded the monitor scale — until then Canvas().Scale() reports 1 and the
+// work-area clamp would use the wrong units.
+func fitWindowWhenScaled(w fyne.Window, size fyne.Size) {
+	fitWindowToScreen(w, size)
+	time.AfterFunc(250*time.Millisecond, func() {
+		safeDo(func() { fitWindowToScreen(w, size) })
+	})
 }
 
 // setupLogging routes plugin diagnostics into a log file next to the config.
@@ -122,6 +154,7 @@ func main() {
 		ww.SetContent(newPanelBackground(wp.build(), func() color.Color { return pal().bg }))
 		applyTheme(ww)
 		ww.Show()
+		fitWindowWhenScaled(ww, fyne.NewSize(1020, 680))
 	}
 
 	if directConn {

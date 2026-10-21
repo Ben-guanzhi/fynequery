@@ -1,9 +1,12 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/test"
 )
 
 // TestAppendRowsStreaming pins the incremental paint path (TablePlus
@@ -34,6 +37,70 @@ func TestAppendRowsStreaming(t *testing.T) {
 	}
 	if deref(g.data.Rows[2][0]) != "3" {
 		t.Fatalf("row 2 = %q, want 3", deref(g.data.Rows[2][0]))
+	}
+}
+
+// TestAppendRowsSyncsRowViews pins that streaming a batch into a grid whose
+// renderer was built while the result was still empty also creates the row
+// views. The query pane paints an empty grid, then appends batches; without
+// this the header showed 41 columns and 100 rows but the body stayed blank.
+func TestAppendRowsSyncsRowViews(t *testing.T) {
+	s := str
+	test.NewApp()
+	g := newDataTable(&TableData{Cols: []ColumnInfo{{Name: "id", Type: "int"}}}, nil)
+	rw := newRowsWidget(g)
+	rw.inner = container.NewVBox()
+	g.rows = rw
+
+	g.appendRows([][]*string{{s("1")}, {s("2")}})
+	if got := len(rw.inner.Objects); got != 2 {
+		t.Fatalf("row views after batch 1 = %d, want 2", got)
+	}
+	g.appendRows([][]*string{{s("3")}})
+	if got := len(rw.inner.Objects); got != 3 {
+		t.Fatalf("row views after batch 2 = %d, want 3", got)
+	}
+	// A rebuilt renderer must materialise the rows it now has.
+	rw.inner = container.NewVBox()
+	rw.rebuildRows()
+	if got := len(rw.inner.Objects); got != 3 {
+		t.Fatalf("row views after rebuild = %d, want 3", got)
+	}
+}
+
+// TestSingleLineText pins the flattening that keeps pretty-printed JSON from
+// painting over the rows below its cell.
+func TestSingleLineText(t *testing.T) {
+	in := "{\n  \"errors\": [],\n  \"message\": \"ok\"\n}"
+	want := `{ "errors": [], "message": "ok" }`
+	if got := singleLineText(in); got != want {
+		t.Fatalf("singleLineText = %q, want %q", got, want)
+	}
+	if got := singleLineText("plain"); got != "plain" {
+		t.Fatalf("plain value changed: %q", got)
+	}
+	if got := singleLineText("a\t\tb"); got != "a b" {
+		t.Fatalf("tabs = %q, want %q", got, "a b")
+	}
+}
+
+// TestFitCellText checks that an overlong value is ellipsized to the column
+// width instead of spilling into neighbouring cells.
+func TestFitCellText(t *testing.T) {
+	test.NewApp()
+	long := strings.Repeat("0123456789", 40)
+	got := fitCellText(long, 100, 12, fyne.TextStyle{})
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("long value not ellipsized: %q", got)
+	}
+	if w := fyne.MeasureText(got, 12, fyne.TextStyle{}).Width; w > 100 {
+		t.Fatalf("fitted width %.1f exceeds 100", w)
+	}
+	if got := fitCellText("short", 100, 12, fyne.TextStyle{}); got != "short" {
+		t.Fatalf("short value changed: %q", got)
+	}
+	if got := fitCellText("", 100, 12, fyne.TextStyle{}); got != "" {
+		t.Fatalf("empty value = %q", got)
 	}
 }
 

@@ -3,7 +3,10 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 )
@@ -78,5 +81,155 @@ func TestReferencedTables(t *testing.T) {
 	}
 	if r := referencedTables("SELECT 1", known); len(r) != 0 {
 		t.Fatalf("refs = %v, want none", r)
+	}
+}
+
+func TestSplitDottedWord(t *testing.T) {
+	cases := []struct {
+		in, seg string
+		dot     int
+	}{
+		{"coun", "coun", 0},
+		{"u.na", "na", 2},
+		{"public.users.id", "id", 13},
+		{"", "", 0},
+	}
+	for _, c := range cases {
+		seg, dot := splitDottedWord(c.in)
+		if seg != c.seg || dot != c.dot {
+			t.Errorf("splitDottedWord(%q) = (%q,%d), want (%q,%d)", c.in, seg, dot, c.seg, c.dot)
+		}
+	}
+}
+
+func TestAutoPrefixOK(t *testing.T) {
+	ok := []string{"s", "sel", "user_name", "_tmp"}
+	bad := []string{"", "1", "1abc", "-", "a.b", "a b", "a-b"}
+	for _, s := range ok {
+		if !autoPrefixOK(s) {
+			t.Errorf("autoPrefixOK(%q) = false, want true", s)
+		}
+	}
+	for _, s := range bad {
+		if autoPrefixOK(s) {
+			t.Errorf("autoPrefixOK(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestBindEntryShortcut(t *testing.T) {
+	test.NewApp()
+	e := widget.NewMultiLineEntry()
+	called := false
+	sc := &desktop.CustomShortcut{KeyName: fyne.KeyReturn, Modifier: fyne.KeyModifierControl}
+	if !bindEntryShortcut(e, sc, func(fyne.Shortcut) { called = true }) {
+		t.Fatal("bindEntryShortcut failed — Fyne Entry internals changed?")
+	}
+	// The driver routes the key to the focused entry's TypedShortcut.
+	e.TypedShortcut(sc)
+	if !called {
+		t.Fatal("registered entry shortcut was not invoked")
+	}
+	// Unknown shortcuts must still reach the Entry's normal handling (no panic).
+	e.TypedShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyQ, Modifier: fyne.KeyModifierControl})
+}
+
+// TestAutoCompleteKeyboardSelection pins Up/Down navigation of the inline
+// suggestion list and Enter accepting the highlighted entry.
+func TestAutoCompleteKeyboardSelection(t *testing.T) {
+	test.NewApp()
+	ed := widget.NewMultiLineEntry()
+	qp := &queryPane{editor: ed}
+	w := test.NewWindow(ed)
+	defer w.Close()
+	qp.window = w
+	w.Canvas().Focus(ed)
+	ed.SetText("se")
+	qp.setCursorRune(2)
+
+	qp.showAutoSuggestions(0, 2, []string{"SELECT", "SET"})
+	if qp.autoSel != -1 {
+		t.Fatalf("initial selection = %d, want none", qp.autoSel)
+	}
+	proxy := w.Canvas().Focused().(*editorFocusProxy)
+	proxy.TypedKey(&fyne.KeyEvent{Name: fyne.KeyDown})
+	if qp.autoSel != 0 {
+		t.Fatalf("down from none selected %d, want 0", qp.autoSel)
+	}
+	proxy.TypedKey(&fyne.KeyEvent{Name: fyne.KeyDown})
+	if qp.autoSel != 1 {
+		t.Fatalf("second down selected %d, want 1", qp.autoSel)
+	}
+	proxy.TypedKey(&fyne.KeyEvent{Name: fyne.KeyDown}) // clamps at the end
+	if qp.autoSel != 1 {
+		t.Fatalf("selection ran past the last row: %d", qp.autoSel)
+	}
+	proxy.TypedKey(&fyne.KeyEvent{Name: fyne.KeyUp})
+	if qp.autoSel != 0 {
+		t.Fatalf("up selected %d, want 0", qp.autoSel)
+	}
+	// Enter accepts the highlighted suggestion instead of inserting a newline.
+	proxy.TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn})
+	if ed.Text != "SELECT" {
+		t.Fatalf("accepted text = %q, want SELECT", ed.Text)
+	}
+	if qp.autoWords != nil {
+		t.Fatal("popup still open after accepting a suggestion")
+	}
+}
+
+func TestAutoCompleteShowsSuggestions(t *testing.T) {
+	test.NewApp()
+	ed := widget.NewMultiLineEntry()
+	qp := &queryPane{editor: ed}
+	w := test.NewWindow(ed)
+	defer w.Close()
+	qp.window = w
+	w.Canvas().Focus(ed)
+	ed.SetText("sel")
+	qp.setCursorRune(3)
+	qp.autoGen++
+
+	qp.autoComplete()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(qp.autoWords) == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(qp.autoWords) == 0 {
+		t.Fatal("no inline suggestions for prefix \"sel\"")
+	}
+	found := false
+	for _, s := range qp.autoWords {
+		if s == "SELECT" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("suggestions %v do not contain SELECT", qp.autoWords)
+	}
+	if !qp.editorFocused() {
+		t.Fatalf("popup stole keyboard focus: %T", w.Canvas().Focused())
+	}
+	proxy, ok := w.Canvas().Focused().(*editorFocusProxy)
+	if !ok || proxy.target != fyne.Focusable(ed) {
+		t.Fatalf("overlay focus must forward to the editor, got %T", w.Canvas().Focused())
+	}
+	// Keyboard input routed to the focused object must still reach the editor.
+	hit := false
+	probe := &desktop.CustomShortcut{KeyName: fyne.KeyF9, Modifier: fyne.KeyModifierControl}
+	if !bindEntryShortcut(ed, probe, func(fyne.Shortcut) { hit = true }) {
+		t.Fatal("bindEntryShortcut failed")
+	}
+	w.Canvas().Focused().(fyne.Shortcutable).TypedShortcut(probe)
+	if !hit {
+		t.Fatal("shortcut did not reach the editor through the popup proxy")
+	}
+	first := qp.autoWords[0]
+	qp.acceptAuto(0)
+	if got := strings.TrimSpace(ed.Text); !strings.EqualFold(got, first) {
+		t.Fatalf("acceptAuto did not replace the word, text = %q want %q", got, first)
+	}
+	if got := w.Canvas().Focused(); got != fyne.Focusable(ed) {
+		t.Fatalf("focus did not return to the editor after the popup closed: %T", got)
 	}
 }

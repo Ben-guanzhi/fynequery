@@ -5,6 +5,7 @@ package main
 // at the bottom.
 
 import (
+	"image/color"
 	"sort"
 	"strings"
 
@@ -40,7 +41,10 @@ type sidebar struct {
 	queriesPane *fyne.Container // rows of the 查询 tab (rebuilt by refreshQueries)
 	tree        *widget.Tree
 	search      *widget.Entry
+	searchWrap  fyne.CanvasObject
 	dbSelect    *widget.Select
+	schemaWrap  fyne.CanvasObject
+	modeBtns    []*sideModeButton
 	body        *sidebarBody // pane switcher; refreshed on every state change
 	suppress    bool         // guard Select.OnChanged during programmatic changes
 	objects     []TableInfo  // full inventory from the session
@@ -114,6 +118,12 @@ func (s *sidebar) setInventory(objs []TableInfo, database string) {
 	s.database = database
 	s.loaded = true
 	s.noDB = false
+	if s.searchWrap != nil {
+		s.searchWrap.Show()
+	}
+	if s.schemaWrap != nil {
+		s.schemaWrap.Show()
+	}
 	if s.search != nil {
 		s.applyFilter()
 	}
@@ -149,6 +159,12 @@ func (s *sidebar) setNoDatabase() {
 	s.objects = nil
 	s.filtered = nil
 	s.database = ""
+	if s.searchWrap != nil {
+		s.searchWrap.Hide()
+	}
+	if s.schemaWrap != nil {
+		s.schemaWrap.Hide()
+	}
 	if s.dbSelect != nil {
 		s.suppress = true
 		s.dbSelect.ClearSelected()
@@ -226,7 +242,7 @@ func (s *sidebar) applyFilter() {
 }
 
 func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
-	// mode switcher: 项目 | 查询 | 历史记录
+	// mode switcher: 项目 | 查询 | 历史记录, as left-aligned pills.
 	itemsBtn := newSideModeButton("项目", func() { s.setMode(sidebarItems) })
 	queriesBtn := newSideModeButton("查询", func() {
 		s.setMode(sidebarQueries)
@@ -235,7 +251,12 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 		}
 	})
 	historyBtn := newSideModeButton("历史记录", func() { s.setMode(sidebarHistory) })
-	modeRow := container.NewGridWithColumns(3, itemsBtn, queriesBtn, historyBtn)
+	s.modeBtns = []*sideModeButton{itemsBtn, queriesBtn, historyBtn}
+	for i, b := range s.modeBtns {
+		b.setActive(i == int(s.mode))
+	}
+	modeRow := container.NewBorder(nil, nil, spacerW(16), nil,
+		container.NewHBox(itemsBtn, spacerW(4), queriesBtn, spacerW(4), historyBtn))
 
 	s.search = widget.NewEntry()
 	s.search.PlaceHolder = "搜索表..."
@@ -245,7 +266,11 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 			s.tree.Refresh()
 		}
 	}
-	searchRow := container.NewHBox(widget.NewIcon(theme.SearchIcon()), s.search)
+	searchRow := container.NewBorder(nil, nil, widget.NewIcon(theme.SearchIcon()), nil, s.search)
+	s.searchWrap = container.NewPadded(searchRow)
+	if !s.loaded {
+		s.searchWrap.Hide()
+	}
 
 	// tree of 函数 / 表格 / 视图
 	// NB: the root id ("") must also report as a branch — Fyne's Tree only
@@ -320,7 +345,8 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 	}
 	s.tree.OpenAllBranches()
 
-	// Bottom: schema/database selector + "new database" (TablePlus style).
+	// Bottom: schema/database selector + "new database". Hidden until the
+	// server's database list arrives so the no-database state stays clean.
 	s.dbSelect = widget.NewSelect(nil, func(choice string) {
 		if s.suppress || choice == "" {
 			return
@@ -329,18 +355,22 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 			s.onDBPick(choice)
 		}
 	})
+	s.dbSelect.PlaceHolder = "选择数据库"
 	newDB := newToolButton(theme.ContentAddIcon(), func() {
 		if s.onNewDB != nil {
 			s.onNewDB()
 		}
 	})
 	schemaRow := container.NewBorder(nil, nil, nil, newDB, s.dbSelect)
+	s.schemaWrap = newPanelBackground(container.NewPadded(schemaRow),
+		func() color.Color { return pal().sidebarBG })
+	s.schemaWrap.Hide()
 
 	body := s.body
 
 	root := container.NewBorder(
-		container.NewVBox(modeRow, searchRow, widget.NewSeparator()),
-		schemaRow,
+		container.NewVBox(modeRow, s.searchWrap),
+		s.schemaWrap,
 		nil, nil,
 		container.NewStack(body),
 	)
@@ -385,10 +415,20 @@ func (s *sidebar) setDatabases(list []string, current string) {
 		s.dbSelect.SetSelected(current)
 	}
 	s.suppress = false
+	if s.schemaWrap != nil {
+		if len(list) > 0 && !s.noDB {
+			s.schemaWrap.Show()
+		} else {
+			s.schemaWrap.Hide()
+		}
+	}
 }
 
 func (s *sidebar) setMode(m sidebarMode) {
 	s.mode = m
+	for i, b := range s.modeBtns {
+		b.setActive(i == int(m))
+	}
 	if m == sidebarQueries {
 		s.refreshQueries()
 	}
@@ -410,8 +450,9 @@ func (b *sidebarBody) CreateRenderer() fyne.WidgetRenderer {
 	history := widget.NewLabelWithStyle("-- 暂无查询", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
 	history.Wrapping = fyne.TextWrapWord
 	noDB := widget.NewLabelWithStyle("未选择数据库，请按Ctrl K选择数据库",
-		fyne.TextAlignCenter, fyne.TextStyle{Italic: true})
+		fyne.TextAlignCenter, fyne.TextStyle{})
 	noDB.Wrapping = fyne.TextWrapWord
+	noDB.Importance = widget.LowImportance
 	b.queries = b.s.queriesPane // live saved-query panel (rebuilt on demand)
 	b.history = history
 	b.noDB = noDB
@@ -539,10 +580,18 @@ func (b *sideModeButton) Tapped(*fyne.PointEvent) {
 func (b *sideModeButton) Cursor() desktop.Cursor { return desktop.DefaultCursor }
 
 func (b *sideModeButton) CreateRenderer() fyne.WidgetRenderer {
-	bg := canvas.NewRectangle(pal().hover)
-	bg.CornerRadius = 6
-	text := canvas.NewText(b.label, pal().activeTabFG)
+	p := pal()
+	fill := colorTransparent
+	fg := p.metaKeyFG
+	if b.active {
+		fill = p.segmentBG
+		fg = p.activeTabFG
+	}
+	bg := canvas.NewRectangle(fill)
+	bg.CornerRadius = 7
+	text := canvas.NewText(b.label, fg)
 	text.TextSize = 13
+	text.TextStyle.Bold = b.active
 	text.Alignment = fyne.TextAlignCenter
 	return &sideModeBtnRenderer{b: b, bg: bg, text: text}
 }
@@ -557,7 +606,9 @@ func (r *sideModeBtnRenderer) Objects() []fyne.CanvasObject {
 	return []fyne.CanvasObject{r.bg, r.text}
 }
 
-func (r *sideModeBtnRenderer) MinSize() fyne.Size { return fyne.NewSize(64, 26) }
+func (r *sideModeBtnRenderer) MinSize() fyne.Size {
+	return fyne.NewSize(r.text.MinSize().Width+24, 28)
+}
 
 func (r *sideModeBtnRenderer) Destroy() {}
 
@@ -568,14 +619,16 @@ func (r *sideModeBtnRenderer) Layout(size fyne.Size) {
 }
 
 func (r *sideModeBtnRenderer) Refresh() {
+	p := pal()
 	if r.b.active {
-		r.bg.FillColor = pal().segmentBG
+		r.bg.FillColor = p.segmentBG
+		r.text.Color = p.activeTabFG
 		r.text.TextStyle.Bold = true
 	} else {
 		r.bg.FillColor = colorTransparent
+		r.text.Color = p.metaKeyFG
 		r.text.TextStyle.Bold = false
 	}
-	r.text.Color = pal().activeTabFG
 	r.bg.Refresh()
 	r.text.Refresh()
 }

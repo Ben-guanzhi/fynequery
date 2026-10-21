@@ -112,6 +112,11 @@ func upsertConnection(c Connection) error {
 			return fmt.Errorf("keyring: %w", err)
 		}
 		c.Password = "" // JSON keeps only the flag, not the secret
+	} else if c.UseKeyring && !keyringAvailable() {
+		// A connection imported from a platform with a keyring set the flag, but
+		// here there is no keyring: fall back to plaintext storage and clear the
+		// flag so we never claim the secret is protected when it is not.
+		c.UseKeyring = false
 	}
 	conns, err := loadConnections()
 	if err != nil {

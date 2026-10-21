@@ -88,6 +88,79 @@ func (r *panelBgRenderer) Refresh() {
 }
 
 // ---------------------------------------------------------------------------
+// roundedPanel: rounded fill + hairline border behind a padded child. Used for
+// the grouped toolbar chips in the redesigned workspace header.
+
+type roundedPanel struct {
+	widget.BaseWidget
+	child    fyne.CanvasObject
+	fillFn   func() color.Color
+	strokeFn func() color.Color
+	radius   float32
+	pad      float32
+}
+
+func newRoundedPanel(child fyne.CanvasObject, fillFn, strokeFn func() color.Color, radius, pad float32) *roundedPanel {
+	p := &roundedPanel{child: child, fillFn: fillFn, strokeFn: strokeFn, radius: radius, pad: pad}
+	p.ExtendBaseWidget(p)
+	return p
+}
+
+func (p *roundedPanel) CreateRenderer() fyne.WidgetRenderer {
+	fill := canvas.NewRectangle(p.fillFn())
+	fill.CornerRadius = p.radius
+	stroke := canvas.NewRectangle(colorTransparent)
+	stroke.CornerRadius = p.radius
+	stroke.StrokeWidth = 1
+	stroke.StrokeColor = p.strokeFn()
+	return &roundedPanelRenderer{p: p, fill: fill, stroke: stroke}
+}
+
+type roundedPanelRenderer struct {
+	p      *roundedPanel
+	fill   *canvas.Rectangle
+	stroke *canvas.Rectangle
+}
+
+func (r *roundedPanelRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.fill, r.stroke, r.p.child}
+}
+
+func (r *roundedPanelRenderer) MinSize() fyne.Size {
+	return r.p.child.MinSize().AddWidthHeight(r.p.pad*2, r.p.pad*2)
+}
+
+func (r *roundedPanelRenderer) Layout(size fyne.Size) {
+	r.fill.Resize(size)
+	r.stroke.Resize(size)
+	r.p.child.Move(fyne.NewPos(r.p.pad, r.p.pad))
+	r.p.child.Resize(fyne.NewSize(size.Width-r.p.pad*2, size.Height-r.p.pad*2))
+}
+
+func (r *roundedPanelRenderer) Destroy() {}
+
+func (r *roundedPanelRenderer) Refresh() {
+	r.fill.FillColor = r.p.fillFn()
+	r.stroke.StrokeColor = r.p.strokeFn()
+	r.fill.Refresh()
+	r.stroke.Refresh()
+	if r.p.child != nil {
+		r.p.child.Refresh()
+	}
+	r.Layout(r.p.Size())
+	canvas.Refresh(r.p)
+}
+
+// newToolGroup wraps icon buttons in the white rounded chip used by the
+// workspace toolbar (design: groups of 2-3 icons on the light-gray strip).
+func newToolGroup(items ...fyne.CanvasObject) fyne.CanvasObject {
+	row := container.NewHBox(items...)
+	return newRoundedPanel(row,
+		func() color.Color { return pal().groupBG },
+		func() color.Color { return pal().groupBorder }, 9, 3)
+}
+
+// ---------------------------------------------------------------------------
 // accentSplit: a two-pane split with a draggable divider painted in the
 // TablePlus accent colour. Used for the resizable sidebar and detail panel so
 // the divider doubles as their coloured border.
@@ -338,6 +411,8 @@ type clickableIcon struct {
 	icon     fyne.Resource
 	onTap    func()
 	small    bool
+	round    bool // circular standalone button (connection switcher)
+	bordered bool
 	hover    bool
 	selected bool
 }
@@ -345,6 +420,15 @@ type clickableIcon struct {
 func newToolButton(icon fyne.Resource, onTap func()) *clickableIcon {
 	b := &clickableIcon{icon: icon, onTap: onTap}
 	b.ExtendBaseWidget(b)
+	return b
+}
+
+// newRoundToolButton is the standalone circular white button used for the
+// connection switcher between toolbar groups in the redesign.
+func newRoundToolButton(icon fyne.Resource, onTap func()) *clickableIcon {
+	b := newToolButton(icon, onTap)
+	b.round = true
+	b.bordered = true
 	return b
 }
 
@@ -377,24 +461,48 @@ func (c *clickableIcon) MouseOut() {
 func (c *clickableIcon) MouseMoved(*desktop.MouseEvent) {}
 
 func (c *clickableIcon) CreateRenderer() fyne.WidgetRenderer {
-	bg := canvas.NewRectangle(color.RGBA{R: 0, G: 0, B: 0, A: 0})
+	p := pal()
+	fill := color.RGBA{R: 0, G: 0, B: 0, A: 0}
+	stroke := colorTransparent
+	if c.selected || c.hover {
+		fill = p.hover
+	}
+	if c.bordered {
+		if !c.selected && !c.hover {
+			fill = p.crumbBG
+		}
+		stroke = p.groupBorder
+	}
+	bg := canvas.NewRectangle(fill)
 	bg.CornerRadius = 6
+	border := canvas.NewRectangle(colorTransparent)
+	border.CornerRadius = 6
+	border.StrokeWidth = 1
+	border.StrokeColor = stroke
 	icon := widget.NewIcon(c.icon)
-	return &clickableIconRenderer{b: c, bg: bg, icon: icon}
+	return &clickableIconRenderer{b: c, bg: bg, border: border, icon: icon}
 }
 
 type clickableIconRenderer struct {
-	b    *clickableIcon
-	bg   *canvas.Rectangle
-	icon *widget.Icon
+	b      *clickableIcon
+	bg     *canvas.Rectangle
+	border *canvas.Rectangle
+	icon   *widget.Icon
 }
 
 func (r *clickableIconRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{container.NewStack(r.bg, r.icon)}
+	return []fyne.CanvasObject{r.bg, r.border, r.icon}
 }
 
 func (r *clickableIconRenderer) Layout(size fyne.Size) {
 	r.bg.Resize(size)
+	r.border.Resize(size)
+	radius := float32(6)
+	if r.b.round {
+		radius = size.Height / 2
+	}
+	r.bg.CornerRadius = radius
+	r.border.CornerRadius = radius
 	r.icon.Resize(fyne.NewSize(size.Width-8, size.Height-8))
 	r.icon.Move(fyne.NewPos(4, 4))
 }
@@ -404,6 +512,9 @@ func (r *clickableIconRenderer) MinSize() fyne.Size {
 	if r.b.small {
 		s = 22
 	}
+	if r.b.round {
+		s = 32
+	}
 	return fyne.NewSize(s, s)
 }
 
@@ -411,15 +522,97 @@ func (r *clickableIconRenderer) Destroy() {}
 
 func (r *clickableIconRenderer) Refresh() {
 	p := pal()
-	switch {
-	case r.b.selected:
-		r.bg.FillColor = p.segmentActive
-	case r.b.hover:
-		r.bg.FillColor = p.hover
-	default:
-		r.bg.FillColor = color.RGBA{R: 0, G: 0, B: 0, A: 0}
+	fill := colorTransparent
+	stroke := colorTransparent
+	if r.b.selected || r.b.hover {
+		fill = p.hover
 	}
+	if r.b.bordered {
+		if !r.b.selected && !r.b.hover {
+			fill = p.crumbBG
+		}
+		stroke = p.groupBorder
+	}
+	r.bg.FillColor = fill
+	r.border.StrokeColor = stroke
 	r.bg.Refresh()
+	r.border.Refresh()
+}
+
+// ---------------------------------------------------------------------------
+// iconTextButton: compact icon + label action inside a toolbar group (the
+// "SQL" chip in the redesign).
+
+type iconTextButton struct {
+	widget.BaseWidget
+	icon  fyne.Resource
+	label string
+	onTap func()
+	hover bool
+}
+
+func newIconTextButton(icon fyne.Resource, label string, onTap func()) *iconTextButton {
+	b := &iconTextButton{icon: icon, label: label, onTap: onTap}
+	b.ExtendBaseWidget(b)
+	return b
+}
+
+func (b *iconTextButton) Tapped(*fyne.PointEvent) {
+	if b.onTap != nil {
+		b.onTap()
+	}
+}
+
+func (b *iconTextButton) Cursor() desktop.Cursor { return desktop.DefaultCursor }
+
+func (b *iconTextButton) MouseIn(*desktop.MouseEvent)    { b.hover = true; b.Refresh() }
+func (b *iconTextButton) MouseOut()                      { b.hover = false; b.Refresh() }
+func (b *iconTextButton) MouseMoved(*desktop.MouseEvent) {}
+
+func (b *iconTextButton) CreateRenderer() fyne.WidgetRenderer {
+	bg := canvas.NewRectangle(colorTransparent)
+	bg.CornerRadius = 6
+	icon := widget.NewIcon(b.icon)
+	text := canvas.NewText(b.label, pal().foreground)
+	text.TextSize = 12
+	text.TextStyle.Bold = true
+	return &iconTextButtonRenderer{b: b, bg: bg, icon: icon, text: text}
+}
+
+type iconTextButtonRenderer struct {
+	b    *iconTextButton
+	bg   *canvas.Rectangle
+	icon *widget.Icon
+	text *canvas.Text
+}
+
+func (r *iconTextButtonRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.bg, r.icon, r.text}
+}
+
+func (r *iconTextButtonRenderer) MinSize() fyne.Size {
+	return fyne.NewSize(r.text.MinSize().Width+40, 28)
+}
+
+func (r *iconTextButtonRenderer) Layout(size fyne.Size) {
+	r.bg.Resize(size)
+	r.icon.Resize(fyne.NewSize(16, 16))
+	r.icon.Move(fyne.NewPos(9, (size.Height-16)/2))
+	t := r.text.MinSize()
+	r.text.Move(fyne.NewPos(30, (size.Height-t.Height)/2))
+}
+
+func (r *iconTextButtonRenderer) Destroy() {}
+
+func (r *iconTextButtonRenderer) Refresh() {
+	if r.b.hover {
+		r.bg.FillColor = pal().hover
+	} else {
+		r.bg.FillColor = colorTransparent
+	}
+	r.text.Color = pal().foreground
+	r.bg.Refresh()
+	r.text.Refresh()
 }
 
 // ---------------------------------------------------------------------------
@@ -476,8 +669,10 @@ func (t *tabLabel) MouseMoved(*desktop.MouseEvent) {}
 
 func (t *tabLabel) CreateRenderer() fyne.WidgetRenderer {
 	bg := canvas.NewRectangle(color.RGBA{R: 0, G: 0, B: 0, A: 0})
-	bg.CornerRadius = 6
-	underline := canvas.NewRectangle(pal().tabUnderline)
+	bg.CornerRadius = 7
+	border := canvas.NewRectangle(colorTransparent)
+	border.CornerRadius = 7
+	border.StrokeWidth = 1
 	label := canvas.NewText(t.title, pal().activeTabFG)
 	label.TextSize = 13
 	var closer *clickableIcon
@@ -489,19 +684,19 @@ func (t *tabLabel) CreateRenderer() fyne.WidgetRenderer {
 		})
 		closer.small = true
 	}
-	return &tabLabelRenderer{t: t, bg: bg, underline: underline, label: label, closer: closer}
+	return &tabLabelRenderer{t: t, bg: bg, border: border, label: label, closer: closer}
 }
 
 type tabLabelRenderer struct {
-	t         *tabLabel
-	bg        *canvas.Rectangle
-	underline *canvas.Rectangle
-	label     *canvas.Text
-	closer    *clickableIcon
+	t      *tabLabel
+	bg     *canvas.Rectangle
+	border *canvas.Rectangle
+	label  *canvas.Text
+	closer *clickableIcon
 }
 
 func (r *tabLabelRenderer) Objects() []fyne.CanvasObject {
-	objs := []fyne.CanvasObject{r.bg, r.label, r.underline}
+	objs := []fyne.CanvasObject{r.bg, r.border, r.label}
 	if r.closer != nil {
 		objs = append(objs, r.closer)
 	}
@@ -509,23 +704,22 @@ func (r *tabLabelRenderer) Objects() []fyne.CanvasObject {
 }
 
 func (r *tabLabelRenderer) MinSize() fyne.Size {
-	w := r.label.MinSize().Width + 30
+	w := r.label.MinSize().Width + 28
 	if r.t.closeable {
-		w += 26
+		w += 24
 	}
-	return fyne.NewSize(w, 36)
+	return fyne.NewSize(w, 30)
 }
 
 func (r *tabLabelRenderer) Destroy() {}
 
 func (r *tabLabelRenderer) Layout(size fyne.Size) {
 	r.bg.Resize(size)
-	r.underline.Resize(fyne.NewSize(size.Width, 2.5))
-	r.underline.Move(fyne.NewPos(0, size.Height-2.5))
+	r.border.Resize(size)
 	lh := r.label.MinSize()
-	r.label.Move(fyne.NewPos(13, (size.Height-lh.Height)/2))
+	r.label.Move(fyne.NewPos(12, (size.Height-lh.Height)/2))
 	if r.closer != nil {
-		r.closer.Move(fyne.NewPos(size.Width-25, (size.Height-22)/2))
+		r.closer.Move(fyne.NewPos(size.Width-24, (size.Height-22)/2))
 		r.closer.Resize(fyne.NewSize(22, 22))
 	}
 }
@@ -534,27 +728,27 @@ func (r *tabLabelRenderer) Refresh() {
 	p := pal()
 	if r.t.active {
 		r.bg.FillColor = p.activeTabBG
+		r.border.StrokeColor = p.groupBorder
 		r.label.Color = p.activeTabFG
-		r.underline.FillColor = p.tabUnderline
 		r.label.TextStyle.Bold = true
 	} else {
 		if r.t.hover {
 			r.bg.FillColor = p.hover
 		} else {
-			r.bg.FillColor = p.tabBG
+			r.bg.FillColor = colorTransparent
 		}
+		r.border.StrokeColor = colorTransparent
 		r.label.Color = p.inactiveTabFG
-		r.underline.FillColor = colorTransparent // hidden
 		r.label.TextStyle.Bold = false
 	}
 	r.label.Text = r.t.title
 	r.bg.Refresh()
+	r.border.Refresh()
 	r.label.Refresh()
-	r.underline.Refresh()
 }
 
 // ---------------------------------------------------------------------------
-// tabBar: a horizontal strip of tabLabels with an underline and "+" button.
+// tabBar: a horizontal strip of pill tabLabels with a trailing "+" button.
 
 type tabBar struct {
 	widget.BaseWidget
@@ -643,11 +837,11 @@ func (r *tabBarRenderer) Objects() []fyne.CanvasObject {
 }
 
 func (r *tabBarRenderer) MinSize() fyne.Size {
-	w := float32(44)
+	w := float32(40)
 	for _, t := range r.b.tabs {
-		w += t.MinSize().Width + 2
+		w += t.MinSize().Width + 4
 	}
-	return fyne.NewSize(w, 40)
+	return fyne.NewSize(w, 36)
 }
 
 func (r *tabBarRenderer) Destroy() {}
@@ -657,15 +851,16 @@ func (r *tabBarRenderer) Layout(size fyne.Size) {
 	r.bg.Resize(size)
 	// lay the tabs out left to right; "+" sits right after the last one,
 	// like TablePlus's document strip.
-	x := float32(6)
+	x := float32(4)
+	tabH := size.Height - 6
 	for _, t := range r.b.tabs {
 		tw := t.MinSize().Width
-		t.Resize(fyne.NewSize(tw, size.Height))
-		t.Move(fyne.NewPos(x, 0))
-		x += tw + 2
+		t.Resize(fyne.NewSize(tw, tabH))
+		t.Move(fyne.NewPos(x, (size.Height-tabH)/2))
+		x += tw + 4
 	}
-	r.addBtn.Move(fyne.NewPos(x+4, (size.Height-28)/2))
-	r.addBtn.Resize(fyne.NewSize(28, 28))
+	r.addBtn.Move(fyne.NewPos(x+2, (size.Height-26)/2))
+	r.addBtn.Resize(fyne.NewSize(26, 26))
 }
 
 func (r *tabBarRenderer) Refresh() {
@@ -786,66 +981,6 @@ func (r *segmentedRenderer) Refresh() {
 		}
 		r.labels[i].Refresh()
 	}
-}
-
-// ---------------------------------------------------------------------------
-// crumbBox: the rounded table-name field in the crumb bar.
-
-type crumbBox struct {
-	widget.BaseWidget
-	text *canvas.Text
-	bg   *canvas.Rectangle
-	line *canvas.Rectangle
-}
-
-func newCrumbBox(text string) *crumbBox {
-	c := &crumbBox{}
-	c.text = canvas.NewText(text, pal().foreground)
-	c.text.TextSize = 13
-	c.text.TextStyle.Bold = true
-	c.ExtendBaseWidget(c)
-	return c
-}
-
-func (c *crumbBox) setText(s string) {
-	c.text.Text = s
-	c.Refresh()
-}
-
-func (c *crumbBox) CreateRenderer() fyne.WidgetRenderer {
-	c.bg = canvas.NewRectangle(pal().crumbBG)
-	c.bg.CornerRadius = 8
-	c.line = canvas.NewRectangle(pal().crumbBorder)
-	c.line.CornerRadius = 8
-	c.line.StrokeWidth = 1
-	return &crumbBoxRenderer{c: c}
-}
-
-type crumbBoxRenderer struct{ c *crumbBox }
-
-func (r *crumbBoxRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.c.bg, r.c.line, r.c.text}
-}
-
-func (r *crumbBoxRenderer) MinSize() fyne.Size { return fyne.NewSize(120, 28) }
-
-func (r *crumbBoxRenderer) Destroy() {}
-
-func (r *crumbBoxRenderer) Layout(size fyne.Size) {
-	r.c.bg.Resize(size)
-	r.c.line.Resize(size)
-	t := r.c.text.MinSize()
-	r.c.text.Move(fyne.NewPos(14, (size.Height-t.Height)/2))
-}
-
-func (r *crumbBoxRenderer) Refresh() {
-	p := pal()
-	r.c.bg.FillColor = p.crumbBG
-	r.c.line.StrokeColor = p.crumbBorder
-	r.c.text.Color = p.foreground
-	r.c.bg.Refresh()
-	r.c.line.Refresh()
-	r.c.text.Refresh()
 }
 
 // ---------------------------------------------------------------------------
@@ -986,8 +1121,11 @@ type serverRibbon struct {
 	db         string
 	table      string
 	onTap      func()
+	onInfo     func()
 	bg         *canvas.Rectangle
 	text       *canvas.Text
+	infoBG     *canvas.Circle
+	infoText   *canvas.Text
 	bgOverride color.Color // connection status colour; zero = use palette default
 }
 
@@ -998,6 +1136,11 @@ func newServerRibbon() *serverRibbon {
 	r.text = canvas.NewText("", pal().ribbonFG)
 	r.text.TextSize = 13
 	r.text.TextStyle.Bold = true
+	r.infoBG = canvas.NewCircle(pal().ribbonInfo)
+	r.infoText = canvas.NewText("i", colorWhite)
+	r.infoText.TextSize = 11
+	r.infoText.TextStyle.Bold = true
+	r.infoText.Alignment = fyne.TextAlignCenter
 	r.ExtendBaseWidget(r)
 	return r
 }
@@ -1021,15 +1164,21 @@ func (r *serverRibbon) label() string {
 	}
 }
 
-// update swaps the segment values and re-renders, growing to fit the text.
+// update swaps the segment values and re-renders. The bar is laid out by its
+// parent (it stretches to fill the toolbar's centre), so no manual Resize.
 func (r *serverRibbon) update(env, server, tls, host, db, table string) {
 	r.env, r.server, r.tls, r.host, r.db, r.table = env, server, tls, host, db, table
 	r.text.Text = r.label()
-	r.Resize(r.MinSize())
 	r.Refresh()
 }
 
-func (r *serverRibbon) Tapped(*fyne.PointEvent) {
+// Tapped opens the connection picker, except on the trailing info dot which
+// opens the connection info dialog.
+func (r *serverRibbon) Tapped(e *fyne.PointEvent) {
+	if r.onInfo != nil && e.Position.X >= r.Size().Width-40 {
+		r.onInfo()
+		return
+	}
 	if r.onTap != nil {
 		r.onTap()
 	}
@@ -1044,19 +1193,28 @@ func (r *serverRibbon) CreateRenderer() fyne.WidgetRenderer {
 type serverRibbonRenderer struct{ r *serverRibbon }
 
 func (rd *serverRibbonRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{rd.r.bg, rd.r.text}
+	return []fyne.CanvasObject{rd.r.bg, rd.r.text, rd.r.infoBG, rd.r.infoText}
 }
 
 func (rd *serverRibbonRenderer) MinSize() fyne.Size {
-	return fyne.NewSize(rd.r.text.MinSize().Width+40, 30)
+	return fyne.NewSize(rd.r.text.MinSize().Width+80, 32)
 }
 
 func (rd *serverRibbonRenderer) Destroy() {}
 
 func (rd *serverRibbonRenderer) Layout(size fyne.Size) {
 	rd.r.bg.Resize(size)
+	rd.r.bg.CornerRadius = size.Height / 2
 	t := rd.r.text.MinSize()
 	rd.r.text.Move(fyne.NewPos(16, (size.Height-t.Height)/2))
+
+	d := float32(18)
+	x := size.Width - 16 - d
+	rd.r.infoBG.Resize(fyne.NewSize(d, d))
+	rd.r.infoBG.Move(fyne.NewPos(x, (size.Height-d)/2))
+	th := rd.r.infoText.MinSize().Height
+	rd.r.infoText.Resize(fyne.NewSize(d, th))
+	rd.r.infoText.Move(fyne.NewPos(x, (size.Height-th)/2))
 }
 
 // SetStatusColor overrides the ribbon's background with a connection status
@@ -1071,12 +1229,17 @@ func (rd *serverRibbonRenderer) Refresh() {
 	rd.r.text.Text = rd.r.label()
 	if rd.r.bgOverride != nil {
 		rd.r.bg.FillColor = rd.r.bgOverride
+		rd.r.text.Color = colorWhite
 	} else {
 		rd.r.bg.FillColor = p.ribbonBG
+		rd.r.text.Color = p.ribbonFG
 	}
-	rd.r.text.Color = p.ribbonFG
+	rd.r.infoBG.FillColor = p.ribbonInfo
 	rd.r.bg.Refresh()
 	rd.r.text.Refresh()
+	rd.r.infoBG.Refresh()
+	rd.r.infoText.Refresh()
+	rd.Layout(rd.r.Size())
 }
 
 // ---------------------------------------------------------------------------

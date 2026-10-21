@@ -161,7 +161,11 @@ func (s *mysqlSession) Query(sqlText string, maxRows int) (proto.QueryResult, er
 	s.killAsked = false
 	s.mu.Unlock()
 	res, err := sqlkit.Run(conn, sqlText, maxRows)
+	// The statement is no longer in flight, so no KillQuery may target it.
+	// Leaving activeID set would let a later, idle KillQuery kill a stale —
+	// possibly recycled — CONNECTION_ID on some other pooled connection.
 	s.mu.Lock()
+	s.activeID = 0
 	killed := s.killAsked
 	s.mu.Unlock()
 	if err != nil && killed {
@@ -215,6 +219,13 @@ const DefaultMarker = "\x00DEFAULT"
 // isDefault reports whether v carries the DEFAULT sentinel.
 func isDefault(v *string) bool { return v != nil && *v == DefaultMarker }
 
+// execer is the subset of *sql.DB / *sql.Tx used by the row-DML builders, so
+// the same SQL is used for a single autocommit op and inside ApplyChanges'
+// transaction.
+type execer interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
 func (s *mysqlSession) UpdateRow(table string, pk, changes map[string]*string) error {
 	if len(changes) == 0 {
 		return nil
@@ -222,6 +233,82 @@ func (s *mysqlSession) UpdateRow(table string, pk, changes map[string]*string) e
 	if len(pk) == 0 {
 		return fmt.Errorf("update %s: no primary key", table)
 	}
+	q, args := buildUpdate(table, pk, changes)
+	_, err := s.db.Exec(q, args...)
+	return err
+}
+
+func (s *mysqlSession) DeleteRow(table string, pk map[string]*string) error {
+	if len(pk) == 0 {
+		return fmt.Errorf("delete %s: no primary key", table)
+	}
+	q, args := buildDelete(table, pk)
+	_, err := s.db.Exec(q, args...)
+	return err
+}
+
+func (s *mysqlSession) InsertRow(table string, values map[string]*string) error {
+	if len(values) == 0 {
+		return fmt.Errorf("insert %s: no values", table)
+	}
+	q, args, err := buildInsert(table, values)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(q, args...)
+	return err
+}
+
+// ApplyChanges applies a whole commit batch inside one transaction so an error
+// mid-way rolls back everything instead of leaving a partial commit.
+func (s *mysqlSession) ApplyChanges(table string, updates []RowEdit, deletes []map[string]*string, inserts []map[string]*string, ddl []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback() // no-op once Commit succeeds
+
+	for _, u := range updates {
+		if len(u.Changes) == 0 {
+			continue
+		}
+		if len(u.PK) == 0 {
+			return fmt.Errorf("update %s: no primary key", table)
+		}
+		q, args := buildUpdate(table, u.PK, u.Changes)
+		if _, err := tx.Exec(q, args...); err != nil {
+			return err
+		}
+	}
+	for _, pk := range deletes {
+		if len(pk) == 0 {
+			return fmt.Errorf("delete %s: no primary key", table)
+		}
+		q, args := buildDelete(table, pk)
+		if _, err := tx.Exec(q, args...); err != nil {
+			return err
+		}
+	}
+	for _, vals := range inserts {
+		q, args, err := buildInsert(table, vals)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(q, args...); err != nil {
+			return err
+		}
+	}
+	for _, stmt := range ddl {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// buildUpdate renders the UPDATE statement and args shared by UpdateRow and
+// ApplyChanges.
+func buildUpdate(table string, pk, changes map[string]*string) (string, []interface{}) {
 	var sets, where []string
 	var args []interface{}
 	for c, v := range changes {
@@ -238,29 +325,25 @@ func (s *mysqlSession) UpdateRow(table string, pk, changes map[string]*string) e
 	}
 	q := "UPDATE " + quoteMySQL(table) + " SET " + strings.Join(sets, ", ") +
 		" WHERE " + strings.Join(where, " AND ")
-	_, err := s.db.Exec(q, args...)
-	return err
+	return q, args
 }
 
-func (s *mysqlSession) DeleteRow(table string, pk map[string]*string) error {
-	if len(pk) == 0 {
-		return fmt.Errorf("delete %s: no primary key", table)
-	}
+// buildDelete renders the DELETE statement and args shared by DeleteRow and
+// ApplyChanges.
+func buildDelete(table string, pk map[string]*string) (string, []interface{}) {
 	var where []string
 	var args []interface{}
 	for c, v := range pk {
 		where = append(where, quoteMySQL(c)+" = ?")
 		args = append(args, argOf(v))
 	}
-	_, err := s.db.Exec("DELETE FROM "+quoteMySQL(table)+
-		" WHERE "+strings.Join(where, " AND "), args...)
-	return err
+	q := "DELETE FROM " + quoteMySQL(table) + " WHERE " + strings.Join(where, " AND ")
+	return q, args
 }
 
-func (s *mysqlSession) InsertRow(table string, values map[string]*string) error {
-	if len(values) == 0 {
-		return fmt.Errorf("insert %s: no values", table)
-	}
+// buildInsert renders the INSERT statement and args shared by InsertRow and
+// ApplyChanges.
+func buildInsert(table string, values map[string]*string) (string, []interface{}, error) {
 	var cols, ph []string
 	var args []interface{}
 	for c, v := range values {
@@ -272,12 +355,11 @@ func (s *mysqlSession) InsertRow(table string, values map[string]*string) error 
 		args = append(args, argOf(v))
 	}
 	if len(cols) == 0 {
-		return fmt.Errorf("insert %s: no values", table)
+		return "", nil, fmt.Errorf("insert %s: no values", table)
 	}
 	q := "INSERT INTO " + quoteMySQL(table) + " (" + strings.Join(cols, ", ") +
 		") VALUES (" + strings.Join(ph, ", ") + ")"
-	_, err := s.db.Exec(q, args...)
-	return err
+	return q, args, nil
 }
 
 func quoteMySQL(name string) string {
