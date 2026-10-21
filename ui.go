@@ -343,7 +343,7 @@ func newClient(a fyne.App, w fyne.Window) *Client {
 	}
 	c.asyncRun = true
 	c.dispatch = fyne.Do
-	c.searchDelay = 150 * time.Millisecond
+	c.searchDelay = searchDebounceDelay
 	c.keys = make(map[keyCombo]keyBinding)
 	return c
 }

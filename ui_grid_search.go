@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/driver/desktop"
@@ -95,15 +96,40 @@ func (e *searchEntry) setTextSilently(text string) {
 	e.Entry.OnChanged = cb
 }
 
-// onGridSearchChanged re-scans the result for the term and spotlights the
-// first hit.
+// searchDebounceDelay / searchDebounceThreshold gate the debounced rescan: only
+// a result at least this large defers its rescan, and only by this long. Small
+// results - and every test, which leaves searchDelay at 0 - rescan synchronously,
+// so behaviour is unchanged for the common case.
+const (
+	searchDebounceDelay     = 150 * time.Millisecond
+	searchDebounceThreshold = 2000
+)
+
+// onGridSearchChanged reacts to a keystroke in the search box. On a small result
+// it rescans immediately; on a large one it debounces, so typing does not walk
+// every row per keystroke - the rescan runs once typing pauses.
 func (c *Client) onGridSearchChanged(term string) {
 	c.find.term = term
+	c.find.cur = 0
+	if c.searchDelay > 0 && len(c.grid.rows) >= searchDebounceThreshold {
+		if c.find.timer != nil {
+			c.find.timer.Stop()
+		}
+		delay := c.searchDelay
+		c.find.timer = time.AfterFunc(delay, func() {
+			c.dispatch(c.runSearchScan)
+		})
+		return
+	}
+	c.runSearchScan()
+}
+
+// runSearchScan collects the hits for the current term and spotlights the first.
+func (c *Client) runSearchScan() {
 	c.find.hits = nil
 	c.find.hitSet = nil
-	c.find.cur = 0
 
-	needle := strings.ToLower(term)
+	needle := strings.ToLower(c.find.term)
 	if needle != "" {
 		c.scanSearchHits(needle)
 		c.buildHitSet()
@@ -196,6 +222,10 @@ func (c *Client) updateSearchDisplay() {
 // clearGridSearch drops the search box and its state: a new result invalidates
 // every previous hit.
 func (c *Client) clearGridSearch() {
+	if c.find.timer != nil {
+		c.find.timer.Stop()
+		c.find.timer = nil
+	}
 	c.find.term = ""
 	c.find.hits = nil
 	c.find.hitSet = nil
