@@ -22,3 +22,6 @@ connections.json
 history.json
 ui.json
 settings.json
+
+# CodeBuddy / editor cache
+.zcode/
