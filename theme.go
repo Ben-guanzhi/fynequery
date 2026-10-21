@@ -225,6 +225,12 @@ func detailsBG() color.Color { return theme.Color(theme.ColorNameMenuBackground)
 // 窗口的灰会直接透到网格里 —— 上半截白、下半截灰，所以网格要自己铺一层。
 func contentBG() color.Color { return theme.Color(theme.ColorNameInputBackground) }
 
+// edgeShadow 是 elevation 用的阴影色：复用主题已有的 ColorNameShadow
+// （浅色 0x18 / 深色 0x55 的黑色 alpha）。它本就定义了，却几乎只用在 tooltip
+// 边框上，正好拿来当 tyde/Material 式分层阴影 —— 把工具条、侧栏、详情栏从内容区
+// 托起的那道极淡暗线。
+func edgeShadow() color.Color { return theme.Color(theme.ColorNameShadow) }
+
 // themedRect is one rectangle whose colour the theme owns: the shape, and the
 // colour it should be filled with.
 type themedRect struct {

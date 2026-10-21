@@ -79,6 +79,9 @@ func (c *Client) buildDetailsPane() fyne.CanvasObject {
 	}
 
 	c.details.pane = container.NewStack(c.details.tabs)
+	// 详情栏左缘压一道极淡阴影（tyde/Material 的浮动检视器），可见时把它从主区托起。
+	// 隐藏时整个 pane 一并 Hide，阴影无副作用。
+	c.details.pane = c.elevatedEdge(edgeLeft, c.details.pane)
 	if c.uiSet.DetailsOn {
 		c.details.on = true
 	} else {

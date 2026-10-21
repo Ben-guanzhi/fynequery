@@ -369,6 +369,9 @@ func (c *Client) buildUI() fyne.CanvasObject {
 		nil, nil,
 		c.buildSchemaView(), // center: the navigator
 	)
+	// 侧栏右缘压一道极淡阴影（tyde/Material 的面板分层），把它从查询区托起。
+	// 阴影是 2px 主题矩形，不影响侧栏任何 widget 的 MinSize。
+	sidebar = c.elevatedEdge(edgeRight, sidebar)
 
 	// Ctrl+P / Cmd+P opens the quick-open box, Ctrl+N a fresh tab, Ctrl+Enter
 	// runs, Ctrl+O / Ctrl+S read and write the active tab as a .sql script.

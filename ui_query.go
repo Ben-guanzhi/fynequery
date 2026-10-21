@@ -26,6 +26,12 @@ import (
 // layout - and the layout tests that pin it - stays readable.
 func (c *Client) buildQueryView() fyne.CanvasObject {
 	toolbar := c.buildQueryToolbar()
+	// 工具条底部压一道极淡阴影（tyde/Material 的悬浮 App Bar），从编辑器/网格区托起。
+	// 必须包在放进 Border 之前：buildQueryView 会把 toolBar 作为顶边写进 Border，
+	// 之后在 buildUI 再包一层会脱离布局树（尺寸变成 0，布局测试会挂）。
+	// 阴影是 2px 主题矩形，不动工具条自身 MinSize，TestToolbarFitsMainPane 仍通过。
+	toolbar = c.elevatedEdge(edgeBottom, toolbar)
+	c.queryToolbar = toolbar
 	editorArea := c.buildEditorArea()
 	c.buildResultGrid()
 	bottom := c.buildBottomBar()
