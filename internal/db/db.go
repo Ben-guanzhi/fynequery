@@ -165,7 +165,6 @@ func (c *Store) CloseAll() {
 // sequence; the next persist writes exactly these entries.
 func (c *Store) ReplaceHistory(entries []HistoryEntry) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.history = append([]HistoryEntry(nil), entries...)
 	c.historyDirty = true
 	var max int64
@@ -177,6 +176,14 @@ func (c *Store) ReplaceHistory(entries []HistoryEntry) {
 		e.fillLowerCache()
 	}
 	c.historySeq = max
+	c.mu.Unlock()
+	// A replace is authoritative: write exactly these entries and do NOT merge
+	// the on-disk log back in. Otherwise, with historySeq reset to 0 here, the
+	// next persist would re-add stale entries already on disk under reused low
+	// ids. Tests reset in-memory history this way, and a shared history.json can
+	// carry entries from other tests in the same process, so the swap must clear
+	// the file rather than let the merge re-inject them.
+	c.persistHistoryNow(false)
 }
 
 // History returns a snapshot of the statement log, oldest first.
