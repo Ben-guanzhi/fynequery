@@ -1,4 +1,0 @@
-# POSIX scripts must keep LF endings: with CRLF, sh reads the shebang as
-# "#!/bin/sh\r" and refuses to run the file. This repo's other files are
-# free to take whatever the local checkout wants.
-*.sh text eol=lf

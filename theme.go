@@ -1,263 +1,332 @@
 package main
 
-// 主题配色。三级灰白是这一版外观的主干，取自 TablePlus 的浅色版：
-//
-//	窗口底  浅灰 #F2F3F5   —— 侧栏与工具条的天地
-//	面板    再浅 #F7F8F9   —— 详情栏、面包屑、菜单
-//	内容区  纯白 #FFFFFF   —— 编辑器与结果网格
-//
-// 中间只隔 1px 的 #D8DBDE 分隔线，颜色之外的空间一律不动（字号、行高、padding
-// 都是既有测试的阈值）。
-//
-// 早先这里只有几个「取 fyne 命名色」的别名函数，配色因此是 fyne 内置主题给的。
-// 现在反过来：颜色由本文件定义，命名色只是它们的名字 —— 这样明暗两套值放在同一
-// 张表里，改一个色不会只改到一半。
-//
-// 颜色与尺寸都收在 tpColor / tpSize 两个纯函数里：它们不碰 fyne.CurrentApp()，
-// 所以调色板能在不启动 App 的情况下单测（见 theme_test.go）。
+// TablePlus-style light and dark themes for the whole app.
+// Color values follow the design references extracted from the TablePlus
+// screenshots (see design-ref/).
 
 import (
 	"image/color"
+	"strconv"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/theme"
 )
 
-// tpFollow marks the "跟随系统" variant. It is not one of fyne's two variants
-// (VariantDark is 0 and VariantLight is 1 - the zero value is dark), so a
-// sentinel has to be a third value or "follow" would be indistinguishable from
-// "always dark".
-const tpFollow fyne.ThemeVariant = 2
+// colorTransparent is fully transparent, used to hide filler shapes.
+var colorTransparent = color.RGBA{R: 0, G: 0, B: 0, A: 0}
 
-// ---- palette: the whole look, in one table ----
-
-// tpInk is one colour of the palette. opaque is the common case; the
-// translucent ones (selections, hover, shadows) are stated as an alpha over
-// whatever is under them, which is what keeps the grid's selection highlight
-// visible through a zebra stripe.
-type tpInk struct {
-	RGB   uint32 // 0xRRGGBB
-	alpha uint8  // 0 = opaque
-}
-
-func ink(hex uint32) tpInk { return tpInk{RGB: hex} }
-
-func inkA(hex uint32, alpha uint8) tpInk { return tpInk{RGB: hex, alpha: alpha} }
-
-func (i tpInk) color() color.Color {
-	if i.alpha == 0 {
-		return color.NRGBA{
-			R: uint8(i.RGB >> 16), G: uint8(i.RGB >> 8), B: uint8(i.RGB), A: 0xFF,
-		}
+// hex parses "#RRGGBB" or "#RRGGBBAA" into an RGBA color.
+func hex(s string) color.RGBA {
+	s = s[1:]
+	r, _ := strconv.ParseUint(s[0:2], 16, 8)
+	g, _ := strconv.ParseUint(s[2:4], 16, 8)
+	b, _ := strconv.ParseUint(s[4:6], 16, 8)
+	a := uint64(255)
+	if len(s) >= 8 {
+		a, _ = strconv.ParseUint(s[6:8], 16, 8)
 	}
-	return color.NRGBA{
-		R: uint8(i.RGB >> 16), G: uint8(i.RGB >> 8), B: uint8(i.RGB), A: i.alpha,
+	return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a)}
+}
+
+// Palette of hand-tuned colors for chrome we draw ourselves (status bar,
+// badges, tabs...). Fyne theme colors live in tablePlusTheme below.
+// Dark values are measured from a live TablePlus Windows dark window
+// (design-ref/tp-live-workspace.png); light values keep the earlier
+// screenshot-calibrated palette.
+type palette struct {
+	// chrome
+	bg            color.RGBA // window background
+	sidebarBG     color.RGBA // left sidebar / welcome left panel
+	toolbarBG     color.RGBA
+	contentBG     color.RGBA
+	stripBG       color.RGBA // top tab-strip base (TablePlus dark: #626262)
+	tabBG         color.RGBA // inactive tab chip
+	activeTabBG   color.RGBA // active tab chip
+	inactiveTabFG color.RGBA
+	activeTabFG   color.RGBA
+	tabUnderline  color.RGBA
+	line          color.RGBA // hairline borders
+	dividerLine   color.RGBA // panel divider / scrollbar accent (TablePlus custom #FA5151)
+	statusBG      color.RGBA
+	statusSideBG  color.RGBA // status segment under the sidebar
+	statusFG      color.RGBA
+	statusLink    color.RGBA
+	treeSel       color.RGBA // sidebar tree selection (TablePlus teal-blue)
+	pkHeader      color.RGBA // primary-key column header highlight (#FFDF9D)
+	cellInt       color.RGBA // int / bigint value color (blue)
+	cellFloat     color.RGBA // decimal / float value color (mint)
+	cellDate      color.RGBA // date / datetime value color (gold)
+	cellStr       color.RGBA // varchar / text value color (orange)
+	cellDefault   color.RGBA // everything else (white in dark)
+	// grid
+	gridHeaderBG    color.RGBA
+	gridHeaderFG    color.RGBA
+	gridRowAltBG    color.RGBA
+	gridRowHoverBG  color.RGBA
+	gridRowSelectBG color.RGBA
+	gridCellFG      color.RGBA
+	gridNullFG      color.RGBA
+	gridLine        color.RGBA // 1px row separator line
+	gutterBG        color.RGBA // row-number gutter background
+	cellEdited      color.RGBA // an unsaved (edited) cell value
+	rowDeletedBG    color.RGBA // background of a row marked for deletion
+	// server ribbon (green info bar at the top of the workspace)
+	ribbonBG color.RGBA
+	ribbonFG color.RGBA
+	// query result status dot (bottom "● Query result" line)
+	okDot color.RGBA
+	// breadcrumb nav bar + details pane
+	crumbBG     color.RGBA // rounded table-name field background
+	crumbBorder color.RGBA
+	detailBG    color.RGBA // right details sidebar background
+	detailLine  color.RGBA // property row separator
+	metaKeyFG   color.RGBA // property key text (dimmed)
+	metaValFG   color.RGBA // property value text
+	// misc
+	foreground      color.RGBA
+	accent          color.RGBA
+	accentDark      color.RGBA
+	hover           color.RGBA
+	segmentBG       color.RGBA
+	segmentActive   color.RGBA
+	segmentFG       color.RGBA
+	segmentActiveFG color.RGBA
+	welcomePanelBG  color.RGBA
+	welcomeFG       color.RGBA
+}
+
+var lightPalette = palette{
+	bg:              hex("#FFFFFF"),
+	sidebarBG:       hex("#ECECEC"),
+	toolbarBG:       hex("#F7F7F7"),
+	contentBG:       hex("#FFFFFF"),
+	stripBG:         hex("#F0F0F0"),
+	tabBG:           hex("#F7F7F7"),
+	activeTabBG:     hex("#FFFFFF"),
+	inactiveTabFG:   hex("#8A8A8A"),
+	activeTabFG:     hex("#2B2B2B"),
+	tabUnderline:    hex("#2F7BD9"),
+	line:            hex("#E0E0E0"),
+	dividerLine:     hex("#E05555"),
+	statusBG:        hex("#F0F0F0"),
+	statusSideBG:    hex("#ECECEC"),
+	statusFG:        hex("#555555"),
+	statusLink:      hex("#2F7BD9"),
+	treeSel:         hex("#DDEBF7"),
+	pkHeader:        hex("#8A6D00"),
+	cellInt:         hex("#1F6FEB"),
+	cellFloat:       hex("#00856C"),
+	cellDate:        hex("#9A6700"),
+	cellStr:         hex("#C05A1F"),
+	cellDefault:     hex("#333333"),
+	gridHeaderBG:    hex("#FFFFFF"),
+	gridHeaderFG:    hex("#444444"),
+	gridRowAltBG:    hex("#FBFBFB"),
+	gridRowHoverBG:  hex("#F0F6FF"),
+	gridRowSelectBG: hex("#DDEBF7"),
+	gridCellFG:      hex("#333333"),
+	gridNullFG:      hex("#A0A0A0"),
+	gridLine:        hex("#E0E0E0"),
+	gutterBG:        hex("#F5F5F5"),
+	cellEdited:      hex("#C05621"),
+	rowDeletedBG:    hex("#FDECEA"),
+	ribbonBG:        hex("#2FA84F"),
+	ribbonFG:        hex("#FFFFFF"),
+	okDot:           hex("#2FB344"),
+	crumbBG:         hex("#FFFFFF"),
+	crumbBorder:     hex("#D9D9D9"),
+	detailBG:        hex("#F7F7F7"),
+	detailLine:      hex("#E4E4E4"),
+	metaKeyFG:       hex("#8A8A8A"),
+	metaValFG:       hex("#333333"),
+	foreground:      hex("#333333"),
+	accent:          hex("#2F7BD9"),
+	accentDark:      hex("#1E5AA8"),
+	hover:           hex("#EDF3FB"),
+	segmentBG:       hex("#E8E8E8"),
+	segmentActive:   hex("#FFFFFF"),
+	segmentFG:       hex("#666666"),
+	segmentActiveFG: hex("#2B2B2B"),
+	welcomePanelBG:  hex("#F5F5F5"),
+	welcomeFG:       hex("#6B6B6B"),
+}
+
+var darkPalette = palette{
+	bg:              hex("#1E1E1E"),
+	sidebarBG:       hex("#252525"),
+	toolbarBG:       hex("#252525"),
+	contentBG:       hex("#1E1E1E"),
+	stripBG:         hex("#626262"),
+	tabBG:           hex("#343535"),
+	activeTabBG:     hex("#343535"),
+	inactiveTabFG:   hex("#BFBFBF"),
+	activeTabFG:     hex("#FFFFFF"),
+	tabUnderline:    hex("#007F3D"),
+	line:            hex("#1C1C1C"),
+	dividerLine:     hex("#FA5151"),
+	statusBG:        hex("#252525"),
+	statusSideBG:    hex("#252525"),
+	statusFG:        hex("#A9A9A9"),
+	statusLink:      hex("#007F3D"),
+	treeSel:         hex("#4680A0"),
+	pkHeader:        hex("#FFDF9D"),
+	cellInt:         hex("#79BEFF"),
+	cellFloat:       hex("#BEFFDF"),
+	cellDate:        hex("#FFDF9D"),
+	cellStr:         hex("#FFBE79"),
+	cellDefault:     hex("#FFFFFF"),
+	gridHeaderBG:    hex("#343535"),
+	gridHeaderFG:    hex("#FFFFFF"),
+	gridRowAltBG:    hex("#292929"),
+	gridRowHoverBG:  hex("#2A2A2A"),
+	gridRowSelectBG: hex("#4680A0"),
+	gridCellFG:      hex("#FFFFFF"),
+	gridNullFG:      hex("#7A7A7A"),
+	gridLine:        hex("#353535"),
+	gutterBG:        hex("#252525"),
+	cellEdited:      hex("#E5A15C"),
+	rowDeletedBG:    hex("#4A2A2A"),
+	ribbonBG:        hex("#2FA84F"),
+	ribbonFG:        hex("#FFFFFF"),
+	okDot:           hex("#3DD68C"),
+	crumbBG:         hex("#2D2D2D"),
+	crumbBorder:     hex("#3C3C3C"),
+	detailBG:        hex("#252525"),
+	detailLine:      hex("#333333"),
+	metaKeyFG:       hex("#8A8A8A"),
+	metaValFG:       hex("#DADADA"),
+	foreground:      hex("#CCCCCC"),
+	accent:          hex("#007F3D"),
+	accentDark:      hex("#0A6938"),
+	hover:           hex("#3A3B3B"),
+	segmentBG:       hex("#333333"),
+	segmentActive:   hex("#007F3D"),
+	segmentFG:       hex("#A9A9A9"),
+	segmentActiveFG: hex("#FFFFFF"),
+	welcomePanelBG:  hex("#1B1B1B"),
+	welcomeFG:       hex("#A9A9A9"),
+}
+
+// pal returns the palette for the current UI mode.
+var darkMode bool
+
+func pal() *palette {
+	if darkMode {
+		return &darkPalette
 	}
+	return &lightPalette
 }
 
-// tpPrimary is the accent. Everything blue in the window answers to it.
-const tpPrimary = 0x1E6FD9
-
-// tpPrimaryDark is the accent in the dark variant, lifted towards the light end
-// so it still reads as a highlight against a near-black background.
-const tpPrimaryDark = 0x4C8FF7
-
-// tpLight / tpDark are the two palettes; every name below appears in both, so a
-// colour can never be "the new one" in one variant and "the old one" in the
-// other. Names absent from these maps fall through to the built-in theme.
-var tpLight = map[fyne.ThemeColorName]tpInk{
-	theme.ColorNameBackground:          ink(0xF2F3F5),
-	theme.ColorNameMenuBackground:      ink(0xF7F8F9),
-	theme.ColorNameInputBackground:     ink(0xFFFFFF),
-	theme.ColorNameOverlayBackground:   ink(0xFFFFFF),
-	theme.ColorNameHeaderBackground:    ink(0xF7F8F9),
-	theme.ColorNameButton:              ink(0xFFFFFF),
-	theme.ColorNameDisabledButton:      ink(0xEDEEF0),
-	theme.ColorNameSeparator:           ink(0xD8DBDE),
-	theme.ColorNameInputBorder:         ink(0xD8DBDE),
-	theme.ColorNameShadow:              inkA(0x000000, 0x18),
-	theme.ColorNamePrimary:             ink(tpPrimary),
-	theme.ColorNameHyperlink:           ink(tpPrimary),
-	theme.ColorNameForegroundOnPrimary: ink(0xFFFFFF),
-	theme.ColorNameFocus:               inkA(tpPrimary, 0x33),
-	theme.ColorNameSelection:           inkA(tpPrimary, 0x2E),
-	theme.ColorNameHover:               inkA(0x000000, 0x0A),
-	theme.ColorNamePressed:             inkA(0x000000, 0x14),
-	theme.ColorNameForeground:          ink(0x33333A),
-	theme.ColorNamePlaceHolder:         ink(0x9AA0A6),
-	theme.ColorNameDisabled:            ink(0xB6BAC0),
-	theme.ColorNameScrollBar:           inkA(0x000000, 0x52),
-	theme.ColorNameScrollBarBackground: ink(0xE9EAEC),
-}
-
-var tpDark = map[fyne.ThemeColorName]tpInk{
-	theme.ColorNameBackground:          ink(0x191A1C),
-	theme.ColorNameMenuBackground:      ink(0x212225),
-	theme.ColorNameInputBackground:     ink(0x212225),
-	theme.ColorNameOverlayBackground:   ink(0x1E1F21),
-	theme.ColorNameHeaderBackground:    ink(0x1E1F21),
-	theme.ColorNameButton:              ink(0x2A2C2F),
-	theme.ColorNameDisabledButton:      ink(0x232428),
-	theme.ColorNameSeparator:           ink(0x37383B),
-	theme.ColorNameInputBorder:         ink(0x3A3B3E),
-	theme.ColorNameShadow:              inkA(0x000000, 0x55),
-	theme.ColorNamePrimary:             ink(tpPrimaryDark),
-	theme.ColorNameHyperlink:           ink(tpPrimaryDark),
-	theme.ColorNameForegroundOnPrimary: ink(0xFFFFFF),
-	theme.ColorNameFocus:               inkA(tpPrimaryDark, 0x40),
-	theme.ColorNameSelection:           inkA(tpPrimaryDark, 0x33),
-	theme.ColorNameHover:               inkA(0xFFFFFF, 0x0A),
-	theme.ColorNamePressed:             inkA(0xFFFFFF, 0x14),
-	theme.ColorNameForeground:          ink(0xE4E5E7),
-	theme.ColorNamePlaceHolder:         ink(0x6E7075),
-	theme.ColorNameDisabled:            ink(0x5A5C61),
-	theme.ColorNameScrollBar:           inkA(0xFFFFFF, 0x52),
-	theme.ColorNameScrollBarBackground: ink(0x26272A),
-}
-
-// tpColor answers one palette entry. ok is false for a name this theme does not
-// define, which is what keeps the fallback honest: a colour we never chose is
-// the built-in theme's, not a guess.
-func tpColor(name fyne.ThemeColorName, variant fyne.ThemeVariant) (color.Color, bool) {
-	table := tpLight
-	if variant == theme.VariantDark {
-		table = tpDark
-	}
-	entry, ok := table[name]
-	if !ok {
-		return nil, false
-	}
-	return entry.color(), true
-}
-
-// tpSizes are the only size overrides. They are deliberately few and
-// deliberately timid:
-//
-//   - SizeNameText, SizeNamePadding: every text measurement and every
-//     border/box gap hangs off them; several tests pin widths and heights that
-//     were measured at their built-in values.
-//   - SizeNameSplitThickness: the built-in theme answers 0 on purpose and the
-//     Split container substitutes its own, so naming a value here would silently
-//     change the drag handles.
-//   - Row heights and the editor's metrics: the grid and the line-number gutter
-//     are aligned to them.
-var tpSizes = map[fyne.ThemeSizeName]float32{
-	theme.SizeNameInnerPadding: 6,
-	theme.SizeNameScrollBar:    10,
-	theme.SizeNameInputRadius:  4,
-	theme.SizeNameButtonRadius: 4,
-}
-
-// tpSize answers one size override; ok is false for everything else.
-func tpSize(name fyne.ThemeSizeName) (float32, bool) {
-	v, ok := tpSizes[name]
-	return v, ok
-}
-
-// ---- the theme itself ----
-
-// tpTheme is the app's theme: TablePlus's colours over fyne's built-in
-// everything else. It exists because the built-in LightTheme/DarkTheme
-// constructors ignore the user's preference (and are deprecated for it), while
-// DefaultTheme alone has the built-in palette.
-type tpTheme struct {
+type tablePlusTheme struct {
 	base fyne.Theme
-	// variant is tpFollow to follow the system, or a pinned one. It is kept on
-	// the theme rather than resolved per call because the framework passes the
-	// system variant in and cannot tell it from "the user pinned light".
-	variant fyne.ThemeVariant
 }
 
-// newTablePlusTheme wraps the default theme in the TablePlus palette.
-func newTablePlusTheme(variant fyne.ThemeVariant) *tpTheme {
-	return &tpTheme{base: theme.DefaultTheme(), variant: variant}
-}
-
-// Color implements fyne.Theme.
-func (t *tpTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
-	if t.variant != tpFollow {
-		variant = t.variant
+func (t *tablePlusTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
+	p := pal()
+	variant := theme.VariantLight
+	if darkMode {
+		variant = theme.VariantDark
 	}
-	// A variant that is neither light nor dark means the caller carries no
-	// user preference (the test driver passes one). Answering the built-in
-	// theme wholesale keeps a window from ending up half one way, half the
-	// other: a mixed answer looks more broken than an unstyled one.
-	if variant != theme.VariantDark && variant != theme.VariantLight {
-		return t.base.Color(name, variant)
-	}
-	if c, ok := tpColor(name, variant); ok {
-		return c
+	switch name {
+	case theme.ColorNameBackground:
+		return p.contentBG
+	case theme.ColorNameButton:
+		return p.toolbarBG
+	case theme.ColorNameDisabled:
+		return hex("#AAAAAA")
+	case theme.ColorNameDisabledButton:
+		if darkMode {
+			return hex("#333333")
+		}
+		return hex("#E8E8E8")
+	case theme.ColorNameError:
+		return hex("#E53935")
+	case theme.ColorNameFocus:
+		return p.accent
+	case theme.ColorNameForeground:
+		return p.foreground
+	case theme.ColorNameHover:
+		return p.hover
+	case theme.ColorNameHeaderBackground:
+		return p.toolbarBG
+	case theme.ColorNameInputBackground:
+		if darkMode {
+			return hex("#333333")
+		}
+		return hex("#FFFFFF")
+	case theme.ColorNameInputBorder:
+		if darkMode {
+			return hex("#333333")
+		}
+		return hex("#D9D9D9")
+	case theme.ColorNameMenuBackground:
+		if darkMode {
+			return hex("#252526")
+		}
+		return hex("#FCFCFC")
+	case theme.ColorNameOverlayBackground:
+		// Dialog/popup box background — must track the theme so dialogs match
+		// the window (Fyne forces this opaque for the dialog box).
+		if darkMode {
+			return hex("#2D2D2D")
+		}
+		return hex("#F7F7F7")
+	case theme.ColorNamePlaceHolder:
+		if darkMode {
+			return hex("#7A7A7A")
+		}
+		return hex("#9A9A9A")
+	case theme.ColorNamePressed:
+		if darkMode {
+			return hex("#094771")
+		}
+		return hex("#DDEBF7")
+	case theme.ColorNamePrimary:
+		return p.accent
+	case theme.ColorNameScrollBar:
+		return p.dividerLine
+	case theme.ColorNameSelection:
+		return p.treeSel
+	case theme.ColorNameSeparator:
+		return p.line
+	case theme.ColorNameShadow:
+		return hex("#00000055")
+	case theme.ColorNameSuccess:
+		return hex("#4CAF50")
+	case theme.ColorNameWarning:
+		return hex("#F5A623")
 	}
 	return t.base.Color(name, variant)
 }
 
-// Font implements fyne.Theme: fonts are the built-in ones.
-func (t *tpTheme) Font(style fyne.TextStyle) fyne.Resource {
+func (t *tablePlusTheme) Font(style fyne.TextStyle) fyne.Resource {
 	return t.base.Font(style)
 }
 
-// Icon implements fyne.Theme: icons are the built-in ones.
-func (t *tpTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
+func (t *tablePlusTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
 	return t.base.Icon(name)
 }
 
-// Size implements fyne.Theme.
-func (t *tpTheme) Size(name fyne.ThemeSizeName) float32 {
-	if v, ok := tpSize(name); ok {
-		return v
+func (t *tablePlusTheme) Size(name fyne.ThemeSizeName) float32 {
+	switch name {
+	case theme.SizeNameText:
+		return 13
+	case theme.SizeNameHeadingText:
+		return 26
+	case theme.SizeNameSubHeadingText:
+		return 16
+	case theme.SizeNameCaptionText:
+		return 11
+	case theme.SizeNameInputBorder:
+		return 1
+	case theme.SizeNameSeparatorThickness:
+		return 1
+	case theme.SizeNameScrollBar:
+		return 10
+	case theme.SizeNamePadding:
+		return 5
+	case theme.SizeNameInnerPadding:
+		return 7
 	}
 	return t.base.Size(name)
-}
-
-// ---- named colours the widgets ask for ----
-
-// crumbBG 是面包屑框与详情栏数值框的底色：一级「面板」灰，不是内容区的白。
-func crumbBG() color.Color { return theme.Color(theme.ColorNameMenuBackground) }
-
-// crumbBorder 是面包屑框与详情栏数值框的描边色：要的是那条 1px 实线，不是投影。
-func crumbBorder() color.Color { return theme.Color(theme.ColorNameSeparator) }
-
-// detailsBG 是右侧详情栏面板的底色。
-func detailsBG() color.Color { return theme.Color(theme.ColorNameMenuBackground) }
-
-// contentBG 是内容区（编辑器、结果网格）的底色。widget.Table 不自绘底色，
-// 窗口的灰会直接透到网格里 —— 上半截白、下半截灰，所以网格要自己铺一层。
-func contentBG() color.Color { return theme.Color(theme.ColorNameInputBackground) }
-
-// edgeShadow 是 elevation 用的阴影色：复用主题已有的 ColorNameShadow
-// （浅色 0x18 / 深色 0x55 的黑色 alpha）。它本就定义了，却几乎只用在 tooltip
-// 边框上，正好拿来当 tyde/Material 式分层阴影 —— 把工具条、侧栏、详情栏从内容区
-// 托起的那道极淡暗线。
-func edgeShadow() color.Color { return theme.Color(theme.ColorNameShadow) }
-
-// themedRect is one rectangle whose colour the theme owns: the shape, and the
-// colour it should be filled with.
-type themedRect struct {
-	rect *canvas.Rectangle
-	fill func() color.Color
-}
-
-// refreshThemeColors repaints every rectangle that took its colour from a
-// theme. A canvas.Rectangle keeps the colour it was created with: switching
-// themes hands the app a new theme and nothing goes back to repaint shapes
-// already filled from the old one, so the grid's white rectangle would survive
-// untouched into the dark theme.
-func (c *Client) refreshThemeColors() {
-	for _, tr := range c.themedRects {
-		if tr.rect == nil {
-			continue
-		}
-		tr.rect.FillColor = tr.fill()
-		tr.rect.Refresh()
-	}
-}
-
-// zebraColor 是结果网格隔行条纹的颜色：前景色压到很低的 alpha 叠在底色上。
-// 取前景而不是某个固定浅灰，是为了明暗主题下都只轻微偏移背景；半透明则保证
-// 表格自己的选中高亮从条纹底下透出来，不会被不透明条纹盖掉。
-func zebraColor() color.Color {
-	fg := theme.Color(theme.ColorNameForeground)
-	r, g, b, _ := fg.RGBA()
-	return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: 14}
 }

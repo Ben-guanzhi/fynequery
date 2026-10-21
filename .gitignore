@@ -1,27 +1,4 @@
-# build artifacts
+// 保底提交前的忽略规则：构建产物不入库（源码与 docs/设计稿保留）
 *.exe
-
-# driver plugins built by `task build-plugins` (copied next to the app or into
-# the state dir's plugins/ folder at install time)
-/plugins/
-
-# release artifacts from `task release` (name carries the tag and the target)
-/fynequery-*-*
-
-# go build/test temp
-*.out
-
-# Windows editor swap files
-*.swp
-
-# Runtime state: saved connections (credentials), query history, UI layout.
-# These live in the OS config directory now, but releases built before that
-# change left them beside the executable, and a hand-pointed
-# TABLEPRO_STATE_DIR can put them anywhere - so they stay ignored either way.
-connections.json
-history.json
-ui.json
-settings.json
-
-# CodeBuddy / editor cache
+dist/
 .zcode/
