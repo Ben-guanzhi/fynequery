@@ -233,7 +233,13 @@ func (c *Client) schemaRowWidget(nd *nodeData, depth int) fyne.CanvasObject {
 			icon = theme.FolderIcon()
 		}
 	case "table":
-		icon = theme.DocumentIcon()
+		// Views get a distinct glyph from base tables so the two read apart
+		// in the tree - TablePlus marks them differently too.
+		if nd.typ == "view" {
+			icon = theme.ViewRestoreIcon()
+		} else {
+			icon = theme.DocumentIcon()
+		}
 	}
 
 	btn := widget.NewButtonWithIcon(nd.label, icon, nil)

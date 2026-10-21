@@ -63,16 +63,21 @@ func saveUISettings(path string, s uiSettings) {
 	_ = os.WriteFile(path, data, 0600)
 }
 
-// applyTheme maps the stored choice onto the app settings; an empty value
-// keeps fyne's system-following default.
+// applyTheme maps the stored choice onto the app settings. Every choice gets
+// the TablePlus palette; only the variant differs, and an empty choice leaves
+// the variant to the system.
+//
+// It used to set fyne's LightTheme()/DarkTheme() directly. Those two ignore the
+// user's preference - which is exactly why they are deprecated - and they carry
+// the built-in palette; the variant is now a field on our own theme instead.
 func applyTheme(themeChoice string) {
 	a := fyne.CurrentApp()
 	switch themeChoice {
 	case "light":
-		a.Settings().SetTheme(theme.LightTheme())
+		a.Settings().SetTheme(newTablePlusTheme(theme.VariantLight))
 	case "dark":
-		a.Settings().SetTheme(theme.DarkTheme())
+		a.Settings().SetTheme(newTablePlusTheme(theme.VariantDark))
 	default:
-		a.Settings().SetTheme(theme.DefaultTheme())
+		a.Settings().SetTheme(newTablePlusTheme(tpFollow))
 	}
 }

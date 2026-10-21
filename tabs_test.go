@@ -14,7 +14,7 @@ import (
 )
 
 func newTestClient(a fyne.App, w fyne.Window) *Client {
-	return &Client{
+	c := &Client{
 		app:   a,
 		win:   w,
 		store: db.NewStore(),
@@ -26,6 +26,8 @@ func newTestClient(a fyne.App, w fyne.Window) *Client {
 		asyncRun: false,
 		dispatch: func(f func()) { f() },
 	}
+	c.buildEntryLists()
+	return c
 }
 
 // mimicTypedInput registers the canvas char callback the way the real driver

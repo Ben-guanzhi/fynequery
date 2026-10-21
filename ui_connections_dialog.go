@@ -126,6 +126,9 @@ type connFields struct {
 	includeE, excludeE *widget.Entry
 	// filePicker opens an existing database file; it only shows for SQLite.
 	filePicker *widget.Button
+	// pluginHint warns when the chosen engine's driver plugin is not installed
+	// (and the engine is not builtin); it is empty/hidden for a usable engine.
+	pluginHint *widget.Label
 	// sslStored is the mode string the 加密 dropdown currently stands for.
 	sslStored string
 }
@@ -151,6 +154,8 @@ func (c *Client) newConnFields(edit *db.ConnConfig) *connFields {
 		includeE: widget.NewMultiLineEntry(),
 		excludeE: widget.NewMultiLineEntry(),
 	}
+	f.pluginHint = widget.NewLabel("")
+	f.pluginHint.Wrapping = fyne.TextWrapWord
 	f.includeE.PlaceHolder = "只显示这些库，如 APP*  /  *_env"
 	f.excludeE.PlaceHolder = "隐藏这些库，如 tempdb  /  *_backup"
 	f.includeE.SetMinRowsVisible(filterRows)
@@ -174,6 +179,7 @@ func (c *Client) newConnFields(edit *db.ConnConfig) *connFields {
 	// Friendly default ports per engine when creating a new connection.
 	f.typeSel.OnChanged = func(t string) {
 		f.updatePicker()
+		f.updatePluginHint()
 		// Each engine asks for its own encryption vocabulary.
 		f.applyEngineSSL(f.sslStored)
 		// The field rules moved with the engine (SQLite: no host, no port);
@@ -188,7 +194,23 @@ func (c *Client) newConnFields(edit *db.ConnConfig) *connFields {
 		f.portE.SetText(defaultPortFor(engineType(t)))
 	}
 	f.updatePicker()
+	f.updatePluginHint()
 	return f
+}
+
+// updatePluginHint shows the install notice for an engine whose driver plugin is
+// missing. MySQL and SQLite are builtin, and the other engines only need this
+// when their plugin binary is not in a plugins folder.
+func (f *connFields) updatePluginHint() {
+	typ := engineType(f.typeSel.Selected)
+	if msg := driverPluginMissing(typ); msg != "" {
+		f.pluginHint.SetText("⚠ " + msg)
+		f.pluginHint.Importance = widget.WarningImportance
+		f.pluginHint.Show()
+		return
+	}
+	f.pluginHint.SetText("")
+	f.pluginHint.Hide()
 }
 
 // applyEngineDefaults seeds the fields from an existing connection, or from
@@ -221,6 +243,7 @@ func (f *connFields) form() *widget.Form {
 	return widget.NewForm(
 		widget.NewFormItem("名称", f.nameE),
 		widget.NewFormItem("类型", f.typeSel),
+		widget.NewFormItem("", f.pluginHint),
 		widget.NewFormItem("主机", f.hostE),
 		widget.NewFormItem("端口", f.portE),
 		widget.NewFormItem("用户名", f.userE),

@@ -6,6 +6,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -100,13 +101,15 @@ func TestShortcutsFallThroughToEntry(t *testing.T) {
 
 // TestKeysDialogButtonOpensDialog wires the toolbar button to the dialog: the
 // hint label it replaced was the only place the combos were written down, so
-// tapping 快捷键 has to actually show something.
+// tapping 快捷键 has to actually show something. The button is icon-only now
+// (HelpIcon) and carries its label as a tooltip, so the finder matches on the
+// icon rather than text.
 func TestKeysDialogButtonOpensDialog(t *testing.T) {
 	c, _ := newKeyClient(t)
 
 	var btn *widget.Button
 	for _, o := range test.LaidOutObjects(c.win.Content()) {
-		if b, ok := o.(*widget.Button); ok && b.Text == "快捷键" {
+		if b, ok := o.(*widget.Button); ok && b.Icon != nil && b.Icon.Name() == theme.HelpIcon().Name() {
 			btn = b
 			break
 		}

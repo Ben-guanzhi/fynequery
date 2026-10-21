@@ -30,12 +30,22 @@ func (c *Client) buildQueryView() fyne.CanvasObject {
 	c.buildResultGrid()
 	bottom := c.buildBottomBar()
 
+	// The grid sits on its own white rectangle. widget.Table does not paint a
+	// background of its own, so the window's grey would otherwise show through
+	// and the lower half of the window would read as a different surface from
+	// the editor above it.
+	c.gridBG = canvas.NewRectangle(contentBG())
+	c.themedRects = append(c.themedRects, themedRect{rect: c.gridBG, fill: contentBG})
+
 	// The breadcrumb rides above the grid with the page bar directly under it;
 	// the page bar stays hidden unless the result on screen is a paged one, so
-	// a normal query costs no vertical space beyond the crumb row.
+	// a normal query costs no vertical space beyond the crumb row. The data bar
+	// - the TablePlus signature strip: the object name on the left, the row
+	// actions (add / duplicate / delete / reload) on the right - sits just over
+	// the grid. The bottom bar keeps the cell inspector and edit-commit cluster.
 	gridArea := container.NewBorder(
-		container.NewVBox(c.buildCrumbBar(), c.buildPageBar()),
-		nil, nil, nil, c.grid.table)
+		container.NewVBox(c.buildCrumbBar(), c.buildPageBar(), c.buildDataBar()),
+		nil, nil, nil, container.NewStack(c.gridBG, c.grid.table))
 	split := container.NewVSplit(
 		editorArea,
 		gridArea,
@@ -62,38 +72,54 @@ func (c *Client) buildEditorArea() fyne.CanvasObject {
 	c.addQueryTab()
 	c.restoreQueryTabs()
 
-	openScriptBtn := widget.NewButtonWithIcon("打开脚本", theme.FolderOpenIcon(), func() {
-		c.showOpenScriptDialog()
-	})
-	openScriptBtn.Importance = widget.LowImportance
-	saveScriptBtn := widget.NewButtonWithIcon("保存脚本", theme.DocumentSaveIcon(), func() {
-		c.showSaveScriptDialog()
-	})
-	saveScriptBtn.Importance = widget.LowImportance
-
-	// fyne 2.5 tabs cannot host close buttons, so new/close live on this strip,
-	// and script open/save sit with them because both act on the active tab.
-	tabActions := container.NewHBox(
-		widget.NewButtonWithIcon("新查询", theme.ContentAddIcon(), func() { c.addQueryTab() }),
-		widget.NewButtonWithIcon("关闭", theme.CancelIcon(), func() { c.closeActiveTab() }),
-		widget.NewSeparator(),
-		openScriptBtn, saveScriptBtn,
+	// fyne's tabs cannot host their own close button, so new/close and the two
+	// script buttons sit on the tab strip's right - which is where TablePlus
+	// puts its "+" - instead of on a row of their own above it. The row they
+	// used to cost goes back to the editor.
+	//
+	// The HBox has to go inside a VBox: a Border's right slot is stretched to
+	// the container's full height and an HBox stretches its children to match,
+	// which would turn four small buttons into one tall block. A VBox hands
+	// them their own heights and aligns them to the top.
+	c.tabs.actions = container.NewHBox(
+		attachTooltip(iconButton(theme.ContentAddIcon(), func() { c.addQueryTab() }), "新建查询标签"),
+		attachTooltip(iconButton(theme.CancelIcon(), func() { c.closeActiveTab() }), "关闭当前标签"),
+		attachTooltip(iconButton(theme.FolderOpenIcon(), func() { c.showOpenScriptDialog() }), "打开 .sql 脚本到当前标签"),
+		attachTooltip(iconButton(theme.DocumentSaveIcon(), func() { c.showSaveScriptDialog() }), "把当前标签保存为 .sql 脚本"),
 	)
-	tabsArea := container.NewBorder(tabActions, nil, nil, nil, c.tabs.bar)
+	tabsArea := container.NewBorder(nil, nil, nil,
+		container.NewVBox(c.tabs.actions), c.tabs.bar)
 
 	// The candidate bar sits between the editor and the split handle; hidden
 	// while there is nothing to suggest.
 	return container.NewBorder(nil, c.tabs.sug, nil, nil, tabsArea)
 }
 
-// buildQueryToolbar builds the strip above the tabs. Its order follows the
-// reference layout: database first, the prominent run button, then the shortcut
-// dialog; paging and export on the right.
+// iconButton is a toolbar-shaped button: no label, the size of its icon. The
+// ones that lose their text still have to be findable, so every caller hangs a
+// tooltip on it (see ui_tooltip.go).
+func iconButton(icon fyne.Resource, fn func()) *widget.Button {
+	b := widget.NewButtonWithIcon("", icon, fn)
+	b.Importance = widget.LowImportance
+	return b
+}
+
+// buildQueryToolbar builds the strip above the tabs, in three groups like
+// TablePlus's: the database on the left, the run controls in the middle and the
+// result controls pinned to the right edge.
+//
+// The groups are a Border rather than one HBox because an HBox never wraps: it
+// lays every child at its own width and pushes the tail past the right edge,
+// where it is clipped and unreachable. A Border also gives the tail a home - it
+// is pinned to the right edge instead of drifting further left with every
+// control added to its left, so the right-hand group stays where the eye
+// expects it at any window width.
 func (c *Client) buildQueryToolbar() *fyne.Container {
 	c.dbs.sel = widget.NewSelect(nil, func(db string) {
 		c.currentDB = db
 		c.expandDatabaseInTree(db)
 	})
+	c.dbs.sel.PlaceHolder = "数据库"
 
 	runBtn := widget.NewButtonWithIcon("执行", theme.MediaPlayIcon(), func() {
 		c.runCurrent()
@@ -106,15 +132,16 @@ func (c *Client) buildQueryToolbar() *fyne.Container {
 	cancelRunBtn.Importance = widget.HighImportance
 	cancelRunBtn.Disable()
 	c.cancelRunBtn = cancelRunBtn
-	// 清空只有图标、没有文字，工具栏上不可发现，挂一个悬停提示（见 ui_tooltip.go）。
-	clearBtn := attachTooltip(widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+	// 图标按钮没有文字，工具栏上不可发现，每个都挂一个悬停提示
+	// （见 ui_tooltip.go）。快捷键那条尤甚：它取代的是一条 300px 的说明标签，
+	// 那条标签自己就把工具条顶出了主区宽度、把导出与主题裁掉了。
+	clearBtn := attachTooltip(iconButton(theme.DeleteIcon(), func() {
 		c.tabs.entry.SetText("")
 	}), "清空编辑器")
-	// The shortcut hint used to be a 300px label here, which alone pushed the
-	// toolbar past the width of the main pane and clipped 导出/主题. It is now a
-	// button over the dialog that bindKey documents (see ui_keys.go).
-	keysBtn := widget.NewButtonWithIcon("快捷键", theme.HelpIcon(), c.showKeysDialog)
-	keysBtn.Importance = widget.LowImportance
+	keysBtn := attachTooltip(iconButton(theme.HelpIcon(), c.showKeysDialog),
+		"快捷键一览（Ctrl/Cmd+P、N、Enter…）")
+	// 格式化保留文字：fyne 2.8 的图标表里没有「格式化 / 美化」语义的图标，
+	// MenuIcon 与 HistoryIcon 都会被误读成别的东西，不如直接写字。
 	fmtBtn := widget.NewButtonWithIcon("格式化", theme.MenuIcon(), c.formatCurrentSQL)
 	fmtBtn.Importance = widget.LowImportance
 
@@ -129,12 +156,15 @@ func (c *Client) buildQueryToolbar() *fyne.Container {
 	}
 	c.page.limitText = limitSel.Selected
 	c.page.limitSel = limitSel
+	// 行数上限的说明从一行文字标签挪到下拉自己的提示上：标签占了 ~70px，
+	// 窄窗口下这 70px 比标签本身值钱。
+	attachTooltip(limitSel, "行数上限（语句自带行窗口时不生效）")
 
-	exportBtn := widget.NewButtonWithIcon("导出", theme.DownloadIcon(), func() {
+	exportBtn := attachTooltip(iconButton(theme.DownloadIcon(), func() {
 		c.exportGrid()
-	})
+	}), "导出当前结果（CSV / JSON / INSERT / Excel）")
 
-	themeSel := widget.NewSelect([]string{"跟随系统", "浅色", "深色"}, func(s string) {
+	themeSel := widget.NewSelect([]string{"系统", "浅色", "深色"}, func(s string) {
 		switch s {
 		case "浅色":
 			c.uiSet.Theme = "light"
@@ -144,8 +174,12 @@ func (c *Client) buildQueryToolbar() *fyne.Container {
 			c.uiSet.Theme = ""
 		}
 		applyTheme(c.uiSet.Theme)
+		// The shapes that read a colour out of the old theme keep it: they have
+		// to be repainted, or switching to dark leaves a white rectangle under
+		// the grid.
+		c.refreshThemeColors()
 	})
-	themeSel.PlaceHolder = "跟随系统"
+	themeSel.PlaceHolder = "主题"
 	switch c.uiSet.Theme {
 	case "light":
 		themeSel.SetSelected("浅色")
@@ -165,17 +199,18 @@ func (c *Client) buildQueryToolbar() *fyne.Container {
 		c.page.check.SetChecked(true)
 		limitSel.Disable()
 	}
-	return container.NewHBox(
-		c.dbs.sel,
-		runBtn, cancelRunBtn, clearBtn, keysBtn, fmtBtn,
+	centre := container.NewHBox(
+		runBtn, cancelRunBtn,
 		widget.NewSeparator(),
-		widget.NewLabel("行数上限"),
+		clearBtn, keysBtn, fmtBtn,
+	)
+	right := container.NewHBox(
 		limitSel, c.page.check,
 		widget.NewSeparator(),
-		exportBtn,
-		widget.NewSeparator(),
-		themeSel,
+		exportBtn, themeSel,
 	)
+	c.queryToolbar = container.NewBorder(nil, nil, c.dbs.sel, right, centre)
+	return c.queryToolbar
 }
 
 // buildResultGrid builds the shared result table: header cells are buttons so a
@@ -278,6 +313,37 @@ func (c *Client) buildResultGrid() {
 		c.updateEditButtons()
 		c.refreshDetails() // 右侧详情栏跟随选中行
 	}
+}
+
+// buildDataBar builds the TablePlus-style strip directly above the result grid:
+// the object name on the left and the row actions on the right. The actions are
+// disabled until a writable result is on screen (see setEditContext); reload
+// re-runs the active tab.
+func (c *Client) buildDataBar() fyne.CanvasObject {
+	c.dataName = widget.NewLabel("")
+	c.dataName.Importance = widget.MediumImportance
+	c.dataName.Truncation = fyne.TextTruncateEllipsis
+	addRaw := iconButton(theme.ContentAddIcon(), func() { c.insertRow() })
+	copyRaw := iconButton(theme.ContentCopyIcon(), func() { c.copySelectedRow() })
+	delRaw := iconButton(theme.ContentRemoveIcon(), func() { c.deleteSelectedRow() })
+	reloadRaw := iconButton(theme.ViewRefreshIcon(), func() { c.reloadActive() })
+	addBtn := attachTooltip(addRaw, "新增一行")
+	copyBtn := attachTooltip(copyRaw, "复制选中行")
+	delBtn := attachTooltip(delRaw, "删除选中行")
+	reloadBtn := attachTooltip(reloadRaw, "重新执行查询 / 刷新结果")
+	c.dbar.insertRow, c.dbar.copyRow, c.dbar.deleteRow, c.dbar.reload = addRaw, copyRaw, delRaw, reloadRaw
+	for _, b := range []*widget.Button{addRaw, copyRaw, delRaw} {
+		b.Disable()
+	}
+	right := container.NewHBox(addBtn, copyBtn, delBtn, reloadBtn)
+	return container.NewBorder(nil, nil, c.dataName, right, nil)
+}
+
+// reloadActive re-runs the active query tab, which is what 刷新 means on a data
+// view: the grid is a snapshot, so the only way back to fresh data is to
+// execute the statement again.
+func (c *Client) reloadActive() {
+	c.runAllStatements()
 }
 
 // buildBottomBar is the single bottom strip. It folds the two rows this used to

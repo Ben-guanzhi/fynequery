@@ -44,6 +44,90 @@ func (g *gridEditState) any() bool {
 	return g != nil && (len(g.updates) > 0 || len(g.deletes) > 0 || len(g.inserts) > 0)
 }
 
+// clone deep-copies the queue data (not the undo/redo stacks) so a snapshot can
+// be restored later without aliasing the live maps.
+func (g *gridEditState) clone() *gridEditState {
+	n := newGridEditState()
+	for r, cols := range g.updates {
+		m := make(map[string]string, len(cols))
+		for k, v := range cols {
+			m[k] = v
+		}
+		n.updates[r] = m
+	}
+	for r, cols := range g.nulls {
+		m := make(map[string]bool, len(cols))
+		for k, v := range cols {
+			m[k] = v
+		}
+		n.nulls[r] = m
+	}
+	for r := range g.deletes {
+		n.deletes[r] = true
+	}
+	for _, ins := range g.inserts {
+		m := make(map[string]string, len(ins))
+		for k, v := range ins {
+			m[k] = v
+		}
+		n.inserts = append(n.inserts, m)
+	}
+	return n
+}
+
+// gridUndoLimit caps the undo history so a long editing session cannot grow it
+// without bound.
+const gridUndoLimit = 100
+
+// pushUndoSnapshot records the current queue before a mutating action so Ctrl+Z
+// can bring it back. It also clears redo: a fresh edit invalidates anything that
+// was undone-and-redoable.
+func (c *Client) pushUndoSnapshot() {
+	if c.grid.edits == nil {
+		return
+	}
+	c.grid.undoStack = append(c.grid.undoStack, c.grid.edits.clone())
+	if len(c.grid.undoStack) > gridUndoLimit {
+		c.grid.undoStack = c.grid.undoStack[len(c.grid.undoStack)-gridUndoLimit:]
+	}
+	c.grid.redoStack = nil
+}
+
+// undoGridEdit rolls the pending queue back one step. Because edits are staged
+// in memory until 保存, this is a pure in-memory rollback - no database
+// rollback is involved.
+func (c *Client) undoGridEdit() {
+	if len(c.grid.undoStack) == 0 {
+		c.setStatus("没有可撤销的改动")
+		return
+	}
+	c.grid.redoStack = append(c.grid.redoStack, c.grid.edits.clone())
+	last := c.grid.undoStack[len(c.grid.undoStack)-1]
+	c.grid.undoStack = c.grid.undoStack[:len(c.grid.undoStack)-1]
+	c.grid.edits = last
+	c.afterEditQueued()
+}
+
+// redoGridEdit replays the step undoGridEdit took back.
+func (c *Client) redoGridEdit() {
+	if len(c.grid.redoStack) == 0 {
+		c.setStatus("没有可重做的改动")
+		return
+	}
+	c.grid.undoStack = append(c.grid.undoStack, c.grid.edits.clone())
+	last := c.grid.redoStack[len(c.grid.redoStack)-1]
+	c.grid.redoStack = c.grid.redoStack[:len(c.grid.redoStack)-1]
+	c.grid.edits = last
+	c.afterEditQueued()
+}
+
+// clearGridUndo drops both stacks; called when a new result replaces the queue
+// (and after a save), so stale snapshots from a previous result never come back.
+func (c *Client) clearGridUndo() {
+	c.grid.undoStack = nil
+	c.grid.redoStack = nil
+}
+
 // setUpdate queues one cell value for an existing row; an empty value means
 // NULL. A repeat edit of the same cell replaces the queued one.
 func (g *gridEditState) setUpdate(row int, column, value string) {
@@ -91,6 +175,7 @@ func (c *Client) setCellValue(row, col int, value string) string {
 		return "该行已标记删除，先取消删除再改值"
 	}
 	if row < len(c.grid.rows) {
+		c.pushUndoSnapshot()
 		c.grid.edits.setUpdate(row, c.grid.cols[col], value)
 		return ""
 	}
@@ -98,6 +183,7 @@ func (c *Client) setCellValue(row, col int, value string) string {
 	if i < 0 || i >= len(c.grid.edits.inserts) {
 		return "该新行已不在队列里"
 	}
+	c.pushUndoSnapshot()
 	c.grid.edits.setInsertEdit(i, c.grid.cols[col], value)
 	c.afterEditQueued()
 	return ""
@@ -223,6 +309,7 @@ func (c *Client) gridCellState(row, col int) (string, int) {
 // executed statement.
 func (c *Client) setEditContext(query string, res db.QueryResult) {
 	c.grid.edits = newGridEditState()
+	c.clearGridUndo()
 	c.grid.lastRows = nil
 	c.grid.src = db.TableRef{}
 	if res.Error == "" {
@@ -402,10 +489,20 @@ func (c *Client) afterEditQueued() {
 	c.updateEditButtons()
 }
 
-// editStatusText summarises the unsaved queue for the status bar.
+// editStatusText summarises the on-screen result and its unsaved queue for the
+// status bar. TablePro keeps a row count (and the pending-change count) in the
+// grid's status line, so a loaded result reports "共 N 行" even with nothing
+// pending; edits append the breakdown.
 func (c *Client) editStatusText() string {
 	g := c.grid.edits
+	prefix := ""
+	if n := len(c.grid.rows); n > 0 {
+		prefix = fmt.Sprintf("共 %d 行", n)
+	}
 	if !g.any() {
+		if prefix != "" {
+			return prefix
+		}
 		return "就绪"
 	}
 	parts := make([]string, 0, 3)
@@ -418,7 +515,11 @@ func (c *Client) editStatusText() string {
 	if n := len(g.deletes); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d 行删除", n))
 	}
-	return "未保存：" + strings.Join(parts, "，")
+	msg := "未保存：" + strings.Join(parts, "，")
+	if prefix != "" {
+		msg = prefix + " · " + msg
+	}
+	return msg
 }
 
 // insertRow queues an empty new row.
@@ -426,6 +527,7 @@ func (c *Client) insertRow() {
 	if !c.gridEditable() {
 		return
 	}
+	c.pushUndoSnapshot()
 	c.grid.edits.inserts = append(c.grid.edits.inserts, make(map[string]string))
 	c.applyGridRowHeight()
 	c.afterEditQueued()
@@ -438,6 +540,7 @@ func (c *Client) deleteSelectedRow() {
 	}
 	row := c.grid.cell.Row
 	if row < len(c.grid.rows) {
+		c.pushUndoSnapshot()
 		if c.grid.edits.deletes[row] {
 			delete(c.grid.edits.deletes, row)
 		} else {
@@ -449,6 +552,7 @@ func (c *Client) deleteSelectedRow() {
 		if i < 0 || i >= len(c.grid.edits.inserts) {
 			return
 		}
+		c.pushUndoSnapshot()
 		c.grid.edits.inserts = append(c.grid.edits.inserts[:i], c.grid.edits.inserts[i+1:]...)
 		if c.grid.cell.Row >= len(c.grid.rows)+len(c.grid.edits.inserts) {
 			c.grid.hasCell = false
@@ -457,8 +561,12 @@ func (c *Client) deleteSelectedRow() {
 	c.afterEditQueued()
 }
 
-// discardChanges drops the whole unsaved queue.
+// discardChanges drops the whole unsaved queue. The drop is undoable - Ctrl+Z
+// brings the queue back - so a snapshot is pushed first.
 func (c *Client) discardChanges() {
+	if c.grid.edits.any() {
+		c.pushUndoSnapshot()
+	}
 	c.grid.edits = newGridEditState()
 	c.afterEditQueued()
 }
@@ -577,5 +685,15 @@ func (c *Client) updateEditButtons() {
 	set(c.act.discard, c.grid.edits.any())
 	if c.act.filter != nil {
 		set(c.act.filter, editable)
+	}
+
+	// The TablePlus-style bar over the grid: add / duplicate / delete mirror
+	// the bottom bar's row actions (same handlers), reload stays live whenever
+	// a result is on screen - a snapshot can always be re-fetched.
+	if c.dbar.insertRow != nil {
+		set(c.dbar.insertRow, editable)
+		set(c.dbar.copyRow, editable && rowSelected)
+		set(c.dbar.deleteRow, rowIsDeleteable)
+		set(c.dbar.reload, c.grid.lastRows != nil)
 	}
 }

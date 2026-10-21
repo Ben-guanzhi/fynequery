@@ -33,6 +33,9 @@ func (c *Client) showTableNodeMenu(uid string, pos fyne.Position) {
 		}))
 	}
 	items = append(items, fyne.NewMenuItem("重命名 (RENAME)", func() { c.renameNodeDialog(nd) }))
+	if nd.typ != "view" {
+		items = append(items, fyne.NewMenuItem("导入 CSV…", func() { c.importCSVDialog(nd) }))
+	}
 	widget.NewPopUpMenu(fyne.NewMenu("", items...), c.win.Canvas()).ShowAtPosition(pos)
 }
 

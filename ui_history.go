@@ -14,78 +14,176 @@ import (
 	"tablepro-fyne/internal/db"
 )
 
-// buildHistoryPanel assembles the sidebar bottom: recent statements with a
-// compact header, capped to a fixed height like TablePro's history drawer.
-func (c *Client) buildHistoryPanel() fyne.CanvasObject {
-	c.hist.filterEntry = newKeyedEntry()
-	c.hist.filterEntry.PlaceHolder = "过滤"
-	c.hist.filterEntry.onShortcut = c.entryShortcut
-	c.hist.filterEntry.OnChanged = func(text string) {
-		c.hist.filter = strings.ToLower(strings.TrimSpace(text))
-		c.rebuildHistoryView()
-	}
+// The sidebar's bottom band. 历史 is what you ran; 收藏 is what you meant to
+// run again. They are the same widget - a filter box over a list of one-line
+// statements - so they are built from one generic list and differ only in what
+// fills the rows and which buttons the header carries.
 
-	c.hist.list = widget.NewList(
-		func() int { return len(c.hist.view) },
+// sidebarEntry is one row of either list: the statement squeezed onto one
+// line, the line under it, and the id the header's buttons act on.
+type sidebarEntry struct {
+	ID     int64
+	Title  string
+	Meta   string
+	Danger bool
+}
+
+// entryList is one of those lists. T is the source type - a history or a
+// favorite entry - so neither tab has to flatten its entries into rows before
+// the panel sees them: row decides what a row says and match decides what the
+// filter keeps, and everything below is written once.
+type entryList[T any] struct {
+	list        *widget.List
+	filterEntry *keyedEntry
+	filter      string
+	source      []T
+	// view is the filtered newest-first rows the list renders; selected is
+	// the row the header's buttons act on, -1 for none.
+	view     []T
+	selected int
+	row      func(T) sidebarEntry
+	match    func(T, string) bool
+}
+
+// newEntryList builds the filter box and the list. onSelect is what clicking a
+// row does; both tabs load the statement into the editor, which is also why a
+// row is not deleted by clicking it.
+func newEntryList[T any](c *Client, row func(T) sidebarEntry, match func(T, string) bool,
+	onSelect func(T)) *entryList[T] {
+	e := &entryList[T]{selected: -1, row: row, match: match}
+	e.filterEntry = newKeyedEntry()
+	e.filterEntry.SetPlaceHolder("过滤")
+	e.filterEntry.onShortcut = c.entryShortcut
+	e.filterEntry.OnChanged = func(text string) {
+		e.filter = strings.ToLower(strings.TrimSpace(text))
+		e.refilter()
+		e.list.Refresh()
+	}
+	e.list = widget.NewList(
+		func() int { return len(e.view) },
 		func() fyne.CanvasObject {
-			return container.NewVBox(
-				widget.NewLabel("placeholder"),
-				widget.NewLabel(""),
-			)
+			return container.NewVBox(widget.NewLabel("placeholder"), widget.NewLabel(""))
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			if id < 0 || id >= len(c.hist.view) {
+			if id < 0 || id >= len(e.view) {
 				return
 			}
-			e := c.hist.view[id]
 			box, ok := obj.(*fyne.Container)
 			if !ok || len(box.Objects) < 2 {
 				return
 			}
 			title, _ := box.Objects[0].(*widget.Label)
 			sub, _ := box.Objects[1].(*widget.Label)
-
-			sqlLine := strings.Join(strings.Fields(e.SQL), " ")
-			if r := []rune(sqlLine); len(r) > 60 {
-				sqlLine = string(r[:60]) + " …"
+			if title == nil || sub == nil {
+				return
 			}
-			title.SetText(sqlLine)
+			entry := e.row(e.view[id])
+			title.SetText(entry.Title)
 			title.TextStyle = fyne.TextStyle{Monospace: true}
-
-			when := historyTimeLabel(e.Time)
-			meta := when
-			if e.Error != "" {
-				meta += "  · 错误"
+			sub.SetText(entry.Meta)
+			sub.Importance = widget.LowImportance
+			if entry.Danger {
 				sub.Importance = widget.DangerImportance
-			} else if e.RowCount > 0 {
-				meta += fmt.Sprintf("  · %d 行", e.RowCount)
-				sub.Importance = widget.LowImportance
-			} else {
-				meta += fmt.Sprintf("  · 影响 %d 行", e.Affected)
-				sub.Importance = widget.LowImportance
 			}
-			if e.Database != "" {
-				meta += "  · " + e.Database
-			}
-			sub.SetText(meta)
 		},
 	)
-	c.hist.list.OnSelected = func(id widget.ListItemID) {
-		if id < 0 || id >= len(c.hist.view) {
+	e.list.OnSelected = func(id widget.ListItemID) {
+		if id < 0 || id >= len(e.view) {
 			return
 		}
-		c.hist.selected = id
-		e := c.hist.view[id]
-		c.tabs.entry.setTextSilently(e.SQL)
-		if e.Database != "" {
-			c.currentDB = e.Database
+		e.selected = id
+		if onSelect != nil {
+			onSelect(e.view[id])
 		}
-		c.setStatus("已加载历史语句")
-		c.focusEditor()
 	}
+	return e
+}
 
+// refilter rebuilds the newest-first view the list renders. A rebuilt view
+// renumbers its rows, so the recorded selection goes with it rather than
+// pointing at whatever now sits in that row.
+func (e *entryList[T]) refilter() {
+	e.selected = -1
+	view := make([]T, 0, len(e.source))
+	for i := len(e.source) - 1; i >= 0; i-- {
+		item := e.source[i]
+		if e.filter == "" || e.match(item, e.filter) {
+			view = append(view, item)
+		}
+	}
+	e.view = view
+}
+
+// setSource hands the list a fresh source and re-filters it.
+func (e *entryList[T]) setSource(source []T) {
+	e.source = source
+	e.refilter()
+	if e.list != nil {
+		e.list.Refresh()
+	}
+}
+
+// historyRow renders one log entry: the statement on one line, and under it
+// when it ran and what it did.
+func historyRow(e db.HistoryEntry) sidebarEntry {
+	meta := historyTimeLabel(e.Time)
+	danger := e.Error != ""
+	switch {
+	case danger:
+		meta += "  · 错误"
+	case e.RowCount > 0:
+		meta += fmt.Sprintf("  · %d 行", e.RowCount)
+	default:
+		meta += fmt.Sprintf("  · 影响 %d 行", e.Affected)
+	}
+	if e.Database != "" {
+		meta += "  · " + e.Database
+	}
+	return sidebarEntry{ID: e.ID, Title: oneLine(e.SQL, 60), Meta: meta, Danger: danger}
+}
+
+// oneLine squeezes a statement into one line and cuts it at limit runes so a
+// formatted script cannot stretch a row; the cut happens on runes so a
+// multibyte statement cannot end mid-character.
+func oneLine(sql string, limit int) string {
+	line := strings.Join(strings.Fields(sql), " ")
+	if r := []rune(line); len(r) > limit {
+		return string(r[:limit]) + " …"
+	}
+	return line
+}
+
+// buildHistoryPanel assembles the sidebar's bottom band: the 历史 and 收藏
+// tabs, capped to a fixed height like TablePro's history drawer.
+func (c *Client) buildHistoryPanel() fyne.CanvasObject {
+	c.buildEntryLists()
+	tabs := container.NewAppTabs(
+		container.NewTabItem("历史", c.historyTab()),
+		container.NewTabItem("收藏", c.favoritesTab()),
+	)
+	// The band is a fixed height so the navigator above it keeps its size; the
+	// tab strip takes ~35px of it, which the list would otherwise pay for out
+	// of its three visible rows.
+	return container.New(&fixedHeightLayout{height: 190}, tabs)
+}
+
+// buildEntryLists creates the two sidebar lists. It sits apart from
+// buildHistoryPanel so a test can hold the lists - and ask them what they would
+// render - without assembling the whole tab strip.
+func (c *Client) buildEntryLists() {
+	c.hist = newEntryList(c, historyRow,
+		func(e db.HistoryEntry, f string) bool { return e.MatchesFilter(f) },
+		c.loadHistoryEntry)
+	c.fav = newEntryList(c, favoriteRow,
+		func(e db.FavoriteEntry, f string) bool { return e.MatchesFilter(f) },
+		c.loadFavorite)
+}
+
+// historyTab is the 历史 tab: the log with its filter, plus the three buttons
+// that act on it.
+func (c *Client) historyTab() fyne.CanvasObject {
 	rerunInner := widget.NewButtonWithIcon("", theme.MediaPlayIcon(), func() {
-		if c.tabs.entry.Text != "" {
+		if c.tabs.entry != nil && c.tabs.entry.Text != "" {
 			c.runAllStatements()
 		}
 	})
@@ -107,12 +205,9 @@ func (c *Client) buildHistoryPanel() fyne.CanvasObject {
 	clearInner.Importance = widget.LowImportance
 	clearBtn := attachTooltip(clearInner, "清空全部历史")
 
-	header := container.NewBorder(nil, nil, widget.NewLabel("历史"),
+	header := container.NewBorder(nil, nil, nil,
 		container.NewHBox(rerunBtn, delBtn, clearBtn), c.hist.filterEntry)
-	// The sidebar's bottom slot takes this panel's min height; a deterministic
-	// fixed-height layout keeps the band stable no matter what the list reports.
-	historyPanel := container.NewBorder(header, nil, nil, nil, c.hist.list)
-	return container.New(&fixedHeightLayout{height: 150}, historyPanel)
+	return container.NewBorder(header, nil, nil, nil, c.hist.list)
 }
 
 // deleteSelectedHistory removes the one history row currently selected from
@@ -128,27 +223,22 @@ func (c *Client) deleteSelectedHistory() {
 		c.setStatusWarn("该条历史已不在日志中")
 		return
 	}
-	c.hist.selected = -1
 	c.refreshHistory()
 	c.setStatus("已删除一条历史")
 }
 
-// rebuildHistoryView recomputes the filtered newest-first view the history
-// list renders. Called whenever the log or the filter changes. A rebuilt view
-// renumbers its rows, so the recorded selection is dropped with it.
-func (c *Client) rebuildHistoryView() {
-	entries := c.store.History()
-	c.mu.Lock()
-	c.hist.selected = -1
-	view := make([]db.HistoryEntry, 0, len(entries))
-	for i := len(entries) - 1; i >= 0; i-- {
-		e := entries[i]
-		if c.hist.filter == "" || e.MatchesFilter(c.hist.filter) {
-			view = append(view, e)
-		}
+// loadHistoryEntry puts a log entry back in the editor, and points the session
+// at the database it ran against.
+func (c *Client) loadHistoryEntry(e db.HistoryEntry) {
+	if c.tabs.entry == nil {
+		return
 	}
-	c.mu.Unlock()
-	c.hist.view = view
+	c.tabs.entry.setTextSilently(e.SQL)
+	if e.Database != "" {
+		c.currentDB = e.Database
+	}
+	c.setStatus("已加载历史语句")
+	c.focusEditor()
 }
 
 // fixedHeightLayout lays its single child out at the full width but an exact
@@ -172,11 +262,18 @@ func (f *fixedHeightLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 
 // refreshHistory re-renders the history list.
 func (c *Client) refreshHistory() {
-	if c.hist.list == nil {
+	if c.hist == nil {
 		return
 	}
 	c.rebuildHistoryView()
-	c.hist.list.Refresh()
+}
+
+// rebuildHistoryView recomputes the filtered newest-first view the history
+// list renders, called whenever the log or the filter changes.
+func (c *Client) rebuildHistoryView() {
+	c.mu.Lock()
+	c.hist.setSource(c.store.History())
+	c.mu.Unlock()
 }
 
 // historyTimeLabel renders an entry timestamp: time only for today, with the

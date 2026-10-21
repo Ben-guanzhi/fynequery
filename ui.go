@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
@@ -53,6 +55,9 @@ type findState struct {
 	hits   []searchHitKey
 	hitSet map[searchHitKey]bool
 	cur    int
+	// timer drives the debounced rescan on large grids (see onGridSearchChanged);
+	// nil until a debounce is scheduled.
+	timer *time.Timer
 }
 
 // gridState is the result on screen: the table widget, the header and rows it
@@ -75,6 +80,12 @@ type gridState struct {
 	// changes to write back (see changes.go).
 	src   db.TableRef
 	edits *gridEditState
+	// undoStack/redoStack hold snapshots of the edit queue for Ctrl+Z /
+	// Ctrl+Shift+Z. Each snapshot is a deep copy taken before a mutating
+	// action, so undo/redo is a pure in-memory rollback of the pending queue -
+	// nothing touches the database until 保存 (see ui_grid_edit.go).
+	undoStack []*gridEditState
+	redoStack []*gridEditState
 	// sortCol is the display-only sort column, -1 for none.
 	sortCol int
 	sortAsc bool
@@ -93,6 +104,17 @@ type rowActions struct {
 	deleteRow   *widget.Button
 	saveChanges *widget.Button
 	discard     *widget.Button
+}
+
+// dataBarActions are the buttons on the TablePlus-style bar above the result
+// grid: add / duplicate / delete a row and reload. They mirror the bottom
+// bar's edit actions but sit where TablePlus keeps them - directly over the
+// grid - so a fresh connection's first instinct (tap + to add a row) lands.
+type dataBarActions struct {
+	insertRow *widget.Button
+	copyRow   *widget.Button
+	deleteRow *widget.Button
+	reload    *widget.Button
 }
 
 // memoCache groups the per-session introspection memos. Background loads fill
@@ -118,6 +140,11 @@ type pickerState struct {
 	toggle *widget.Button
 	test   *widget.Button
 	idx    int
+	// list is the TablePlus-style connection list in the sidebar: one row per
+	// saved connection, each with an engine-coloured avatar. The dropdown
+	// (sel) stays the source of truth for selection state but is hidden - the
+	// list is the visible selector.
+	list *fyne.Container
 }
 
 // dbPicker is the query toolbar's database selector and its option list.
@@ -143,16 +170,10 @@ type treeState struct {
 	cache map[rowCacheKey]fyne.CanvasObject
 }
 
-// histState is the query history panel: the list, its filter text, and the
-// filtered newest-first view the list renders (rebuilt on every change).
-type histState struct {
-	list        *widget.List
-	filter      string
-	view        []db.HistoryEntry
-	filterEntry *keyedEntry
-	// selected is the list row the 删除选中 button acts on; -1 for none.
-	selected int
-}
+// The sidebar's bottom band holds two lists of one-line statements - 历史 and
+// 收藏 - each an entryList of its own source type (see ui_history.go). The
+// generic list is what they share; the tabs are what keeps 清空历史 from
+// wiping the favorites.
 
 // tabStack is the query editor stack: independent editors sharing one result
 // grid. entry always aliases the active tab's editor, and sug is the
@@ -163,6 +184,10 @@ type tabStack struct {
 	seq   int
 	entry *suggestEntry
 	sug   *fyne.Container
+	// actions is the new/close/open/save group that shares the tab strip's
+	// row, on its right - fyne's tabs cannot host a close button themselves,
+	// and a row of their own above the strip costs the editor ~40px.
+	actions *fyne.Container
 }
 
 type Client struct {
@@ -194,7 +219,8 @@ type Client struct {
 	picker pickerState
 	dbs    dbPicker
 	tree   treeState
-	hist   histState
+	hist   *entryList[db.HistoryEntry]
+	fav    *entryList[db.FavoriteEntry]
 	tabs   tabStack
 
 	// testCancel and connectCancel hold the abandon handles of in-flight
@@ -219,12 +245,31 @@ type Client struct {
 	// result paging (see ui_paging.go) and the in-result search (see ui_search.go)
 	page pagerState
 	find findState
+	// searchDelay debounces the in-result search rescan on large grids so
+	// typing does not re-walk every row per keystroke; 0 means rescan
+	// synchronously (the test client leaves it 0 for determinism).
+	searchDelay time.Duration
 
 	// the on-screen result: the table widget, the rows it displays, the current
 	// sort and selection, and the edit queue that feeds write-back (changes.go)
 	grid gridState
+	// gridBG is the rectangle the result grid sits on - a Table paints no
+	// background of its own. themedRects are the shapes that have to be
+	// repainted when the theme changes (see refreshThemeColors in theme.go).
+	gridBG      *canvas.Rectangle
+	themedRects []themedRect
+	// queryToolbar is the toolbar container itself. The layout test needs it
+	// by name: it used to find it by walking the tree for the database
+	// selector, which stops working the moment the toolbar is a Border and the
+	// selector is no longer its first object.
+	queryToolbar *fyne.Container
 	// bottom-bar actions, enabled while the result is a writable table
 	act rowActions
+	// dataBarActions are the TablePlus-style controls over the grid (see
+	// buildDataBar in ui_query.go).
+	dbar dataBarActions
+	// dataName is the table/query name shown on the data bar above the grid.
+	dataName *widget.Label
 	// crumb is the breadcrumb row over the grid (see ui_crumb.go): the < >
 	// page steppers reusing the server-side pager, and the centred table name.
 	crumb crumbState
@@ -298,6 +343,7 @@ func newClient(a fyne.App, w fyne.Window) *Client {
 	}
 	c.asyncRun = true
 	c.dispatch = fyne.Do
+	c.searchDelay = 150 * time.Millisecond
 	c.keys = make(map[keyCombo]keyBinding)
 	return c
 }
@@ -366,7 +412,22 @@ func (c *Client) buildUI() fyne.CanvasObject {
 	copySel := &desktop.CustomShortcut{KeyName: fyne.KeyC, Modifier: fyne.KeyModifierControl}
 	c.win.Canvas().AddShortcut(copySel, func(fyne.Shortcut) { c.copyCell() })
 	c.docKey("Ctrl+C    复制选中单元格（焦点不在输入框时）")
+	// Undo/redo of grid edits are canvas-level on purpose, like Ctrl+C above:
+	// registering them through bindKey would put them in the keys table, and
+	// entryShortcut would then let the SQL editor claim Ctrl+Z for grid undo
+	// instead of its own text undo. At canvas level a focused entry consumes
+	// Ctrl+Z for text first, so the grid shortcut only fires when focus is on
+	// the grid (or nowhere) - which is exactly when a cell edit is undoable.
+	for _, mod := range []fyne.KeyModifier{fyne.KeyModifierControl, fyne.KeyModifierSuper} {
+		c.win.Canvas().AddShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyZ, Modifier: mod},
+			func(fyne.Shortcut) { c.undoGridEdit() })
+		c.win.Canvas().AddShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyZ, Modifier: mod | fyne.KeyModifierShift},
+			func(fyne.Shortcut) { c.redoGridEdit() })
+	}
+	c.docKey("Ctrl/Cmd+Z    撤销一步网格编辑（待定改动；编辑器内仍是文本撤销）")
+	c.docKey("Ctrl/Cmd+Shift+Z    重做刚撤销的网格编辑")
 	c.docKey("Enter / Shift+Enter    在结果搜索框内跳下一个 / 上一个命中")
+	c.bindKey(fyne.KeyB, "收藏当前标签里的语句", c.favoriteCurrentStatement)
 
 	query := c.buildQueryView()
 	split := container.NewHSplit(sidebar, query)
@@ -379,6 +440,7 @@ func (c *Client) buildUI() fyne.CanvasObject {
 		c.currentDB = c.uiSet.LastDatabase
 	}
 	c.refreshHistory()
+	c.refreshFavorites()
 	c.refreshSchema() // shows the 未连接 root until a connection is opened
 
 	c.hSplit = split

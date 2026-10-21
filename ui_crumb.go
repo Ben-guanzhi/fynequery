@@ -79,6 +79,9 @@ func (c *Client) refreshCrumb() {
 		name = "—"
 	}
 	c.crumb.name.SetText(name)
+	if c.dataName != nil {
+		c.dataName.SetText(name)
+	}
 
 	if c.crumb.prev == nil {
 		return
