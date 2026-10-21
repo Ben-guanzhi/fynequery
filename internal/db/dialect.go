@@ -1,6 +1,8 @@
 package db
 
 import (
+	"tablepro-fyne/internal/drivercore"
+
 	"github.com/Ben-guanzhi/TableProGo/tableprosql"
 
 	"context"
@@ -61,6 +63,18 @@ type dialect struct {
 	// of recalling each dialect's identity syntax. It takes the node's schema
 	// and fills the engine's own default namespace.
 	createTable func(schema string) string
+	// insertRows renders one INSERT carrying several rows of already-rendered
+	// literals: a CSV import is thousands of rows, and sending one statement
+	// per row is thousands of round trips inside one transaction. The columns
+	// arrive quoted for this engine and the values arrive as literals, so no
+	// dialect has to know how the other is escaped.
+	insertRows func(table string, columns []string, rows [][]string) string
+	// maxInsertRows is how many rows one such statement may carry. It is an
+	// engine fact, not a client policy: SQL Server caps a multi-row VALUES at
+	// 1000, SQLite compiles one through a compound select with a default limit
+	// of 500, and Oracle's multi-table INSERT is the one form here no server of
+	// ours can verify, so it gets the most conservative batch of all.
+	maxInsertRows int
 }
 
 func dialectFor(dbType string) (*dialect, error) {
@@ -107,21 +121,25 @@ var catalogDialects = map[string]*dialect{
 //
 // The handle comes from Conn.mu, which is what keeps a reader that races a
 // Disconnect honest: it either gets the not-connected error or runs on a handle
-// that is merely closed, and database/sql answers that with an error too. Read
+// that is merely closed, and the Engine answers that with an error too. Read
 // straight off an exported field the same reader could dereference a handle
 // Disconnect had just nilled.
-func collectRows[T any](ctx context.Context, conn *Conn, query string, args []interface{}, scan func(*sql.Rows) (T, error)) ([]T, error) {
-	db, err := conn.handle()
+//
+// The scanner takes a drivercore.RowSet rather than *sql.Rows: an in-process
+// engine hands back the real *sql.Rows, a driver plugin a materialized adapter,
+// and both satisfy RowSet, so no reader branches on which backend answered.
+func collectRows[T any](ctx context.Context, conn *Conn, query string, args []interface{}, scan func(drivercore.RowSet) (T, error)) ([]T, error) {
+	engine, err := conn.handle()
 	if err != nil {
 		return nil, err
 	}
-	return collectRowsOn(ctx, db, query, args, scan)
+	return collectRowsOn(ctx, engine, query, args, scan)
 }
 
 // collectRowsOn is collectRows for a pool the caller has already chosen: the
 // per-database sessions poolFor hands out.
-func collectRowsOn[T any](ctx context.Context, db *sql.DB, query string, args []interface{}, scan func(*sql.Rows) (T, error)) ([]T, error) {
-	rows, err := db.QueryContext(ctx, query, args...)
+func collectRowsOn[T any](ctx context.Context, engine drivercore.Engine, query string, args []interface{}, scan func(drivercore.RowSet) (T, error)) ([]T, error) {
+	rows, err := engine.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +157,7 @@ func collectRowsOn[T any](ctx context.Context, db *sql.DB, query string, args []
 
 // scanCrossSchemaTable reads (schema, name, type) rows for the unfiltered
 // table listing used when a schema filter matches nothing.
-func scanCrossSchemaTable(r *sql.Rows) (TableInfo, error) {
+func scanCrossSchemaTable(r drivercore.RowSet) (TableInfo, error) {
 	var ts, name, typ string
 	if err := r.Scan(&ts, &name, &typ); err != nil {
 		return TableInfo{}, err
@@ -148,14 +166,14 @@ func scanCrossSchemaTable(r *sql.Rows) (TableInfo, error) {
 }
 
 // scanString reads the one column such queries select.
-func scanString(r *sql.Rows) (string, error) {
+func scanString(r drivercore.RowSet) (string, error) {
 	var s string
 	return s, r.Scan(&s)
 }
 
 // tableScanner pins every hit to the schema it was asked about.
-func tableScanner(schema string) func(*sql.Rows) (TableInfo, error) {
-	return func(r *sql.Rows) (TableInfo, error) {
+func tableScanner(schema string) func(drivercore.RowSet) (TableInfo, error) {
+	return func(r drivercore.RowSet) (TableInfo, error) {
 		var t TableInfo
 		if err := r.Scan(&t.Name, &t.Type, &t.Comment); err != nil {
 			return t, err
@@ -167,8 +185,8 @@ func tableScanner(schema string) func(*sql.Rows) (TableInfo, error) {
 }
 
 // matchScanner stamps the connection and database a hit came from.
-func matchScanner(conn *Conn, database string) func(*sql.Rows) (ObjectMatch, error) {
-	return func(r *sql.Rows) (ObjectMatch, error) {
+func matchScanner(conn *Conn, database string) func(drivercore.RowSet) (ObjectMatch, error) {
+	return func(r drivercore.RowSet) (ObjectMatch, error) {
 		var m ObjectMatch
 		var objectType string
 		if err := r.Scan(&m.Schema, &m.Table, &objectType); err != nil {
@@ -181,7 +199,7 @@ func matchScanner(conn *Conn, database string) func(*sql.Rows) (ObjectMatch, err
 	}
 }
 
-func scanStandardColumn(r *sql.Rows) (ColumnInfo, error) {
+func scanStandardColumn(r drivercore.RowSet) (ColumnInfo, error) {
 	var col ColumnInfo
 	var defaultValue, comment sql.NullString
 	var nullable string
@@ -200,7 +218,7 @@ func scanStandardColumn(r *sql.Rows) (ColumnInfo, error) {
 	return col, nil
 }
 
-func scanSQLiteColumn(r *sql.Rows) (ColumnInfo, error) {
+func scanSQLiteColumn(r drivercore.RowSet) (ColumnInfo, error) {
 	var col ColumnInfo
 	var cid, notnull, pk int
 	var defaultValue sql.NullString
@@ -219,7 +237,7 @@ func scanSQLiteColumn(r *sql.Rows) (ColumnInfo, error) {
 	return col, nil
 }
 
-func scanFkRow(r *sql.Rows) (tableprosql.FKRow, error) {
+func scanFkRow(r drivercore.RowSet) (tableprosql.FKRow, error) {
 	var row tableprosql.FKRow
 	err := r.Scan(&row.Name, &row.Column, &row.RefSchema, &row.RefTable, &row.RefColumn,
 		&row.OnDelete, &row.OnUpdate)
@@ -230,7 +248,7 @@ func scanFkRow(r *sql.Rows) (tableprosql.FKRow, error) {
 // Every engine's query has to answer for all five - the arity is checked by the
 // row itself at scan time, so a short select list fails the read on a real
 // server and nowhere else.
-func scanIndexRow(r *sql.Rows) (indexRow, error) {
+func scanIndexRow(r drivercore.RowSet) (indexRow, error) {
 	var row indexRow
 	var unique, primary int
 	if err := r.Scan(&row.name, &row.kind, &unique, &primary, &row.column); err != nil {
@@ -260,6 +278,49 @@ func aggregateIndexes(rows []indexRow) []IndexInfo {
 		indexes[i].Columns = append(indexes[i].Columns, row.column)
 	}
 	return indexes
+}
+
+// ---- shared INSERT renderers ----
+
+// multiValuesInsert is the ANSI multi-row INSERT: INSERT INTO t (a, b) VALUES
+// (1, 2), (3, 4). The literals are already rendered for the engine, so this
+// only has to interleave punctuation.
+func multiValuesInsert(table string, columns []string, rows [][]string) string {
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO ")
+	sb.WriteString(table)
+	sb.WriteString(" (")
+	sb.WriteString(strings.Join(columns, ", "))
+	sb.WriteString(") VALUES ")
+	for i, row := range rows {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString("(")
+		sb.WriteString(strings.Join(row, ", "))
+		sb.WriteString(")")
+	}
+	return sb.String()
+}
+
+// insertAllInsert is Oracle's multi-table INSERT, which is the only way it
+// takes more than one row of literal values: a plain VALUES clause there holds
+// exactly one row.
+func insertAllInsert(table string, columns []string, rows [][]string) string {
+	cols := strings.Join(columns, ", ")
+	var sb strings.Builder
+	sb.WriteString("INSERT ALL ")
+	for _, row := range rows {
+		sb.WriteString("INTO ")
+		sb.WriteString(table)
+		sb.WriteString(" (")
+		sb.WriteString(cols)
+		sb.WriteString(") VALUES (")
+		sb.WriteString(strings.Join(row, ", "))
+		sb.WriteString(") ")
+	}
+	sb.WriteString("SELECT 1 FROM dual")
+	return sb.String()
 }
 
 // ---- per-engine dialects ----
@@ -333,6 +394,10 @@ var mysqlDialect = &dialect{
 	},
 	pageSQL:     limitOffset,
 	createTable: mysqlCreateTable,
+	// A packet cannot exceed max_allowed_packet, so a batch stays well under it
+	// rather than measuring the rendered statement.
+	insertRows:    multiValuesInsert,
+	maxInsertRows: 1000,
 }
 
 var postgresDialect = &dialect{
@@ -464,6 +529,10 @@ var postgresDialect = &dialect{
 	},
 	pageSQL:     limitOffset,
 	createTable: postgresCreateTable,
+	// No documented cap on the number of VALUES tuples; the batch matches
+	// MySQL's so a test that counts batches does not need per-engine numbers.
+	insertRows:    multiValuesInsert,
+	maxInsertRows: 1000,
 }
 
 var sqliteDialect = &dialect{
@@ -500,7 +569,7 @@ var sqliteDialect = &dialect{
 			return nil, err
 		}
 		rows, err := collectRows(ctx, conn, fmt.Sprintf("PRAGMA foreign_key_list(%s)", name), nil,
-			func(r *sql.Rows) (tableprosql.FKRow, error) {
+			func(r drivercore.RowSet) (tableprosql.FKRow, error) {
 				var id, seq int
 				var row tableprosql.FKRow
 				var onUpdate, onDelete, match string
@@ -534,7 +603,7 @@ var sqliteDialect = &dialect{
 			unique bool
 		}
 		entries, err := collectRows(ctx, conn, fmt.Sprintf("PRAGMA index_list(%s)", name), nil,
-			func(r *sql.Rows) (entry, error) {
+			func(r drivercore.RowSet) (entry, error) {
 				var seq int
 				var e entry
 				var unique int
@@ -560,7 +629,7 @@ var sqliteDialect = &dialect{
 				return nil, err
 			}
 			columns, err := collectRows(ctx, conn, fmt.Sprintf("PRAGMA index_info(%s)", idxName), nil,
-				func(r *sql.Rows) (string, error) {
+				func(r drivercore.RowSet) (string, error) {
 					var seqno, cid int
 					var col string
 					if err := r.Scan(&seqno, &cid, &col); err != nil {
@@ -589,6 +658,10 @@ var sqliteDialect = &dialect{
 	},
 	pageSQL:     limitOffset,
 	createTable: sqliteCreateTable,
+	// A multi-row VALUES is compiled as a compound select, and
+	// SQLITE_MAX_COMPOUND_SELECT defaults to 500 terms.
+	insertRows:    multiValuesInsert,
+	maxInsertRows: 500,
 }
 
 var sqlserverDialect = &dialect{
@@ -735,6 +808,11 @@ var sqlserverDialect = &dialect{
 		return offsetFetch(query, offset, size)
 	},
 	createTable: sqlserverCreateTable,
+	// The documented cap is 1000 rows per multi-row VALUES. No SQL Server is
+	// reachable from this repo's tests, so the batch sits at half the cap
+	// instead of right up against it.
+	insertRows:    multiValuesInsert,
+	maxInsertRows: 500,
 }
 
 // oracleCompletionObjectsSQL is PL/SQL Developer's CANames.sql - the Code
@@ -833,4 +911,9 @@ var oracleDialect = &dialect{
 	// require an ORDER BY in front of it.
 	pageSQL:     offsetFetch,
 	createTable: oracleCreateTable,
+	// The INSERT ALL form repeats the whole column list per row, so the batch
+	// is deliberately the smallest of the five: it is the one insert shape
+	// here that no contract test of ours can run against a real server.
+	insertRows:    insertAllInsert,
+	maxInsertRows: 100,
 }

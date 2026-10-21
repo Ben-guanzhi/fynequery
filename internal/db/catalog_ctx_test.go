@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"tablepro-fyne/internal/drivercore"
 	"testing"
 	"time"
 )
@@ -67,9 +68,13 @@ func TestCatalogReadUnblocksWhenTheCallerGivesUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handle: %v", err)
 	}
-	handle.SetMaxOpenConns(1)
+	raw := drivercore.UnderlyingDB(handle)
+	if raw == nil {
+		t.Fatal("sqlite is a builtin engine; expected an underlying *sql.DB")
+	}
+	raw.SetMaxOpenConns(1)
 
-	held, err := handle.Query("SELECT * FROM t")
+	held, err := raw.Query("SELECT * FROM t")
 	if err != nil {
 		t.Fatalf("holding the only connection: %v", err)
 	}

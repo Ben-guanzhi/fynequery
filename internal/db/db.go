@@ -107,20 +107,28 @@ type Store struct {
 	// even if no further statement runs and the app never gets a clean quit
 	// (crash, power loss).
 	historyTimer *time.Timer
+
+	// favorites is the saved-statement list. It is this app's own file, so
+	// unlike history there is no cross-client merge and no write throttle.
+	favorites     []FavoriteEntry
+	favSeq        int64
+	favoritesFile string
 }
 
 // NewStore loads the persisted connections and history from beside the
 // executable and seeds the connection-id sequence.
 func NewStore() *Store {
 	s := &Store{
-		live:        make(map[string]*Conn),
-		connFile:    StateFilePath("connections.json"),
-		historyFile: StateFilePath("history.json"),
+		live:          make(map[string]*Conn),
+		connFile:      StateFilePath("connections.json"),
+		historyFile:   StateFilePath("history.json"),
+		favoritesFile: StateFilePath("favorites.json"),
 	}
 	s.loadConnections()
 	// Seed the ID sequence past any existing "c<n>" ids; see nextConnSeq.
 	s.idSeq = nextConnSeq(s.saved)
 	s.loadHistory()
+	s.loadFavorites()
 	return s
 }
 

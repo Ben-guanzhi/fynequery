@@ -99,20 +99,20 @@ func TestMatchMask(t *testing.T) {
 	}
 	for _, tc := range cases {
 		f := DatabaseFilter{Include: []string{tc.pattern}}
-		if got := f.allows(tc.name); got != tc.want {
+		if got := f.Allows(tc.name); got != tc.want {
 			t.Errorf("mask %q vs %q = %v, want %v", tc.pattern, tc.name, got, tc.want)
 		}
 	}
 	// Exclude wins over nothing to include; include list is an allowlist.
 	f := DatabaseFilter{Exclude: []string{"tmp%"}}
-	if !f.allows("users") || f.allows("tmp_log") {
+	if !f.Allows("users") || f.Allows("tmp_log") {
 		t.Error("exclude-only filter misbehaves")
 	}
 	f = DatabaseFilter{Include: []string{"a%"}, Exclude: []string{"ab%"}}
-	if f.allows("abc") {
+	if f.Allows("abc") {
 		t.Error("exclude must win over include")
 	}
-	if !f.allows("aaa") {
+	if !f.Allows("aaa") {
 		t.Error("include match should pass")
 	}
 }

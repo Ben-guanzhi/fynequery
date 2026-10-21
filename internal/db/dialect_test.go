@@ -18,7 +18,7 @@ func TestCatalogDialectsComplete(t *testing.T) {
 		if d.databases == nil || d.tables == nil || d.columns == nil ||
 			d.search == nil || d.foreignKeys == nil || d.fkValuesSQL == nil || d.qualifiedTable == nil ||
 			d.indexes == nil || d.catalogSchema == nil || d.tableSchema == nil || d.pageSQL == nil ||
-			d.createTable == nil {
+			d.createTable == nil || d.insertRows == nil || d.maxInsertRows <= 0 {
 			t.Errorf("dialect %s is missing catalog operations", typ)
 		}
 	}

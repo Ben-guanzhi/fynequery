@@ -1,6 +1,10 @@
 # build artifacts
 *.exe
 
+# driver plugins built by `task build-plugins` (copied next to the app or into
+# the state dir's plugins/ folder at install time)
+/plugins/
+
 # release artifacts from `task release` (name carries the tag and the target)
 /fynequery-*-*
 

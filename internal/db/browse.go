@@ -50,7 +50,7 @@ func (c *Store) filterNames(id string, names []string) []string {
 	mask := cfg.DatabaseFilter
 	out := make([]string, 0, len(names))
 	for _, name := range names {
-		if mask.allows(name) {
+		if mask.Allows(name) {
 			out = append(out, name)
 		}
 	}

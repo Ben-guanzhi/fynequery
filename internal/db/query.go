@@ -2,10 +2,10 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"regexp"
 	"strings"
+	"tablepro-fyne/internal/drivercore"
 	"time"
 
 	"github.com/Ben-guanzhi/TableProGo/tableprosql"
@@ -67,35 +67,18 @@ func JudgeRowCap(dbType, query string, limit int) RowCapStatus {
 
 // runSelect scans a resultset into a QueryResult. A cancelled context aborts
 // the query and is reported through the result's error.
-func runSelect(ctx context.Context, db *sql.DB, query string, start time.Time) QueryResult {
-	rows, err := db.QueryContext(ctx, query)
+func runSelect(ctx context.Context, engine drivercore.Engine, query string, start time.Time) QueryResult {
+	rows, err := engine.Query(ctx, query)
 	if err != nil {
 		return QueryResult{Error: err.Error()}
 	}
 	defer rows.Close()
 
-	cols, err := rows.Columns()
-	if err != nil {
-		return QueryResult{Error: err.Error()}
-	}
-	colTypes, err := rows.ColumnTypes()
-	if err != nil {
-		return QueryResult{Error: err.Error()}
-	}
+	names := rows.Columns()
+	types := rows.ColTypes()
 
-	names := make([]string, len(cols))
-	types := make([]string, len(cols))
-	for i, name := range cols {
-		names[i] = name
-		dt := ""
-		if colTypes[i] != nil {
-			dt = colTypes[i].DatabaseTypeName()
-		}
-		types[i] = dt
-	}
-
-	values := make([]interface{}, len(cols))
-	ptrs := make([]interface{}, len(cols))
+	values := make([]interface{}, len(names))
+	ptrs := make([]interface{}, len(names))
 	for i := range values {
 		ptrs[i] = &values[i]
 	}
@@ -132,16 +115,14 @@ func runSelect(ctx context.Context, db *sql.DB, query string, start time.Time) Q
 }
 
 // executeCommand runs a non-SELECT statement.
-func executeCommand(ctx context.Context, db *sql.DB, query string, start time.Time) QueryResult {
-	res, err := db.ExecContext(ctx, query)
+func executeCommand(ctx context.Context, engine drivercore.Engine, query string, start time.Time) QueryResult {
+	res, err := engine.Exec(ctx, query)
 	if err != nil {
 		return QueryResult{Error: err.Error()}
 	}
-	affected, _ := res.RowsAffected()
-	lastID, _ := res.LastInsertId()
 	return QueryResult{
-		AffectedRows:  affected,
-		LastInsertID:  lastID,
+		AffectedRows:  res.Affected,
+		LastInsertID:  res.LastInsertID,
 		ExecutionTime: time.Since(start).Seconds(),
 	}
 }
@@ -151,7 +132,7 @@ func executeCommand(ctx context.Context, db *sql.DB, query string, start time.Ti
 // limit caps a SELECT's rows and, when the cap binds, says whether it cut them
 // short.
 func (c *Store) Execute(ctx context.Context, conn *Conn, database, query string, limit int) QueryResult {
-	db, err := c.queryPool(ctx, conn, database)
+	engine, err := c.queryPool(ctx, conn, database)
 	if err != nil {
 		return QueryResult{Error: err.Error()}
 	}
@@ -170,7 +151,7 @@ func (c *Store) Execute(ctx context.Context, conn *Conn, database, query string,
 			fetch = limit + 1
 		}
 		probe := withRowLimit(query, conn.Config.Type, fetch)
-		result := runSelect(ctx, db, probe, start)
+		result := runSelect(ctx, engine, probe, start)
 		// The extra row is a probe only when the cap is ours: a statement with a
 		// window of its own is run as written, and trimming its rows would be
 		// the client silently editing an answer the server was told to shape.
@@ -181,7 +162,7 @@ func (c *Store) Execute(ctx context.Context, conn *Conn, database, query string,
 		}
 		return result
 	}
-	return executeCommand(ctx, db, query, start)
+	return executeCommand(ctx, engine, query, start)
 }
 
 // runScript executes statements in order, stopping at the first failure. It

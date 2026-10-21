@@ -44,27 +44,6 @@ func scanStrings(ctx context.Context, conn *Conn, query string) ([]string, error
 	return collectRows(ctx, conn, query, nil, scanString)
 }
 
-// allows implements DatabaseFilter matching.
-func (f DatabaseFilter) allows(name string) bool {
-	if len(f.Include) == 0 && len(f.Exclude) == 0 {
-		return true
-	}
-	for _, p := range f.Exclude {
-		if matchMask(p, name) {
-			return false
-		}
-	}
-	if len(f.Include) == 0 {
-		return true
-	}
-	for _, p := range f.Include {
-		if matchMask(p, name) {
-			return true
-		}
-	}
-	return false
-}
-
 // matchMask matches a SQL-LIKE style mask against a name.
 func matchMask(pattern, name string) bool {
 	if pattern == "" {

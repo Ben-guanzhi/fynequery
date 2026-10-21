@@ -1,10 +1,11 @@
 package db
 
 import (
+	"tablepro-fyne/internal/drivercore"
+
 	"github.com/Ben-guanzhi/TableProGo/tableprosql"
 
 	"context"
-	"database/sql"
 	"fmt"
 	"math"
 	"regexp"
@@ -536,59 +537,78 @@ func (c *Store) BuildChanges(ctx context.Context, set ChangeSet) ([]string, erro
 	return BuildStatements(conn.Config.Type, name, set.Columns, keys, types, set.Changes)
 }
 
-// ApplyChanges runs the rebuilt statements as one transaction: either every
-// edit lands or none does, which is the only way a mistake stays fixable. A
-// statement that matches no row aborts the batch instead of quietly skipping.
-// A canceled context stops the batch the same way: the transaction is left to
-// the deferred rollback, so nothing half-applied survives.
-// The count is the rows the batch committed, so it is 0 for any failed run -
-// including the one that aborted on a statement matching no row, whose earlier
-// statements had already been rolled back by the time this returns.
+// ApplyChanges rebuilds the grid's pending edits and commits them; the
+// transaction guarantees come from applyInTx, which this shares with the CSV
+// import. The count is the rows the batch committed, so it is 0 for any failed
+// run - including the one that aborted on a statement matching no row, whose
+// earlier statements had already been rolled back by the time this returns.
 func (c *Store) ApplyChanges(ctx context.Context, set ChangeSet) (int64, error) {
 	statements, err := c.BuildChanges(ctx, set)
 	if err != nil {
 		return 0, err
 	}
-	conn, err := c.OpenConn(set.ConnID)
+	// nil describe keeps the error naming a bare "statement N", which is what
+	// a grid edit's preview already showed the user.
+	return c.applyInTx(ctx, set.ConnID, set.Database, statements, nil)
+}
+
+// applyInTx runs statements as one transaction: either every one lands or none
+// does, which is the only way a mistake stays fixable. A statement that matches
+// no row aborts the batch instead of quietly skipping it, and a canceled
+// context stops it the same way - the transaction is left to the deferred
+// rollback, so nothing half-applied survives.
+//
+// describe names statement i in an error; it is what lets a batch of imports
+// say which CSV lines failed instead of which statement index. It is called
+// only on the error path, so a caller can build the name cheaply.
+func (c *Store) applyInTx(ctx context.Context, connID, database string,
+	statements []string, describe func(i int) string) (int64, error) {
+	conn, err := c.OpenConn(connID)
 	if err != nil {
 		return 0, err
 	}
-	db, err := c.queryPool(ctx, conn, set.Database)
+	engine, err := c.queryPool(ctx, conn, database)
 	if err != nil {
 		return 0, err
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := engine.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
 	var applied int64
 	for i, statement := range statements {
-		affected, err := execInTx(ctx, tx, statement, i)
+		label := ""
+		if describe != nil {
+			label = describe(i)
+		}
+		affected, err := execInTx(ctx, tx, statement, i, label)
 		if err != nil {
 			return 0, err
 		}
 		applied += affected
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}
 	return applied, nil
 }
 
-func execInTx(ctx context.Context, tx *sql.Tx, statement string, index int) (int64, error) {
-	res, err := tx.ExecContext(ctx, statement)
-	if err != nil {
-		return 0, fmt.Errorf("statement %d: %w", index+1, err)
+// execInTx is one statement inside a batch. label replaces the bare index in
+// the error message when the caller has something more useful to say than
+// "statement 7".
+func execInTx(ctx context.Context, tx drivercore.Tx, statement string, index int, label string) (int64, error) {
+	if label == "" {
+		label = fmt.Sprintf("statement %d", index+1)
 	}
-	affected, err := res.RowsAffected()
+	affected, err := tx.Exec(ctx, statement)
 	if err != nil {
-		return 0, fmt.Errorf("statement %d: %w", index+1, err)
+		return 0, fmt.Errorf("%s: %w", label, err)
 	}
 	if affected == 0 {
-		return 0, fmt.Errorf("statement %d matched no row; the data changed since it was read, nothing was committed", index+1)
+		return 0, fmt.Errorf("%s matched no row; the data changed since it was read, nothing was committed", label)
 	}
 	return affected, nil
 }

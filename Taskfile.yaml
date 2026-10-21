@@ -32,6 +32,23 @@ tasks:
       - cmd: "go build -ldflags '-s -w -X main.appVersion={{.VER}}' -o {{.APP_NAME}}-{{.VER}}-darwin-amd64 ."
         platforms: [darwin]
 
+  build-plugins:
+    desc: Build the driver plugins into ./plugins (copy them next to the app or into the state dir's plugins folder)
+    cmds:
+      - mkdir -p plugins
+      - cmd: "go build -o plugins/postgresql.exe ./cmd/pgdriver"
+        platforms: [windows]
+      - cmd: "go build -o plugins/sqlserver.exe ./cmd/mssqldriver"
+        platforms: [windows]
+      - cmd: "go build -o plugins/oracle.exe ./cmd/oracledriver"
+        platforms: [windows]
+      - cmd: "go build -o plugins/postgresql ./cmd/pgdriver"
+        platforms: [linux, darwin]
+      - cmd: "go build -o plugins/sqlserver ./cmd/mssqldriver"
+        platforms: [linux, darwin]
+      - cmd: "go build -o plugins/oracle ./cmd/oracledriver"
+        platforms: [linux, darwin]
+
   run:
     desc: Build and run
     cmds:
