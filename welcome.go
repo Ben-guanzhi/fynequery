@@ -19,6 +19,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"fynequery/db"
+	"fynequery/icons"
 )
 
 type welcomePage struct {
@@ -35,7 +36,7 @@ func newWelcomePage(w fyne.Window, onPick func(Connection, db.Session)) *welcome
 func (p *welcomePage) build() fyne.CanvasObject {
 	// ---- left branding panel ----
 	logo := canvas.NewImageFromResource(logoResource)
-	logo.SetMinSize(fyne.NewSize(104, 92))
+	logo.SetMinSize(fyne.NewSize(112, 100))
 
 	welcome1 := canvas.NewText("Welcome to", pal().welcomeFG)
 	welcome1.TextSize = 22
@@ -54,6 +55,7 @@ func (p *welcomePage) build() fyne.CanvasObject {
 		layout.NewSpacer(),
 		container.NewHBox(layout.NewSpacer(), logo, layout.NewSpacer()),
 		container.NewHBox(layout.NewSpacer(), welcome1, layout.NewSpacer()),
+		spacerH(6),
 		container.NewHBox(layout.NewSpacer(), welcome2, layout.NewSpacer()),
 		widget.NewLabel(""),
 		container.NewHBox(layout.NewSpacer(), themeBtn, layout.NewSpacer()),
@@ -67,11 +69,20 @@ func (p *welcomePage) build() fyne.CanvasObject {
 			spacerW(18),
 			newWelcomeAction(theme.UploadIcon(), "Restore", p.restore),
 			spacerW(18),
-			newWelcomeAction(theme.DocumentIcon(), "License", p.license),
+			newWelcomeAction(icons.Document, "License", p.license),
 			layout.NewSpacer(),
 		),
 	)
 	leftBg := newPanelBackground(container.NewPadded(left), func() color.Color { return pal().welcomePanelBG })
+
+	// Branding headline is a bare canvas.Text (baked colour), so recolour it on
+	// a light/dark switch; the connection rows recolor via connRow.Refresh.
+	onThemeChange(func() {
+		welcome1.Color = pal().welcomeFG
+		welcome2.Color = pal().foreground
+		welcome1.Refresh()
+		welcome2.Refresh()
+	})
 
 	// ---- right connection list ----
 	p.listBox = container.NewVBox()
@@ -98,15 +109,17 @@ func (p *welcomePage) build() fyne.CanvasObject {
 
 	right := container.NewBorder(
 		container.NewPadded(widget.NewLabelWithStyle("Connections", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})),
-		container.NewVBox(
-			widget.NewSeparator(),
-			container.NewPadded(container.NewHBox(newLink, widget.NewLabel("  "), importLink)),
-		),
+		container.NewPadded(container.NewHBox(newLink, widget.NewLabel("  "), importLink)),
 		nil, nil,
 		container.NewScroll(container.NewPadded(p.listBox)),
 	)
+	// Wrap the connection list in a rounded card so the welcome screen reads as
+	// "branding panel + connection card" rather than two flat slabs.
+	rightCard := newRoundedPanel(right,
+		func() color.Color { return pal().contentBG },
+		func() color.Color { return pal().crumbBorder }, 12, 0)
 
-	split := container.NewHSplit(leftBg, right)
+	split := container.NewHSplit(leftBg, rightCard)
 	split.SetOffset(0.36)
 	return split
 }
@@ -143,7 +156,7 @@ func (p *welcomePage) reload() {
 			rows.Refresh()
 		})
 		p.listBox.Objects = append(p.listBox.Objects,
-			container.NewPadded(hdr), rows, widget.NewSeparator())
+			container.NewPadded(hdr), rows)
 	}
 	p.listBox.Refresh()
 }
@@ -224,7 +237,8 @@ func (r *connRow) fill(c Connection) {
 	r.Refresh()
 }
 
-// Tapped connects; TappedSecondary (right click) offers delete.
+// TappedSecondary opens the connection's context menu (edit / delete),
+// mirroring the sidebar item menu. Tapped connects.
 func (r *connRow) Tapped(*fyne.PointEvent) {
 	if r.onTap != nil {
 		r.onTap(r.conn)
@@ -235,25 +249,60 @@ func (r *connRow) Tapped(*fyne.PointEvent) {
 	}
 }
 
-func (r *connRow) TappedSecondary(*fyne.PointEvent) {
+func (r *connRow) TappedSecondary(e *fyne.PointEvent) {
 	if r.page == nil {
 		return
 	}
+	canvas := fyne.CurrentApp().Driver().CanvasForObject(r)
+	if canvas == nil {
+		return
+	}
+	c := r.conn
+	menu := fyne.NewMenu("",
+		fyne.NewMenuItem("Edit connection…", func() { r.page.editConnection(c) }),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Delete…", func() { r.page.confirmDelete(c) }),
+	)
+	widget.ShowPopUpMenuAtPosition(menu, canvas, e.AbsolutePosition)
+}
+
+// editConnection opens the edit sheet for a saved connection and reloads the
+// list after a successful save.
+func (p *welcomePage) editConnection(c Connection) {
+	showEditConnectionDialog(p.window, c, func() { p.reload() })
+}
+
+// confirmDelete asks before removing a saved connection (the database itself
+// is never touched).
+func (p *welcomePage) confirmDelete(c Connection) {
 	dialog.NewConfirm("Delete Connection",
-		fmt.Sprintf("Delete connection %q?\n\nThe database itself is not touched.", r.conn.Name),
+		fmt.Sprintf("Delete connection %q?\n\nThe database itself is not touched.", c.Name),
 		func(ok bool) {
 			if !ok {
 				return
 			}
-			if err := deleteConnection(r.conn.Name); err != nil {
-				dialog.NewError(err, r.page.window).Show()
+			if err := deleteConnection(c.Name); err != nil {
+				dialog.NewError(err, p.window).Show()
 				return
 			}
-			r.page.reload()
-		}, r.page.window).Show()
+			p.reload()
+		}, p.window).Show()
 }
 
 func (r *connRow) Cursor() desktop.Cursor { return desktop.PointerCursor }
+
+// Refresh re-applies the palette-driven text colours: canvas.Text captures its
+// colour when built, so without this the row text would keep the previous
+// light/dark colour after a theme switch.
+func (r *connRow) Refresh() {
+	if r.name != nil {
+		r.name.Color = pal().foreground
+	}
+	if r.host != nil {
+		r.host.Color = pal().welcomeFG
+	}
+	r.BaseWidget.Refresh()
+}
 
 func (r *connRow) CreateRenderer() fyne.WidgetRenderer {
 	// badge + status dot sit together, vertically centred against the
@@ -262,14 +311,14 @@ func (r *connRow) CreateRenderer() fyne.WidgetRenderer {
 		container.NewHBox(r.dot, container.NewPadded(r.badge)))
 	row := container.NewHBox(container.NewPadded(head),
 		container.NewVBox(container.NewHBox(r.name, r.tags), r.host))
-	return widget.NewSimpleRenderer(row)
+	return widget.NewSimpleRenderer(container.NewPadded(row))
 }
 
 // MinSize guarantees two full text lines per row (Fyne lists clip otherwise).
 func (r *connRow) MinSize() fyne.Size {
 	base := r.BaseWidget.MinSize()
-	if base.Height < 52 {
-		base.Height = 52
+	if base.Height < 56 {
+		base.Height = 56
 	}
 	return base
 }
@@ -318,6 +367,7 @@ type welcomeAction struct {
 
 	circle *canvas.Circle
 	img    *canvas.Image
+	cap    *canvas.Text
 	hover  bool
 }
 
@@ -354,10 +404,10 @@ func (a *welcomeAction) CreateRenderer() fyne.WidgetRenderer {
 	img := container.NewCenter(container.NewGridWrap(fyne.NewSize(22, 22), a.img))
 	stack := container.NewStack(a.circle, img)
 	iconBox := container.NewGridWrap(fyne.NewSize(56, 56), stack)
-	cap := canvas.NewText(a.label, pal().welcomeFG)
-	cap.TextSize = 12
-	cap.Alignment = fyne.TextAlignCenter
-	body := container.NewVBox(container.NewCenter(iconBox), container.NewCenter(cap))
+	a.cap = canvas.NewText(a.label, pal().welcomeFG)
+	a.cap.TextSize = 12
+	a.cap.Alignment = fyne.TextAlignCenter
+	body := container.NewVBox(container.NewCenter(iconBox), container.NewCenter(a.cap))
 	return widget.NewSimpleRenderer(body)
 }
 
@@ -365,6 +415,9 @@ func (a *welcomeAction) Refresh() {
 	a.circle.FillColor = pal().segmentBG
 	if a.hover {
 		a.circle.FillColor = pal().hover
+	}
+	if a.cap != nil {
+		a.cap.Color = pal().welcomeFG
 	}
 	a.BaseWidget.Refresh()
 }

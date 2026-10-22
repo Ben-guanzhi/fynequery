@@ -75,6 +75,66 @@ type mysqlSession struct {
 
 func (s *mysqlSession) Server() string { return s.server }
 
+// CreateDatabase creates a new MySQL/MariaDB schema. The name is backtick-quoted
+// (with embedded backticks escaped) so any valid identifier is safe; charset and
+// collation are restricted to identifier characters to avoid injection, and
+// charset defaults to utf8mb4 when omitted.
+func (s *mysqlSession) CreateDatabase(name string, opts map[string]string) error {
+	q, err := buildCreateDatabaseSQL(name, opts)
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(q); err != nil {
+		return fmt.Errorf("create database: %w", err)
+	}
+	return nil
+}
+
+// buildCreateDatabaseSQL renders the CREATE DATABASE statement. It is a pure
+// function (no I/O) so the validation and quoting can be unit-tested; the
+// connection only runs the returned string.
+func buildCreateDatabaseSQL(name string, opts map[string]string) (string, error) {
+	if !validIdent(name) {
+		return "", fmt.Errorf("invalid database name %q", name)
+	}
+	q := "CREATE DATABASE " + quoteIdent(name)
+	charset := opts["charset"]
+	if charset == "" {
+		charset = "utf8mb4"
+	}
+	if !validIdent(charset) {
+		return "", fmt.Errorf("invalid charset %q", charset)
+	}
+	q += " CHARACTER SET " + charset
+	if collation := opts["collation"]; collation != "" {
+		if !validIdent(collation) {
+			return "", fmt.Errorf("invalid collation %q", collation)
+		}
+		q += " COLLATE " + collation
+	}
+	return q, nil
+}
+
+// quoteIdent backtick-quotes a SQL identifier, escaping embedded backticks.
+func quoteIdent(name string) string {
+	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+}
+
+// validIdent reports whether s is a safe SQL identifier (letters, digits,
+// underscore) — used to vet database/charset/collation names before they are
+// interpolated into a CREATE DATABASE statement.
+func validIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
 // scalar runs a single-value query (best effort, errors ignored by callers).
 func (s *mysqlSession) scalar(q string, args ...interface{}) (*string, error) {
 	var v interface{}

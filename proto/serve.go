@@ -20,6 +20,7 @@ type Handler interface {
 	Columns(p ColumnsParams) (ColumnsResult, error)
 	Query(p QueryParams) (QueryResult, error)
 	Browse(p BrowseParams) (QueryResult, error)
+	CreateDatabase(p CreateDBParams) error
 }
 
 var stdoutMu sync.Mutex
@@ -126,6 +127,12 @@ func dispatch(h Handler, req Request) (interface{}, error) {
 			return nil, fmt.Errorf("bad params: %w", err)
 		}
 		return h.Browse(p)
+	case MethodCreateDB:
+		var p CreateDBParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("bad params: %w", err)
+		}
+		return struct{}{}, h.CreateDatabase(p)
 	}
 	return nil, fmt.Errorf("unknown method %q", req.Method)
 }

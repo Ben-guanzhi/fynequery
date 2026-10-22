@@ -399,6 +399,19 @@ func (s *remoteSession) Close() {
 	_ = s.p.call(ctx, proto.MethodClose, proto.CloseParams{ConnID: s.connID}, nil)
 }
 
+// CreateDatabase forwards the request to the plugin process, reusing the already
+// opened connection (postgres/mssql create databases from any open connection).
+func (s *remoteSession) CreateDatabase(name string, opts map[string]string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	return s.p.call(ctx, proto.MethodCreateDB, proto.CreateDBParams{
+		ConnID:    s.connID,
+		Name:      name,
+		Charset:   opts["charset"],
+		Collation: opts["collation"],
+	}, nil)
+}
+
 // pluginQueryTimeout matches the statement cap inside plugins; the host side
 // must not give up before the plugin reports its own timeout.
 const pluginQueryTimeout = 11 * time.Minute

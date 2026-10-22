@@ -47,6 +47,13 @@ func (fakeHandler) Browse(p proto.BrowseParams) (proto.QueryResult, error) {
 	return fakeHandler{}.Query(proto.QueryParams{})
 }
 
+func (fakeHandler) CreateDatabase(p proto.CreateDBParams) error {
+	if p.Name == "boom" {
+		return errors.New("simulated create database failure")
+	}
+	return nil
+}
+
 func main() {
 	banner := proto.Banner{Proto: proto.ProtocolName, Version: proto.ProtocolVersion, Code: "fake", Name: "FakeDB"}
 	if err := proto.Serve(fakeHandler{}, banner); err != nil {

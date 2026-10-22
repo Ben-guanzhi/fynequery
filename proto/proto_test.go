@@ -54,6 +54,13 @@ func (testHandler) Browse(p BrowseParams) (QueryResult, error) {
 	return QueryResult{Columns: []ColumnInfo{{Name: "id"}}, Rows: [][]*string{{ptr("1")}}}, nil
 }
 
+func (testHandler) CreateDatabase(p CreateDBParams) error {
+	if p.Name == "fail" {
+		return errors.New("create refused")
+	}
+	return nil
+}
+
 func ptr(s string) *string { return &s }
 
 // client is the host side of the pipe pair.

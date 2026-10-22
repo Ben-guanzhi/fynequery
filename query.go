@@ -16,10 +16,10 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
-	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"fynequery/db"
+	"fynequery/icons"
 )
 
 // colorWhite is used for text on accent backgrounds.
@@ -28,21 +28,32 @@ var colorWhite = color.RGBA{R: 255, G: 255, B: 255, A: 255}
 // queryLimit caps interactive query results.
 const queryLimit = 5000
 
+// Editor/result split offsets for the query pane: editor-dominant while there
+// is no result (the bottom just shows a hint), results-favoured once one loads.
+const (
+	splitNoResult   = 0.78
+	splitWithResult = 0.45
+)
+
 // queryPane is the SQL tab content.
 type queryPane struct {
 	widget.BaseWidget
-	editor     *widget.Entry
-	resultSlot *fyne.Container // holds the current result grid (replaced per run)
-	status     *statusBar
-	timer      *canvas.Text
-	posLabel   *widget.Label // "第 1 行, 第 1 列, 位置 0"
-	limitSel   *widget.Select
-	runBtn     *accentButton
-	window     fyne.Window
-	conn       Connection
-	sess       db.Session
-	side       *sidebar
-	running    bool
+	editor       *widget.Entry
+	resultSlot   *fyne.Container   // holds the current result grid (replaced per run)
+	searchWrap   fyne.CanvasObject // result search box (hidden until a result loads)
+	noResult     fyne.CanvasObject // centered run-a-query hint (shown until a result loads)
+	split        *container.Split  // editor/result splitter
+	resultActive bool              // whether a result is shown (drives the split offset)
+	status       *statusBar
+	timer        *canvas.Text
+	posLabel     *widget.Label // "第 1 行, 第 1 列, 位置 0"
+	limitSel     *widget.Select
+	runBtn       *accentButton
+	window       fyne.Window
+	conn         Connection
+	sess         db.Session
+	side         *sidebar
+	running      bool
 
 	// sessFn returns the workspace's current session. The workspace re-dials
 	// (and closes the old session) when the user picks a database, so the pane
@@ -122,16 +133,20 @@ func oneLine(s string, max int) string {
 
 func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	qp.editor = widget.NewMultiLineEntry()
+	qp.editor.TextStyle.Monospace = true  // SQL reads best in a monospace font
+	qp.editor.Wrapping = fyne.TextWrapOff // keep statements on one line; scroll horizontally
+	gutter := newLineGutter(qp.editor)    // line-number gutter, scroll-synced to the editor
 	qp.editor.SetPlaceHolder("Write SQL here, e.g.\nSELECT id, name FROM users LIMIT 20;\n\nCtrl+Enter 执行当前语句 · Ctrl+Space 补全关键字 / 表 / 列")
 	// keep the cursor-position readout roughly current and offer completions
 	// while typing (the popup updates as the word under the cursor changes)
 	qp.editor.OnChanged = func(string) {
 		qp.refreshPos()
 		qp.scheduleAutoComplete()
+		gutter.sync()
 	}
 
 	qp.posLabel = widget.NewLabel("Line 1, Col 1, Pos 0")
-	qp.limitSel = widget.NewSelect([]string{"100 rows", "500 rows", "1000 rows", "No limit"}, func(string) {})
+	qp.limitSel = widget.NewSelect([]string{"100 rows", "500 rows", "1000 rows", "5000 rows (max)"}, func(string) {})
 	qp.limitSel.SetSelected("100 rows")
 
 	qp.timer = canvas.NewText("", pal().statusFG)
@@ -146,6 +161,9 @@ func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	completeBtn.onTap = func() { qp.complete() }
 	runAll := newFlatButton("Run All")
 	runAll.onTap = func() { qp.runAll() }
+	// Visible entry point for the in-result search bar (also Ctrl+F), so it is
+	// discoverable even though the bar starts hidden.
+	findBtn := newToolButton(icons.Search, func() { qp.toggleFindBar() })
 	contErr := widget.NewCheck("Continue on error", func(on bool) { qp.continueOnError = on })
 
 	// toolbar sits below the editor (TablePlus SQL editor): position | limit |
@@ -153,13 +171,16 @@ func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	toolbar := container.NewBorder(nil, nil,
 		qp.posLabel,
 		container.NewHBox(qp.limitSel, spacerW(10), beautify, spacerW(6), completeBtn, spacerW(6),
-			runAll, spacerW(6), contErr, spacerW(6), runBtn, spacerW(10), qp.timer),
+			runAll, spacerW(8), findBtn, spacerW(8), contErr, spacerW(6), runBtn, spacerW(10), qp.timer),
 		layout.NewSpacer(),
 	)
-	editorPane := container.NewBorder(nil, toolbar, nil, nil, container.NewPadded(qp.editor))
+	editorArea := container.NewBorder(nil, nil, gutter, nil, container.NewPadded(qp.editor))
+	editorPane := container.NewBorder(nil, toolbar, nil, nil, editorArea)
 
 	qp.status = newStatusBar()
-	qp.resultSlot = container.NewStack(newDataTable(emptyTableData(), qp.status))
+	initGrid := newDataTable(emptyTableData(), qp.status)
+	initGrid.window = qp.window
+	qp.resultSlot = container.NewStack(initGrid)
 
 	// in-result search box (TablePlus in-grid spotlight): Enter steps to the
 	// next hit, Shift+Enter to the previous. It targets whatever result grid
@@ -183,7 +204,7 @@ func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	}
 	qp.findCounter = widget.NewLabel("")
 	findBox := container.NewHBox(
-		widget.NewIcon(theme.SearchIcon()),
+		widget.NewIcon(icons.Search),
 		qp.findEntry,
 		qp.findCounter,
 	)
@@ -194,22 +215,36 @@ func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	qp.pinBar.Hide()
 
 	// search bar sits just above the result grid
-	searchWrap := container.NewBorder(nil, nil, nil, nil, findBox)
+	qp.searchWrap = container.NewBorder(nil, nil, nil, nil, findBox)
+	noResult := widget.NewLabelWithStyle("写点 SQL，然后点 Run Current 或按 Ctrl+Enter 执行", fyne.TextAlignCenter, fyne.TextStyle{})
+	noResult.Importance = widget.LowImportance
+	noResult.Wrapping = fyne.TextWrapWord
+	qp.noResult = container.NewCenter(noResult)
 
 	// The result pane stacks the pin/search bars above the grid and the status
 	// bar below it. A Border centre stretches the grid to fill the trailing half
 	// of the split, so there is no dead space underneath the results.
 	resultPane := container.NewBorder(
-		container.NewVBox(qp.pinBar, searchWrap), qp.status, nil, nil, qp.resultSlot)
+		container.NewVBox(qp.pinBar, qp.searchWrap), qp.status, nil, nil,
+		container.NewStack(qp.resultSlot, qp.noResult))
 
 	// Editor (top) and result (bottom) share one draggable split, so the divider
 	// adjusts both panes' heights. Making the split the root widget lets it fill
 	// the whole tab; wrapping it in a VBox had clamped it to its minimum height
 	// and left a large blank area below the results.
 	split := container.NewVSplit(editorPane, resultPane)
-	split.SetOffset(0.5)
+	qp.split = split
+	// No result yet: let the editor dominate; a balanced split is applied when
+	// results arrive (see updateResultChrome).
+	if g := qp.resultGrid(); g != nil && len(g.data.Cols) > 0 {
+		split.SetOffset(splitWithResult)
+		qp.resultActive = true
+	} else {
+		split.SetOffset(splitNoResult)
+	}
 
 	qp.bindEditorShortcuts()
+	qp.updateResultChrome()
 	return widget.NewSimpleRenderer(split)
 }
 
@@ -253,6 +288,7 @@ func (qp *queryPane) showPin(i int) {
 	}
 	p := qp.pins[i]
 	g := newDataTable(cloneTableData(p.data), qp.status)
+	g.window = qp.window
 	g.tableName = ""
 	g.onRowSelect = func(idx int) {
 		if qp.onRowSelect != nil {
@@ -262,6 +298,8 @@ func (qp *queryPane) showPin(i int) {
 	qp.activePin = i
 	qp.resultSlot.Objects = []fyne.CanvasObject{g}
 	qp.resultSlot.Refresh()
+	qp.bindFind(g)
+	qp.updateResultChrome()
 	qp.status.setQueryInfo("● " + p.label + " — " + fmt.Sprint(len(p.data.Cols)) + " columns · " +
 		fmt.Sprint(len(p.data.Rows)) + " rows (pinned)")
 }
@@ -293,10 +331,10 @@ func (qp *queryPane) renderPinBar() {
 	for i := range qp.pins {
 		i := i
 		name := qp.pins[i].label
-		chip := newFlatButton("📌 " + name)
+		chip := newFlatButton(name)
 		chip.onTap = func() { qp.showPin(i) }
-		un := newFlatButton("✕")
-		un.onTap = func() { qp.unpin(i) }
+		un := newToolButton(icons.Cancel, func() { qp.unpin(i) })
+		un.small = true
 		qp.pinBar.Objects = append(qp.pinBar.Objects, chip, un, spacerW(6))
 	}
 	qp.pinBar.Refresh()
@@ -321,6 +359,54 @@ func cloneTableData(d *TableData) *TableData {
 	return c
 }
 
+// updateResultChrome shows the "run a query" hint (and hides the result search
+// box) until a result with columns is actually loaded.
+// toggleFindBar shows or hides the in-result search bar (Ctrl+F). It stays
+// hidden until asked for, so the result grid keeps the full height.
+func (qp *queryPane) toggleFindBar() {
+	if qp.searchWrap == nil {
+		return
+	}
+	if qp.searchWrap.Visible() {
+		qp.searchWrap.Hide()
+		return
+	}
+	qp.searchWrap.Show()
+	if qp.findEntry != nil {
+		if c := fyne.CurrentApp().Driver().CanvasForObject(qp.findEntry); c != nil {
+			c.Focus(qp.findEntry)
+		}
+	}
+}
+
+func (qp *queryPane) updateResultChrome() {
+	g := qp.resultGrid()
+	empty := g == nil || len(g.data.Cols) == 0
+	if qp.noResult != nil {
+		if empty {
+			qp.noResult.Show()
+		} else {
+			qp.noResult.Hide()
+		}
+	}
+	// The in-result search bar is off by default (Ctrl+F reveals it); only
+	// force-hide it when there is no result left to search.
+	if qp.searchWrap != nil && empty {
+		qp.searchWrap.Hide()
+	}
+	// Rebalance the editor/result split only on a no-result <-> result
+	// transition, so a manual drag is never fought on every refresh.
+	active := !empty
+	if qp.split != nil && active != qp.resultActive {
+		qp.resultActive = active
+		if active {
+			qp.split.SetOffset(splitWithResult) // give the results room
+		} else {
+			qp.split.SetOffset(splitNoResult) // editor-dominant, hint only
+		}
+	}
+}
+
 // bindFind wires a result grid's hit counter to this pane's label.
 func (qp *queryPane) bindFind(g *dataTable) {
 	g.onFindStatus = func(cur, total int) {
@@ -343,6 +429,40 @@ func (qp *queryPane) bumpRun() int {
 }
 
 // refreshPos updates the "第 N 行, 第 M 列, 位置 K" readout from the editor text.
+// toggleComment toggles a "-- " SQL line comment on the editor's current line
+// (Ctrl+/), preserving indentation and keeping the cursor on that line.
+func (qp *queryPane) toggleComment() {
+	if qp.editor == nil {
+		return
+	}
+	lines := strings.Split(qp.editor.Text, "\n")
+	row := qp.editor.CursorRow
+	if row < 0 || row >= len(lines) {
+		return
+	}
+	lines[row] = toggleLineComment(lines[row])
+	qp.editor.SetText(strings.Join(lines, "\n"))
+	qp.editor.CursorRow = row
+	qp.editor.CursorColumn = len([]rune(lines[row]))
+	qp.editor.Refresh()
+	qp.refreshPos()
+}
+
+// toggleLineComment adds or removes a leading "-- " on one line, keeping any
+// indentation intact.
+func toggleLineComment(line string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	indent := line[:len(line)-len(trimmed)]
+	switch {
+	case strings.HasPrefix(trimmed, "-- "):
+		return indent + trimmed[3:]
+	case strings.HasPrefix(trimmed, "--"):
+		return indent + strings.TrimPrefix(trimmed[2:], " ")
+	default:
+		return indent + "-- " + trimmed
+	}
+}
+
 func (qp *queryPane) refreshPos() {
 	if qp.posLabel == nil || qp.editor == nil {
 		return
@@ -363,7 +483,7 @@ func (qp *queryPane) rowLimit() int {
 		return 500
 	case "1000 rows":
 		return 1000
-	case "No limit":
+	case "5000 rows (max)":
 		return queryLimit
 	default:
 		return 100
@@ -513,6 +633,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 				cols = append(cols, ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable, Key: c.Key})
 			}
 			g := newDataTable(&TableData{Cols: cols, Fetched: 0, Total: -1, Approx: false}, qp.status)
+			g.window = qp.window
 			g.tableName = "" // query results have no owning table
 			g.onPin = qp.pinResult
 			g.onRowSelect = func(idx int) {
@@ -524,6 +645,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 			qp.resultSlot.Objects = []fyne.CanvasObject{g}
 			qp.resultSlot.Refresh()
 			qp.bindFind(g)
+			qp.updateResultChrome()
 			qp.status.setQueryInfo(qp.resultStatusLine(label, len(cols), "执行中…"))
 		})
 		if err != nil {
@@ -790,16 +912,11 @@ func (qp *queryPane) promptParams(names []string, onApply func(map[string]string
 }
 
 func (qp *queryPane) beautify() {
-	lines := strings.Split(qp.editor.Text, "\n")
-	var out []string
-	for _, l := range lines {
-		t := strings.TrimSpace(l)
-		if t == "" {
-			continue
-		}
-		out = append(out, strings.ToUpper(t))
+	text := strings.TrimSpace(qp.editor.Text)
+	if text == "" {
+		return
 	}
-	qp.editor.SetText(strings.Join(out, "\n"))
+	qp.editor.SetText(formatSQL(text))
 }
 
 // accentButton: the blue "Run Current" style button.
@@ -858,7 +975,7 @@ func (r *accentBtnRenderer) Objects() []fyne.CanvasObject {
 }
 
 func (r *accentBtnRenderer) MinSize() fyne.Size {
-	return fyne.NewSize(r.text.MinSize().Width+24, 28)
+	return fyne.NewSize(r.text.MinSize().Width+22, 26)
 }
 
 func (r *accentBtnRenderer) Destroy() {}

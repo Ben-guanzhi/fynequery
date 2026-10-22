@@ -25,7 +25,7 @@ func showLicenseDialog(w fyne.Window) {
 	activateBtn := widget.NewButton("Activate", func() {
 		showInfo(w, "License", "This is a local development build.\nLicense activation is not available.")
 	})
-	activateBtn.Importance = widget.HighImportance
+	activateBtn.Disable() // local dev build: activation unavailable
 
 	setPassBtn := widget.NewButton("Set passcode", func() {
 		if len(pass.Text) < 4 {
@@ -41,11 +41,18 @@ func showLicenseDialog(w fyne.Window) {
 		showInfo(w, "Local passcode", "Local passcode set. It will be required at startup.")
 	})
 	clearPassBtn := widget.NewButton("Remove passcode", func() {
-		if err := clearPasscode(); err != nil {
-			dialog.NewError(err, w).Show()
-			return
-		}
-		status.SetText(lockStatusText())
+		dialog.NewConfirm("Remove passcode",
+			"Remove the local passcode? The app will no longer lock at startup.",
+			func(ok bool) {
+				if !ok {
+					return
+				}
+				if err := clearPasscode(); err != nil {
+					dialog.NewError(err, w).Show()
+					return
+				}
+				status.SetText(lockStatusText())
+			}, w).Show()
 	})
 
 	title := widget.NewLabelWithStyle("TablePro", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})

@@ -27,10 +27,10 @@ func (ws *workspace) showItemMenu(name string, pos fyne.Position) {
 	}
 	quote := ws.quoteTable(name)
 
-	pinItem := fyne.NewMenuItem("Pin to top", func() { ws.side.togglePin(name) })
+	pinItem := fyne.NewMenuItem("置顶", func() { ws.side.togglePin(name) })
 	pinItem.Disabled = name == ""
 	if ws.side != nil && ws.side.isPinned(name) {
-		pinItem = fyne.NewMenuItem("Unpin", func() { ws.side.togglePin(name) })
+		pinItem = fyne.NewMenuItem("取消置顶", func() { ws.side.togglePin(name) })
 	}
 
 	// The picked object's kind decides whether "Open" shows data or DDL.
@@ -45,27 +45,27 @@ func (ws *workspace) showItemMenu(name string, pos fyne.Position) {
 	menu := fyne.NewMenu("",
 		pinItem,
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Open", func() { ws.openObjectByName(name) }),
-		fyne.NewMenuItem("View DDL", func() { ws.openObjectDDL(name, kind) }),
-		fyne.NewMenuItem("Edit structure…", func() { ws.editStructure(name) }),
-		fyne.NewMenuItem("View Structure", func() {
+		fyne.NewMenuItem("打开", func() { ws.openObjectByName(name) }),
+		fyne.NewMenuItem("查県 DDL", func() { ws.openObjectDDL(name, kind) }),
+		fyne.NewMenuItem("编辑结构…", func() { ws.editStructure(name) }),
+		fyne.NewMenuItem("查県结构", func() {
 			ws.openTable(name)
 			if ws.segment != nil {
 				ws.segment.set(1)
 			}
 		}),
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Copy Name", func() { ws.copyText(name) }),
-		fyne.NewMenuItem("Copy as CREATE", func() { ws.copyCreateScript(name) }),
-		fyne.NewMenuItem("Copy as SELECT", func() {
+		fyne.NewMenuItem("复制名称", func() { ws.copyText(name) }),
+		fyne.NewMenuItem("复制为 CREATE", func() { ws.copyCreateScript(name) }),
+		fyne.NewMenuItem("复制为 SELECT", func() {
 			ws.copyText("SELECT * FROM " + quote + " LIMIT 100;")
 		}),
-		fyne.NewMenuItem("Copy as TRUNCATE", func() { ws.copyText(ws.truncateSQL(name, quote)) }),
-		fyne.NewMenuItem("Copy as DROP", func() { ws.copyText("DROP TABLE " + quote + ";") }),
+		fyne.NewMenuItem("复制为 TRUNCATE", func() { ws.copyText(ws.truncateSQL(name, quote)) }),
+		fyne.NewMenuItem("复制为 DROP", func() { ws.copyText("DROP TABLE " + quote + ";") }),
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Clone...", func() { ws.cloneTable(name, quote) }),
-		fyne.NewMenuItem("Truncate...", func() { ws.confirmTruncate(name, quote) }),
-		fyne.NewMenuItem("Delete...", func() { ws.confirmDrop(name, quote) }),
+		fyne.NewMenuItem("克隆...", func() { ws.cloneTable(name, quote) }),
+		fyne.NewMenuItem("清空...", func() { ws.confirmTruncate(name, quote) }),
+		fyne.NewMenuItem("删除...", func() { ws.confirmDrop(name, quote) }),
 	)
 	widget.ShowPopUpMenuAtPosition(menu, canvas, pos)
 }
@@ -162,13 +162,18 @@ func (ws *workspace) cloneSQL(src, srcQuote, dst, dstQuote string) string {
 
 // cloneTable asks for a new name, then duplicates structure+data.
 func (ws *workspace) cloneTable(name, quote string) {
-	dialog.ShowEntryDialog("Clone "+name, "New table name", func(dst string) {
+	dialog.ShowEntryDialog("克隆 "+name, "新表名", func(dst string) {
 		dst = strings.TrimSpace(dst)
-		if dst == "" || dst == name {
+		if dst == "" {
+			showInfo(ws.window, "克隆", "请输入新表名。")
+			return
+		}
+		if dst == name {
+			showInfo(ws.window, "克隆", "新表名不能与原表相同。")
 			return
 		}
 		sql := ws.cloneSQL(name, quote, dst, ws.quoteTable(dst))
-		ws.runObjectSQL("Clone "+name, sql)
+		ws.runObjectSQL("克隆 "+name, sql)
 	}, ws.window)
 }
 

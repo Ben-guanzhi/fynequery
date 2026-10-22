@@ -42,11 +42,42 @@ func (s *fixedSpacer) CreateRenderer() fyne.WidgetRenderer {
 
 func (s *fixedSpacer) MinSize() fyne.Size { return fyne.NewSize(s.w, 1) }
 
+// spacerH is a fixed-height vertical spacer.
+func spacerH(h float32) fyne.CanvasObject {
+	return layoutFixedV(h)
+}
+
+type fixedVSpacer struct {
+	widget.BaseWidget
+	h float32
+}
+
+func layoutFixedV(h float32) *fixedVSpacer {
+	s := &fixedVSpacer{h: h}
+	s.ExtendBaseWidget(s)
+	return s
+}
+
+func (s *fixedVSpacer) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(container.NewStack())
+}
+
+func (s *fixedVSpacer) MinSize() fyne.Size { return fyne.NewSize(1, s.h) }
+
 // applyTheme swaps the light/dark theme and refreshes the window.
 // The Fyne theme is app-level, so it is only pushed to Fyne when the variant
 // actually changed — re-pushing it makes Fyne walk every open window's native
 // HWND (setDarkMode), which panics on windows that are not (yet) shown.
 var lastAppliedVariant int = -1
+
+// themeChangeHooks recolor custom-drawn surfaces after a light/dark switch.
+// Fyne auto-recolours its own widgets on SetTheme, but a bare canvas.Text /
+// canvas.Rectangle keeps the colour it was built with; such surfaces register a
+// recolor callback here. Callbacks are idempotent and safe to re-run even for
+// windows that are no longer visible.
+var themeChangeHooks []func()
+
+func onThemeChange(fn func()) { themeChangeHooks = append(themeChangeHooks, fn) }
 
 func applyTheme(w fyne.Window) {
 	variant := 0
@@ -60,6 +91,9 @@ func applyTheme(w fyne.Window) {
 	if w != nil {
 		w.Content().Refresh()
 	}
+	for _, fn := range themeChangeHooks {
+		fn()
+	}
 }
 
 // fitWindowToScreen re-applies size once the window is shown: Fyne sets the
@@ -69,8 +103,21 @@ func applyTheme(w fyne.Window) {
 // requested size is clamped to the monitor work area, then the window is
 // centred so it cannot open partly off-screen.
 func fitWindowToScreen(w fyne.Window, size fyne.Size) {
+	size = clampWindowSize(w.Canvas().Scale(), size)
+	// Once the native caption is stripped, a Fyne resize would re-add the
+	// removed margins around the canvas; resize the real window instead.
+	if chromeFitWindow(w, size) {
+		return
+	}
+	w.Resize(size)
+	w.CenterOnScreen()
+}
+
+// clampWindowSize limits a window content size to the primary monitor work
+// area, leaving room for the window frame and a visible margin.
+func clampWindowSize(scale float32, size fyne.Size) fyne.Size {
 	const margin = 48
-	if avail := screenWorkArea(w.Canvas().Scale()); avail.Width > 0 && avail.Height > 0 {
+	if avail := screenWorkArea(scale); avail.Width > 0 && avail.Height > 0 {
 		if maxW := avail.Width - margin; size.Width > maxW {
 			size.Width = maxW
 		}
@@ -78,8 +125,7 @@ func fitWindowToScreen(w fyne.Window, size fyne.Size) {
 			size.Height = maxH
 		}
 	}
-	w.Resize(size)
-	w.CenterOnScreen()
+	return size
 }
 
 // fitWindowWhenScaled applies the size immediately (so the first frame is not

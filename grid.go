@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,18 +29,25 @@ var (
 )
 
 const (
-	gutterWidth float32 = 52 // row-number gutter
-	rowHeight   float32 = 30
-	headerH     float32 = 30
-	minColWidth float32 = 96
+	gutterWidth   float32 = 52 // row-number gutter
+	rowHeight     float32 = 30
+	headerH       float32 = 30
+	minColWidth   float32 = 96
+	virtualBuffer int     = 6 // extra rows kept above/below the viewport
 )
 
 type dataTable struct {
 	widget.BaseWidget
 	data   *TableData
 	selRow int
+	selCol int // active cell within selRow; drawn with a focus ring
 	status *statusBar
 	hidden map[int]bool // column indices hidden by the Columns dialog
+
+	// manual column-width state: when frozen, colWidths holds the absolute pixel
+	// width of every column (0 for hidden); otherwise columns auto-fit the view.
+	frozen    bool
+	colWidths []float32
 
 	// editable-grid state (see edit.go)
 	window      fyne.Window
@@ -49,6 +57,7 @@ type dataTable struct {
 	pkCols      []int
 	dirty       map[int]map[int]*string // row -> col -> new value (nil = NULL)
 	deleted     map[int]bool            // rows marked for deletion
+	inserted    map[int]bool            // rows staged for insert (pending new rows)
 
 	// column sort state (TablePlus HeaderSort / HeaderSortDirection)
 	sortCol int
@@ -67,11 +76,18 @@ type dataTable struct {
 	onGoto    func(table, column, value string)
 	onPin     func() // optional: pin this result (query pane)
 
+	// keyboard/focus state: arrow-key row navigation + Ctrl+C copy of the
+	// selected row. focused is set by FocusGained/Lost; Ctrl+C is registered
+	// once per window canvas and guarded by it so only the active grid copies.
+	focused       bool
+	shortcutBound bool
+	hoverRow      int // row under the pointer for hover highlight (-1 = none)
+
 	rows *rowsWidget // the row area, kept so streamed rows can be appended
 }
 
 func newDataTable(d *TableData, status *statusBar) *dataTable {
-	t := &dataTable{data: d, status: status, selRow: -1, sortCol: -1}
+	t := &dataTable{data: d, status: status, selRow: -1, selCol: -1, sortCol: -1, hoverRow: -1}
 	t.ExtendBaseWidget(t)
 	t.Refresh() // populate header/cell text immediately (not just on theme apply)
 	return t
@@ -123,12 +139,15 @@ func (t *dataTable) visibleCount() int {
 func (t *dataTable) setData(d *TableData) {
 	t.data = d
 	t.selRow = -1
+	t.selCol = -1
 	t.sortCol = -1
 	t.sortAsc = true
 	t.findTerm = ""
 	t.findHits = nil
 	t.findHitSet = nil
 	t.findCur = 0
+	t.frozen = false
+	t.colWidths = nil
 	if t.rows != nil {
 		t.rows.rebuildRows()
 	}
@@ -327,10 +346,23 @@ func (t *dataTable) appendRows(rows [][]*string) {
 // sidebar can show the row's field values.
 func (t *dataTable) selectRow(i int) {
 	t.selRow = i
+	if t.window != nil && t.window.Canvas() != nil {
+		t.window.Canvas().Focus(t) // so arrow keys / Ctrl+C target this grid
+	}
 	t.Refresh()
+	if t.rows != nil {
+		t.rows.ensureVisible(i)
+	}
 	if t.onRowSelect != nil {
 		t.onRowSelect(i)
 	}
+}
+
+// selectCell moves the active-cell focus ring to (row, col) together with the
+// row highlight, so the cell a click / edit / copy targets reads at a glance.
+func (t *dataTable) selectCell(row, col int) {
+	t.selCol = col
+	t.selectRow(row)
 }
 
 // rowValues returns the effective values (pending edits applied) of one row.
@@ -357,6 +389,17 @@ func (t *dataTable) columnWidths(avail float32) []float32 {
 	if n == 0 {
 		return nil
 	}
+	if t.frozen {
+		out := make([]float32, n)
+		for i := range out {
+			if i < len(t.colWidths) {
+				out[i] = t.colWidths[i]
+			} else {
+				out[i] = minColWidth
+			}
+		}
+		return out
+	}
 	vis := t.visibleCount()
 	if vis == 0 {
 		vis = 1
@@ -381,6 +424,15 @@ func (t *dataTable) totalMinWidth() float32 {
 	if len(t.data.Cols) == 0 {
 		return gutterWidth + 100
 	}
+	if t.frozen {
+		var sum float32
+		for i := range t.data.Cols {
+			if i < len(t.colWidths) && !t.isHidden(i) {
+				sum += t.colWidths[i]
+			}
+		}
+		return gutterWidth + sum
+	}
 	vis := t.visibleCount()
 	if vis == 0 {
 		vis = 1
@@ -393,7 +445,70 @@ func (t *dataTable) CreateRenderer() fyne.WidgetRenderer {
 	rows := newRowsWidget(t)
 	t.rows = rows
 	inner := container.NewBorder(head, nil, nil, nil, rows)
+	t.bindGridShortcuts()
 	return widget.NewSimpleRenderer(container.NewHScroll(inner))
+}
+
+// ---- keyboard / focus ------------------------------------------------------
+
+// FocusGained/FocusLost/TypedRune/TypedKey make the grid focusable so arrow
+// keys and Ctrl+C reach it; only the focused grid's Ctrl+C acts.
+func (t *dataTable) FocusGained()   { t.focused = true }
+func (t *dataTable) FocusLost()     { t.focused = false }
+func (t *dataTable) TypedRune(rune) {}
+
+func (t *dataTable) TypedKey(e *fyne.KeyEvent) {
+	n := len(t.data.Rows)
+	if n == 0 {
+		return
+	}
+	cur := t.selRow
+	if cur < 0 {
+		cur = 0
+	}
+	switch e.Name {
+	case fyne.KeyUp:
+		if cur > 0 {
+			t.selectRow(cur - 1)
+		}
+	case fyne.KeyDown:
+		if cur < n-1 {
+			t.selectRow(cur + 1)
+		}
+	case fyne.KeyPageUp:
+		t.selectRow(max(0, cur-20))
+	case fyne.KeyPageDown:
+		t.selectRow(min(n-1, cur+20))
+	case fyne.KeyHome:
+		t.selectRow(0)
+	case fyne.KeyEnd:
+		t.selectRow(n - 1)
+	}
+}
+
+// bindGridShortcuts registers Ctrl+C once per window canvas to copy the
+// selected row (tab-separated, spreadsheet-pasteable).
+func (t *dataTable) bindGridShortcuts() {
+	if t.shortcutBound || t.window == nil || t.window.Canvas() == nil {
+		return
+	}
+	t.shortcutBound = true
+	t.window.Canvas().AddShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyC, Modifier: fyne.KeyModifierControl},
+		func(fyne.Shortcut) {
+			if t.focused && t.selRow >= 0 && t.selRow < len(t.data.Rows) {
+				t.copyText(t.rowTSV(t.selRow))
+			}
+		})
+}
+
+// rowTSV renders the selected row as tab-separated values for the clipboard.
+func (t *dataTable) rowTSV(row int) string {
+	vals := t.rowValues(row)
+	fields := make([]string, len(t.data.Cols))
+	for i := range t.data.Cols {
+		fields[i] = cellPlain(vals, i)
+	}
+	return strings.Join(fields, "	")
 }
 
 // ---------------------------------------------------------------------------
@@ -406,8 +521,11 @@ type headerWidget struct {
 	corner    *canvas.Text
 	labels    []*canvas.Text
 	seps      []*canvas.Rectangle
+	arrows    []*canvas.Text
 	titles    []string  // full column titles, fitted to the column on layout
 	colBounds []colSpan // visible column hit-test spans (local coords)
+	dragCol   int       // column whose right edge is being dragged (-1 = none)
+	hoverSep  bool      // pointer is over a column separator (resize cursor)
 }
 
 // colSpan records a visible column's horizontal extent and index for header
@@ -438,6 +556,10 @@ func (h *headerWidget) CreateRenderer() fyne.WidgetRenderer {
 		sep := canvas.NewRectangle(pal().line)
 		h.seps = append(h.seps, sep)
 		objs = append(objs, l, sep)
+		ar := canvas.NewText("", pal().gridHeaderFG)
+		ar.TextSize = 11
+		h.arrows = append(h.arrows, ar)
+		objs = append(objs, ar)
 	}
 	return &headerRenderer{h: h, objs: objs}
 }
@@ -463,6 +585,10 @@ func (r *headerRenderer) Layout(size fyne.Size) {
 			continue
 		}
 		lw := widths[i]
+		var arrowW float32
+		if r.h.t.sortCol == i && i < len(r.h.arrows) && r.h.arrows[i].Text != "" {
+			arrowW = r.h.arrows[i].MinSize().Width + 6
+		}
 		// Header text is clipped to its column too: with many columns the
 		// natural label width exceeds the column and the names would overlap.
 		full := ""
@@ -472,12 +598,17 @@ func (r *headerRenderer) Layout(size fyne.Size) {
 		if full == "" {
 			full = r.h.t.colTitle(i)
 		}
-		l.Text = fitCellText(full, lw-16, l.TextSize, l.TextStyle)
+		l.Text = fitCellText(full, lw-16-arrowW, l.TextSize, l.TextStyle)
 		lm := l.MinSize()
 		if isNumericType(r.h.t.data.Cols[i].Type) {
-			l.Move(fyne.NewPos(x+lw-14-lm.Width, (headerH-lm.Height)/2))
+			l.Move(fyne.NewPos(x+lw-14-arrowW-lm.Width, (headerH-lm.Height)/2))
 		} else {
 			l.Move(fyne.NewPos(x, (headerH-lm.Height)/2))
+		}
+		if i < len(r.h.arrows) {
+			am := r.h.arrows[i].MinSize()
+			r.h.arrows[i].Move(fyne.NewPos(x+lw-6-am.Width, (headerH-am.Height)/2))
+			r.h.arrows[i].Resize(fyne.NewSize(am.Width+2, headerH))
 		}
 		r.h.seps[i].Resize(fyne.NewSize(1, headerH-10))
 		r.h.seps[i].Move(fyne.NewPos(x+lw-1, 5))
@@ -498,6 +629,75 @@ func (h *headerWidget) Tapped(e *fyne.PointEvent) {
 			return
 		}
 	}
+}
+
+// columnAtX returns the index of the column whose right separator lies within a
+// few px of x, or -1. Used to pick which column a drag/resize is acting on.
+func (h *headerWidget) columnAtX(x float32) int {
+	widths := h.t.columnWidths(h.Size().Width)
+	cx := gutterWidth
+	for i := range widths {
+		if h.t.isHidden(i) {
+			continue
+		}
+		cx += widths[i]
+		if math.Abs(float64(x-cx)) <= 6 {
+			return i
+		}
+	}
+	return -1
+}
+
+// Dragged resizes the column under the pointer. The first move freezes the
+// current widths (so columns stop auto-fitting and stay where you put them);
+// later drags keep mutating the stored width and re-laying out live.
+func (h *headerWidget) Dragged(e *fyne.DragEvent) {
+	t := h.t
+	if h.dragCol < 0 {
+		h.dragCol = h.columnAtX(e.Position.X)
+		if h.dragCol < 0 {
+			return
+		}
+		if !t.frozen {
+			t.colWidths = t.columnWidths(h.Size().Width)
+			t.frozen = true
+		}
+	}
+	t.colWidths[h.dragCol] += e.Dragged.DX
+	if t.colWidths[h.dragCol] < minColWidth {
+		t.colWidths[h.dragCol] = minColWidth
+	}
+	t.Refresh()
+	t.Resize(t.Size())
+}
+
+func (h *headerWidget) DragEnd() { h.dragCol = -1 }
+
+func (h *headerWidget) MouseIn(*desktop.MouseEvent) { h.updateResizeCursor() }
+func (h *headerWidget) MouseOut()                   { h.hoverSep = false }
+func (h *headerWidget) MouseMoved(e *desktop.MouseEvent) {
+	h.hoverSep = h.columnAtX(e.Position.X) >= 0
+}
+
+// updateResizeCursor refreshes the resize cursor after MouseIn (which lacks a
+// position); the live position is handled by MouseMoved.
+func (h *headerWidget) updateResizeCursor() {}
+
+// Cursor shows a horizontal-resize pointer when hovering a column separator.
+func (h *headerWidget) Cursor() desktop.Cursor {
+	if h.hoverSep {
+		return desktop.HResizeCursor
+	}
+	return desktop.DefaultCursor
+}
+
+// DoubleTapped on the header resets every column back to auto-fit.
+func (h *headerWidget) DoubleTapped(*fyne.PointEvent) {
+	t := h.t
+	t.frozen = false
+	t.colWidths = nil
+	t.Refresh()
+	t.Resize(t.Size())
 }
 
 func (r *headerRenderer) MinSize() fyne.Size {
@@ -521,20 +721,29 @@ func (r *headerRenderer) Refresh() {
 		}
 		l.Show()
 		r.h.seps[i].Show()
-		title := r.h.t.colTitle(i)
-		if r.h.t.sortCol == i {
-			if r.h.t.sortAsc {
-				title += " ▲"
-			} else {
-				title += " ▼"
-			}
-		}
-		r.h.titles[i] = title
+		r.h.titles[i] = r.h.t.colTitle(i)
 		// TablePlus highlights primary-key column headers in gold.
 		if r.h.t.data.Cols[i].Key == "PK" {
 			l.Color = p.pkHeader
 		} else {
 			l.Color = p.gridHeaderFG
+		}
+		// Sort arrow is a separate glyph so a narrow column's ellipsis can never
+		// clip it (it used to be appended to the title text).
+		if i < len(r.h.arrows) {
+			if r.h.t.sortCol == i {
+				if r.h.t.sortAsc {
+					r.h.arrows[i].Text = "▲"
+				} else {
+					r.h.arrows[i].Text = "▼"
+				}
+				r.h.arrows[i].Color = l.Color
+				r.h.arrows[i].Show()
+			} else {
+				r.h.arrows[i].Text = ""
+				r.h.arrows[i].Hide()
+			}
+			r.h.arrows[i].Refresh()
 		}
 		l.Refresh()
 		r.h.seps[i].FillColor = p.gridLine
@@ -547,12 +756,58 @@ func (r *headerRenderer) Refresh() {
 func (r *headerRenderer) Destroy() {}
 
 // ---------------------------------------------------------------------------
-// rowsWidget: a vertically scrollable stack of pre-built rows.
+// rowsWidget: a vertically scrollable, windowed (virtualized) row view.
+//
+// Only the rows currently in (or near) the viewport exist as widgets — a small
+// pool is recycled as the user scrolls, instead of instantiating one widget per
+// data row. The scroll content holds an invisible "extent" rectangle sized to
+// the full result set (so the scrollbar range is correct) plus the recycled
+// pool, each pool row positioned at its true absolute y = dataIdx*rowHeight.
+// Fyne's scroll translates the whole content, so a pool row bound to data row K
+// naturally appears at screen y = K*rowHeight - offset.
+
+// extentWidget is an invisible spacer that reports the full scrollable size to
+// the scroll container through MinSize. A canvas.Rectangle reports a zero
+// MinSize and Container.MinSize() only takes the max of its children's MinSize
+// (not their positions), so the content used to measure one row tall — leaving
+// the mouse wheel and scrollbar with no range to move through.
+type extentWidget struct {
+	widget.BaseWidget
+	min fyne.Size
+}
+
+func newExtentWidget() *extentWidget {
+	e := &extentWidget{}
+	e.ExtendBaseWidget(e)
+	return e
+}
+
+func (e *extentWidget) MinSize() fyne.Size { return e.min }
+
+func (e *extentWidget) setSize(w, h float32) {
+	s := fyne.NewSize(w, h)
+	if s == e.min {
+		return
+	}
+	e.min = s
+	e.Resize(s)
+	e.Refresh()
+}
+
+func (e *extentWidget) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(canvas.NewRectangle(color.Transparent))
+}
 
 type rowsWidget struct {
 	widget.BaseWidget
-	t     *dataTable
-	inner *fyne.Container // VBox of all rows
+	t            *dataTable
+	scroll       *container.Scroll
+	content      *fyne.Container // AbsoluteLayout: extent + pool rows
+	extent       *extentWidget
+	pool         []*rowView
+	offsetY      float32
+	contentWidth float32
+	empty        *widget.Label // centered no-rows / loading overlay
 }
 
 func newRowsWidget(t *dataTable) *rowsWidget {
@@ -562,43 +817,207 @@ func newRowsWidget(t *dataTable) *rowsWidget {
 }
 
 func (rw *rowsWidget) CreateRenderer() fyne.WidgetRenderer {
-	rw.inner = container.NewVBox()
+	rw.contentWidth = rw.t.totalMinWidth()
+	rw.extent = newExtentWidget()
+	rw.content = container.NewWithoutLayout(rw.extent)
+	rw.scroll = container.NewVScroll(rw.content)
+	// Reposition the recycled pool whenever the user scrolls.
+	rw.scroll.OnScrolled = func(pos fyne.Position) {
+		rw.offsetY = pos.Y
+		rw.reposition()
+	}
+	rw.empty = widget.NewLabel("")
+	rw.empty.Alignment = fyne.TextAlignCenter
+	rw.empty.Wrapping = fyne.TextWrapWord
+	rw.empty.Importance = widget.LowImportance
+	stack := container.NewStack(rw.scroll, container.NewCenter(rw.empty))
 	rw.rebuildRows()
-	return widget.NewSimpleRenderer(container.NewVScroll(rw.inner))
+	return &rowsWidgetRenderer{rw: rw, stack: stack}
 }
 
-// rebuildRows recreates every row view, for when the data set (and possibly
-// the column list) changes wholesale.
+// rowsWidgetRenderer lays the scroll widget out to the allotted size and keeps
+// the recycled pool in sync on every resize/refresh.
+type rowsWidgetRenderer struct {
+	rw    *rowsWidget
+	stack *fyne.Container
+}
+
+func (r *rowsWidgetRenderer) Objects() []fyne.CanvasObject { return []fyne.CanvasObject{r.stack} }
+func (r *rowsWidgetRenderer) Destroy()                     {}
+func (r *rowsWidgetRenderer) MinSize() fyne.Size           { return r.rw.MinSize() }
+
+func (r *rowsWidgetRenderer) Layout(size fyne.Size) {
+	r.stack.Resize(size)
+	r.rw.reposition()
+}
+
+func (r *rowsWidgetRenderer) Refresh() { r.rw.reposition() }
+
+// rebuildRows resets the recycled pool for a wholesale data (or column) change
+// and rebuilds the visible window from scratch.
 func (rw *rowsWidget) rebuildRows() {
-	if rw.inner == nil {
-		return
+	rw.pool = nil
+	rw.offsetY = 0
+	if rw.scroll != nil {
+		rw.scroll.ScrollToTop()
 	}
-	rw.inner.Objects = rw.inner.Objects[:0]
-	for i := range rw.t.data.Rows {
-		rw.inner.Objects = append(rw.inner.Objects, newRowView(rw.t, i))
+	if rw.content != nil {
+		rw.content.Objects = rw.content.Objects[:0]
+		rw.content.Add(rw.extent)
 	}
-	rw.inner.Refresh()
+	rw.reposition()
 }
 
-// syncRows brings the row views in line with the data: streamed batches add
-// views at the end, a shrinking data set drops the surplus. Rows keep their
-// positional index, so no view needs rebuilding on reorder.
+// syncRows brings the visible window in line with the data after a streamed
+// batch or a shrink: the pool is (re)bound in reposition(), so nothing here but
+// a re-layout is needed.
 func (rw *rowsWidget) syncRows() {
-	if rw.inner == nil {
+	rw.reposition()
+}
+
+// ensureVisible scrolls the given data row into view (arrow-key navigation),
+// so the selection never moves off-screen.
+func (rw *rowsWidget) ensureVisible(idx int) {
+	if rw.scroll == nil || idx < 0 {
 		return
 	}
-	n := len(rw.t.data.Rows)
-	if n < len(rw.inner.Objects) {
-		rw.inner.Objects = rw.inner.Objects[:n]
+	vpH := rw.scroll.Size().Height
+	if vpH <= 0 {
+		vpH = 600
 	}
-	for i := len(rw.inner.Objects); i < n; i++ {
-		rw.inner.Objects = append(rw.inner.Objects, newRowView(rw.t, i))
+	top := float32(idx) * rowHeight
+	bottom := top + rowHeight
+	off := rw.offsetY
+	if top < off {
+		off = top
+	} else if bottom > off+vpH {
+		off = bottom - vpH
 	}
-	rw.inner.Refresh()
+	if off < 0 {
+		off = 0
+	}
+	if off != rw.offsetY {
+		rw.offsetY = off
+		rw.scroll.Offset.Y = off
+		rw.scroll.Refresh()
+	}
+	rw.reposition()
 }
 
 func (rw *rowsWidget) MinSize() fyne.Size {
 	return fyne.NewSize(rw.t.totalMinWidth(), rowHeight*4)
+}
+
+// reposition (re)binds the recycled pool to the data rows currently in view.
+// It is safe to call on scroll, resize and data changes.
+func (rw *rowsWidget) reposition() {
+	if rw.content == nil || rw.extent == nil {
+		return
+	}
+	n := len(rw.t.data.Rows)
+	width := rw.t.totalMinWidth()
+	if vp := rw.scroll.Size().Width; vp > width {
+		width = vp
+	}
+	rw.contentWidth = width
+	rw.extent.setSize(width, float32(n)*rowHeight)
+
+	if n == 0 || len(rw.t.data.Cols) == 0 {
+		for _, rv := range rw.pool {
+			rv.Hide()
+		}
+		if rw.empty != nil {
+			if len(rw.t.data.Cols) == 0 {
+				rw.empty.SetText("加载中…")
+			} else {
+				rw.empty.SetText("暂无数据")
+			}
+			rw.empty.Show()
+		}
+		return
+	}
+	if rw.empty != nil {
+		rw.empty.Hide()
+	}
+
+	vpH := int(rw.scroll.Size().Height)
+	if vpH <= 0 {
+		vpH = 600 // pre-layout fallback; corrected on first Layout
+	}
+	first, last := visibleWindow(int(rw.offsetY), vpH, int(rowHeight), n, virtualBuffer)
+	poolSize := last - first + 1
+	if poolSize < 1 {
+		poolSize = 1
+	}
+
+	// Grow the pool if the viewport now needs more row views than we have.
+	for len(rw.pool) < poolSize {
+		rv := newRowView(rw.t, 0)
+		rw.content.Add(rv)
+		rw.pool = append(rw.pool, rv)
+	}
+	// Hide surplus pool entries (e.g. after the result set shrank).
+	for k := poolSize; k < len(rw.pool); k++ {
+		rw.pool[k].Hide()
+	}
+
+	for k := 0; k < poolSize; k++ {
+		idx := first + k
+		rv := rw.pool[k]
+		if idx >= n {
+			rv.Hide()
+			continue
+		}
+		if rv.idx != idx {
+			rv.bindIndex(idx)
+		} else {
+			rv.Refresh() // pick up hidden-column / selection / dirty updates
+		}
+		rv.Resize(fyne.NewSize(width, rowHeight))
+		rv.Move(fyne.NewPos(0, float32(idx)*rowHeight))
+		rv.Show()
+	}
+}
+
+// visibleWindow returns the inclusive [first,last] range of data rows that the
+// recycled pool must cover for a scroll offset of offsetY within a viewport of
+// viewportH pixels, given row height rowH, total row count count and a buffer
+// of extra rows kept above/below. Pure and unit-tested.
+func visibleWindow(offsetY, viewportH, rowH, count, buffer int) (first, last int) {
+	if count <= 0 || rowH <= 0 {
+		return 0, -1
+	}
+	vis := (viewportH + rowH - 1) / rowH // ceil(viewportH/rowH)
+	if vis < 1 {
+		vis = 1
+	}
+	poolSize := vis + 2*buffer
+	if poolSize < 1 {
+		poolSize = 1
+	}
+
+	first = offsetY / rowH
+	if first < 0 {
+		first = 0
+	}
+	first -= buffer
+	if first < 0 {
+		first = 0
+	}
+
+	last = first + poolSize - 1
+	if last >= count {
+		// Scrolled past the end: pin the window to the bottom poolSize rows.
+		last = count - 1
+		first = last - poolSize + 1
+		if first < 0 {
+			first = 0
+		}
+	}
+	if last < first {
+		last = first // safety net (e.g. empty window)
+	}
+	return first, last
 }
 
 // ---------------------------------------------------------------------------
@@ -626,6 +1045,28 @@ func newRowView(t *dataTable, i int) *rowView {
 
 func (rv *rowView) Tapped(*fyne.PointEvent) {
 	rv.t.selectRow(rv.idx)
+}
+
+// bindIndex rebinds this (recycled) row view to a different data row. The cells
+// read their values from t.data at (row,col) on refresh, so re-pointing the
+// stored index and refreshing is enough — no widget rebuild needed. Used by the
+// virtualized rowsWidget, which keeps a small pool of row views and reuses them
+// for whatever slice of the data is currently in view.
+func (rv *rowView) bindIndex(idx int) {
+	if len(rv.cells) != len(rv.t.data.Cols) {
+		// Column set changed (setData with a different table): rebuild cells.
+		n := len(rv.t.data.Cols)
+		rv.cells = make([]*cellView, n)
+		for ci := 0; ci < n; ci++ {
+			rv.cells[ci] = newCellView(rv.t, ci, idx)
+		}
+	} else {
+		for _, c := range rv.cells {
+			c.row = idx
+		}
+	}
+	rv.idx = idx
+	rv.Refresh()
 }
 
 // TappedSecondary pops the copy / IN-clause context menu for the row.
@@ -656,6 +1097,22 @@ func (rv *rowView) colAtX(x float32) int {
 }
 
 func (rv *rowView) Cursor() desktop.Cursor { return desktop.DefaultCursor }
+
+// MouseIn/Out drive the row hover highlight via dataTable.hoverRow, read by the
+// gutter and cell renderers.
+func (rv *rowView) MouseIn(*desktop.MouseEvent) {
+	if rv.t.hoverRow != rv.idx {
+		rv.t.hoverRow = rv.idx
+		rv.t.Refresh()
+	}
+}
+func (rv *rowView) MouseMoved(*desktop.MouseEvent) {}
+func (rv *rowView) MouseOut() {
+	if rv.t.hoverRow == rv.idx {
+		rv.t.hoverRow = -1
+		rv.t.Refresh()
+	}
+}
 
 func (rv *rowView) CreateRenderer() fyne.WidgetRenderer {
 	rv.gut = canvas.NewText(fmt.Sprintf("%d", rv.idx+1), pal().gridNullFG)
@@ -705,13 +1162,16 @@ func (r *rowViewRenderer) Refresh() {
 	r.rv.gut.Text = fmt.Sprintf("%d", r.rv.idx+1)
 	p := pal()
 	if r.rv.idx == r.rv.t.selRow {
-		r.rv.gut.Color = p.gridHeaderFG
+		r.rv.gut.Color = p.selFG // white row number on the blue selection
 	} else {
 		r.rv.gut.Color = p.gridNullFG
 	}
 	r.rv.gutBG.FillColor = p.gutterBG
-	if r.rv.idx == r.rv.t.selRow {
+	switch {
+	case r.rv.idx == r.rv.t.selRow:
 		r.rv.gutBG.FillColor = p.gridRowSelectBG
+	case r.rv.idx == r.rv.t.hoverRow:
+		r.rv.gutBG.FillColor = p.gridRowHoverBG
 	}
 	r.rv.topLine.FillColor = p.gridLine
 	r.rv.gut.Refresh()
@@ -749,13 +1209,17 @@ func (cv *cellView) CreateRenderer() fyne.WidgetRenderer {
 	bg := canvas.NewRectangle(color.Transparent)
 	text := canvas.NewText("", pal().gridCellFG)
 	text.TextSize = 12
-	return &cellRenderer{cv: cv, bg: bg, text: text}
+	ring := canvas.NewRectangle(color.Transparent)
+	ring.StrokeWidth = 2
+	ring.Hide()
+	return &cellRenderer{cv: cv, bg: bg, text: text, ring: ring}
 }
 
 type cellRenderer struct {
 	cv   *cellView
 	bg   *canvas.Rectangle
 	text *canvas.Text
+	ring *canvas.Rectangle // active-cell focus outline
 
 	// fit cache: the value before clipping, the width it was fitted to and the
 	// style used. A repaint with the same values skips re-measuring.
@@ -766,12 +1230,13 @@ type cellRenderer struct {
 }
 
 func (r *cellRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.bg, r.text}
+	return []fyne.CanvasObject{r.bg, r.text, r.ring}
 }
 
 func (r *cellRenderer) Layout(size fyne.Size) {
 	r.bg.Resize(fyne.NewSize(size.Width-1, size.Height))
 	r.text.Resize(fyne.NewSize(size.Width-24, size.Height))
+	r.ring.Resize(fyne.NewSize(size.Width-1, size.Height-1))
 	r.fitText()
 }
 
@@ -839,6 +1304,9 @@ func (r *cellRenderer) Refresh() {
 	if edited {
 		r.text.Color = p.cellEdited
 	}
+	if cv.row == cv.t.selRow {
+		r.text.Color = p.selFG // white values on the blue selected row
+	}
 	if numeric && !isNull {
 		r.text.Alignment = fyne.TextAlignTrailing
 	} else {
@@ -856,6 +1324,10 @@ func (r *cellRenderer) Refresh() {
 		r.bg.FillColor = p.rowDeletedBG
 	case cv.row == cv.t.selRow:
 		r.bg.FillColor = p.gridRowSelectBG
+	case cv.t.inserted[cv.row]:
+		r.bg.FillColor = p.rowNewBG
+	case cv.row == cv.t.hoverRow:
+		r.bg.FillColor = p.gridRowHoverBG
 	case cv.t.isFindHit(cv.row, cv.col):
 		r.bg.FillColor = findHighlightBG
 	case cv.row%2 == 1:
@@ -863,8 +1335,15 @@ func (r *cellRenderer) Refresh() {
 	default:
 		r.bg.FillColor = color.Transparent
 	}
+	if cv.t.selRow >= 0 && cv.row == cv.t.selRow && cv.col == cv.t.selCol {
+		r.ring.StrokeColor = p.accent // active-cell focus outline
+		r.ring.Show()
+	} else {
+		r.ring.Hide()
+	}
 	r.bg.Refresh()
 	r.text.Refresh()
+	r.ring.Refresh()
 }
 
 // Tapped follows Query-Magics links (link / email / goto); plain taps fall
@@ -877,13 +1356,19 @@ func (cv *cellView) Tapped(e *fyne.PointEvent) {
 			return
 		}
 	}
-	cv.t.selectRow(cv.row)
+	cv.t.selectCell(cv.row, cv.col)
 }
 
-// DoubleTapped opens the cell editor when the grid is in edit mode.
+// DoubleTapped opens the cell editor when the grid is in edit mode; in
+// read-only mode it opens the value viewer (Quick Look) so a JSON/text/blob
+// cell can be inspected and copied without first entering edit mode.
 func (cv *cellView) DoubleTapped(*fyne.PointEvent) {
 	if cv.t.editable {
 		cv.t.beginEdit(cv.row, cv.col)
+		return
+	}
+	if cv.t.window != nil {
+		cv.t.quickLook(cv.row, cv.col)
 	}
 }
 

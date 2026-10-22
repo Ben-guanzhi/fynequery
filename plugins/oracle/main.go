@@ -126,6 +126,14 @@ func (oraDialect) BrowseSQL(table string, limit int) string {
 	return fmt.Sprintf("SELECT * FROM %s FETCH FIRST %d ROWS ONLY", quoteOra(table), limit)
 }
 
+// CreateDatabase is intentionally unsupported: Oracle databases are created via
+// DBCA or DBA tooling, not from an ordinary client session. We report this
+// clearly so the UI can surface a helpful message rather than a confusing
+// driver failure.
+func (oraDialect) CreateDatabase(db *sql.DB, name, charset, collation string) error {
+	return fmt.Errorf("oracle does not support creating databases from a client session; use DBCA or your DBA tooling")
+}
+
 func quoteOra(name string) string {
 	escaped := ""
 	for _, r := range name {

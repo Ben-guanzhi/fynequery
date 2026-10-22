@@ -40,13 +40,14 @@ type Response struct {
 
 // Method names.
 const (
-	MethodMeta    = "meta"
-	MethodOpen    = "open"
-	MethodClose   = "close"
-	MethodTables  = "tables"
-	MethodColumns = "columns"
-	MethodQuery   = "query"
-	MethodBrowse  = "browse"
+	MethodMeta     = "meta"
+	MethodOpen     = "open"
+	MethodClose    = "close"
+	MethodTables   = "tables"
+	MethodColumns  = "columns"
+	MethodQuery    = "query"
+	MethodBrowse   = "browse"
+	MethodCreateDB = "createDatabase"
 )
 
 // ConnectParams carries everything needed to open one database connection.
@@ -138,4 +139,13 @@ type BrowseParams struct {
 	ConnID string `json:"connId"`
 	Table  string `json:"table"`
 	Limit  int    `json:"limit"`
+}
+
+// CreateDBParams creates a new database/schema on the server. Charset/collation
+// are dialect-specific and optional; the plugin validates and quotes them.
+type CreateDBParams struct {
+	ConnID    string `json:"connId"`
+	Name      string `json:"name"`
+	Charset   string `json:"charset,omitempty"`
+	Collation string `json:"collation,omitempty"`
 }

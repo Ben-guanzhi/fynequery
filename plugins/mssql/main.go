@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net"
@@ -166,6 +167,22 @@ func (msDialect) BrowseSQL(table string, limit int) string {
 	// [] is not standard SQL but is the SQL Server quote character.
 	quoted := strings.ReplaceAll(table, "]", "]]")
 	return fmt.Sprintf("SELECT TOP (%d) * FROM [%s]", limit, quoted)
+}
+
+// CreateDatabase creates a new SQL Server database. CREATE DATABASE cannot run
+// inside a user transaction, so it is issued on a dedicated connection.
+func (msDialect) CreateDatabase(db *sql.DB, name, _, _ string) error {
+	quoted := strings.ReplaceAll(name, "]", "]]")
+	q := "CREATE DATABASE [" + quoted + "]"
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("sqlserver create database: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), q); err != nil {
+		return fmt.Errorf("sqlserver create database %q: %w", name, err)
+	}
+	return nil
 }
 
 func scanStrings(db *sql.DB, query string, args ...interface{}) ([]string, error) {

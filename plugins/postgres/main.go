@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net"
@@ -160,6 +161,21 @@ func scanStrings(db *sql.DB, query string, args ...interface{}) ([]string, error
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// CreateDatabase creates a new PostgreSQL database. CREATE DATABASE must not run
+// inside a transaction, so it is executed on a dedicated connection.
+func (pgDialect) CreateDatabase(db *sql.DB, name, _, _ string) error {
+	q := "CREATE DATABASE " + quotePG(name)
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("postgres create database: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), q); err != nil {
+		return fmt.Errorf("postgres create database %q: %w", name, err)
+	}
+	return nil
 }
 
 func main() { pluginkit.Main(pgDialect{}) }

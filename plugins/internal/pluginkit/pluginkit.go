@@ -33,6 +33,11 @@ type Dialect interface {
 	ListColumns(db *sql.DB, table string) ([]proto.ColumnInfo, error)
 	// BrowseSQL builds a "first N rows of table" statement in the dialect.
 	BrowseSQL(table string, limit int) string
+	// CreateDatabase creates a new database/schema on the server using the
+	// already-opened connection handle. Returns an error for engines that
+	// cannot create databases from an ordinary session (e.g. Oracle) so the UI
+	// can surface a clear message.
+	CreateDatabase(db *sql.DB, name, charset, collation string) error
 }
 
 // Main runs the plugin until the host closes stdin. Never returns.
@@ -196,4 +201,13 @@ func (h *handler) Browse(p proto.BrowseParams) (proto.QueryResult, error) {
 		p.Limit = 1000
 	}
 	return sqlkit.Run(handle, h.dialect.BrowseSQL(p.Table, p.Limit), p.Limit)
+}
+
+// CreateDatabase looks up the opened connection and delegates to the dialect.
+func (h *handler) CreateDatabase(p proto.CreateDBParams) error {
+	handle, err := h.conn(p.ConnID)
+	if err != nil {
+		return err
+	}
+	return h.dialect.CreateDatabase(handle, p.Name, p.Charset, p.Collation)
 }

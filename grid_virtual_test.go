@@ -41,30 +41,39 @@ func TestAppendRowsStreaming(t *testing.T) {
 }
 
 // TestAppendRowsSyncsRowViews pins that streaming a batch into a grid whose
-// renderer was built while the result was still empty also creates the row
-// views. The query pane paints an empty grid, then appends batches; without
-// this the header showed 41 columns and 100 rows but the body stayed blank.
+// renderer was built while the result was still empty also makes the rows
+// reachable through the recycled windowing pool. The query pane paints an empty
+// grid, then appends batches; without this the header showed columns and rows
+// but the body stayed blank.
 func TestAppendRowsSyncsRowViews(t *testing.T) {
 	s := str
 	test.NewApp()
 	g := newDataTable(&TableData{Cols: []ColumnInfo{{Name: "id", Type: "int"}}}, nil)
 	rw := newRowsWidget(g)
-	rw.inner = container.NewVBox()
+	rw.CreateRenderer() // build the scroll/content/pool scaffolding directly
 	g.rows = rw
 
 	g.appendRows([][]*string{{s("1")}, {s("2")}})
-	if got := len(rw.inner.Objects); got != 2 {
-		t.Fatalf("row views after batch 1 = %d, want 2", got)
+	if len(rw.pool) < 2 {
+		t.Fatalf("pool size after batch 1 = %d, want >= 2", len(rw.pool))
+	}
+	if rw.pool[0].idx != 0 || rw.pool[1].idx != 1 {
+		t.Fatalf("pool indices after batch 1 = %d,%d want 0,1", rw.pool[0].idx, rw.pool[1].idx)
 	}
 	g.appendRows([][]*string{{s("3")}})
-	if got := len(rw.inner.Objects); got != 3 {
-		t.Fatalf("row views after batch 2 = %d, want 3", got)
+	if len(rw.pool) < 3 {
+		t.Fatalf("pool size after batch 2 = %d, want >= 3", len(rw.pool))
 	}
-	// A rebuilt renderer must materialise the rows it now has.
-	rw.inner = container.NewVBox()
+	if rw.pool[2].idx != 2 {
+		t.Fatalf("pool[2].idx = %d want 2", rw.pool[2].idx)
+	}
+	// A rebuilt renderer must re-create the pool covering the rows it now has.
 	rw.rebuildRows()
-	if got := len(rw.inner.Objects); got != 3 {
-		t.Fatalf("row views after rebuild = %d, want 3", got)
+	if len(rw.pool) < 3 {
+		t.Fatalf("pool size after rebuild = %d, want >= 3", len(rw.pool))
+	}
+	if rw.pool[0].idx != 0 || rw.pool[2].idx != 2 {
+		t.Fatalf("pool indices after rebuild = %d..%d want 0..2", rw.pool[0].idx, rw.pool[2].idx)
 	}
 }
 

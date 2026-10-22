@@ -18,6 +18,7 @@ func (nilMapDialect) Open(proto.ConnectParams) (*sql.DB, string, error)       { 
 func (nilMapDialect) ListTables(*sql.DB) ([]proto.ObjectInfo, error)          { return nil, nil }
 func (nilMapDialect) ListColumns(*sql.DB, string) ([]proto.ColumnInfo, error) { return nil, nil }
 func (nilMapDialect) BrowseSQL(string, int) string                            { return "" }
+func (nilMapDialect) CreateDatabase(*sql.DB, string, string, string) error    { return nil }
 
 // TestNewHandlerInitializesMaps guards against the crash where Open wrote to
 // handler.server/conns before they were allocated ("assignment to entry in nil

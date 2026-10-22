@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"fynequery/icons"
 	"sort"
 	"strings"
 
@@ -14,7 +15,6 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
-	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -82,7 +82,7 @@ func (ws *workspace) showQuickOpen() {
 	entry.OnSubmitted = func(string) { runSearch() }
 
 	buttons := container.NewHBox(
-		widget.NewButtonWithIcon("搜索", theme.SearchIcon(), runSearch),
+		widget.NewButtonWithIcon("搜索", icons.Search, runSearch),
 		layout.NewSpacer(),
 	)
 	content := container.NewBorder(
@@ -135,7 +135,9 @@ func (ws *workspace) runAction(action string) {
 	case "new-query":
 		ws.addQueryTab()
 	case "open-db":
-		ws.openDatabasePicker()
+		// Palette path has no pill tap to anchor to; drop the sheet under the
+		// toolbar's left edge instead.
+		ws.openDatabasePicker(fyne.NewPos(120, 40))
 	case "refresh":
 		ws.reloadTable()
 	case "theme":
@@ -292,11 +294,11 @@ func (ws *workspace) jumpToMatch(m objectMatch) {
 	}
 }
 
-// queryTabIndex returns the 1-based tab index of a query pane, or -1.
+// queryTabIndex returns the strip index of a query pane, or -1.
 func (ws *workspace) queryTabIndex(qp *queryPane) int {
-	for i, p := range ws.queryTabs {
-		if p == qp {
-			return i + 1
+	for i, d := range ws.docs {
+		if d.kind == docQuery && d.qp == qp {
+			return i
 		}
 	}
 	return -1

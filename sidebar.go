@@ -5,6 +5,7 @@ package main
 // at the bottom.
 
 import (
+	"fynequery/icons"
 	"image/color"
 	"sort"
 	"strings"
@@ -50,16 +51,23 @@ type sidebar struct {
 	objects     []TableInfo  // full inventory from the session
 	filtered    []TableInfo  // after search filter
 	database    string
+	selID       string // currently selected tree node id (drives white-on-blue rows)
 	history     []string
 	loaded      bool
-	noDB        bool            // true until a database is selected (shows the prompt)
-	pinned      map[string]bool // table names pinned to the top of the tree
+	loadErr     string            // last inventory load error ("" = none)
+	noDB        bool              // true until a database is selected (shows the prompt)
+	pinned      map[string]bool   // table names pinned to the top of the tree
+	searchClear fyne.CanvasObject // "x" clears the search box (shown when non-empty)
 }
 
 func newSidebar(onSelect func(string), onNewQuery func()) *sidebar {
 	s := &sidebar{onSelect: onSelect, onNewQuery: onNewQuery}
 	s.queriesPane = container.NewStack()
 	s.body = &sidebarBody{s: s}
+	// Without ExtendBaseWidget the body's super() stays nil, so BaseWidget.Resize
+	// returns before laying out the inner stack and the tree never widens with
+	// the sidebar (table names truncate against free space).
+	s.body.ExtendBaseWidget(s.body)
 	s.ExtendBaseWidget(s)
 	s.refreshQueries() // build the initial (likely empty) 查询 tab
 	return s
@@ -117,6 +125,7 @@ func (s *sidebar) setInventory(objs []TableInfo, database string) {
 	s.objects = objs
 	s.database = database
 	s.loaded = true
+	s.loadErr = ""
 	s.noDB = false
 	if s.searchWrap != nil {
 		s.searchWrap.Show()
@@ -156,6 +165,7 @@ func (s *sidebar) historyItems() []string {
 func (s *sidebar) setNoDatabase() {
 	s.noDB = true
 	s.loaded = false
+	s.loadErr = ""
 	s.objects = nil
 	s.filtered = nil
 	s.database = ""
@@ -173,27 +183,41 @@ func (s *sidebar) setNoDatabase() {
 	s.Refresh()
 }
 
+// setLoadError records a failed inventory load so the tree area shows the
+// error instead of spinning on "加载中…" forever.
+func (s *sidebar) setLoadError(msg string) {
+	s.loadErr = msg
+	s.loaded = true
+	s.noDB = false
+	s.Refresh()
+}
+
+// treeStatusText returns the overlay text (and whether to show it) for the
+// items tree in place of a bare empty group list: a load error, loading, an
+// empty database, or a no-match search.
+func (s *sidebar) treeStatusText() (string, bool) {
+	if s.loadErr != "" {
+		return "加载失败：" + s.loadErr, true
+	}
+	if !s.loaded {
+		return "加载中…", true
+	}
+	q := ""
+	if s.search != nil {
+		q = strings.TrimSpace(s.search.Text)
+	}
+	if q != "" && len(s.filtered) == 0 {
+		return "无匹配「" + q + "」", true
+	}
+	if len(s.objects) == 0 {
+		return "此数据库暂无表", true
+	}
+	return "", false
+}
+
 func (s *sidebar) hasViews() bool {
 	for _, o := range s.filtered {
 		if o.Kind == "view" {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *sidebar) hasTables() bool {
-	for _, o := range s.filtered {
-		if o.Kind == "table" {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *sidebar) hasFunctions() bool {
-	for _, o := range s.filtered {
-		if o.Kind == "function" {
 			return true
 		}
 	}
@@ -241,6 +265,24 @@ func (s *sidebar) applyFilter() {
 	})
 }
 
+// leafIcon picks a light, type-specific glyph so tables, views and functions
+// read apart at a glance without the heavy solid database cylinder.
+func (s *sidebar) leafIcon(name string) fyne.Resource {
+	for _, o := range s.filtered {
+		if o.Name != name {
+			continue
+		}
+		switch o.Kind {
+		case "function":
+			return icons.Function
+		case "view":
+			return icons.View
+		}
+		break
+	}
+	return icons.Table
+}
+
 func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 	// mode switcher: 项目 | 查询 | 历史记录, as left-aligned pills.
 	itemsBtn := newSideModeButton("项目", func() { s.setMode(sidebarItems) })
@@ -260,13 +302,25 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 
 	s.search = widget.NewEntry()
 	s.search.PlaceHolder = "搜索表..."
+	sc := newToolButton(icons.Cancel, func() { s.search.SetText("") })
+	sc.small = true
+	s.searchClear = sc
+	s.searchClear.Hide()
 	s.search.OnChanged = func(string) {
+		if s.searchClear != nil {
+			if s.search.Text != "" {
+				s.searchClear.Show()
+			} else {
+				s.searchClear.Hide()
+			}
+		}
 		if s.loaded {
 			s.applyFilter()
 			s.tree.Refresh()
 		}
+		s.Refresh()
 	}
-	searchRow := container.NewBorder(nil, nil, widget.NewIcon(theme.SearchIcon()), nil, s.search)
+	searchRow := container.NewBorder(nil, nil, widget.NewIcon(icons.Search), s.searchClear, s.search)
 	s.searchWrap = container.NewPadded(searchRow)
 	if !s.loaded {
 		s.searchWrap.Hide()
@@ -311,6 +365,8 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 		func(branch bool) fyne.CanvasObject {
 			it := newTreeItem()
 			it.onSecondary = s.onItemMenu
+			// A row paints white text when it carries the current selection.
+			it.isSel = func() bool { return s.selID == it.id && it.id != "" }
 			// treeItem is the deepest object under the pointer and implements
 			// SecondaryTappable, so Fyne's hit test stops here. Without a
 			// primary Tapped handler the click would be swallowed and never
@@ -329,16 +385,19 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 			}
 			it.id = id
 			if isBranch(id) {
-				it.icon.Resource = theme.FolderOpenIcon()
-				it.label.SetText(branchLabel(id))
+				it.icon.Resource = icons.Folder
+				it.setText(branchLabel(id))
 			} else {
-				it.icon.Resource = theme.StorageIcon()
-				it.label.SetText(id)
+				it.icon.Resource = s.leafIcon(id)
+				it.setText(id)
 			}
 			it.icon.Refresh()
+			it.Refresh()
 		},
 	)
 	s.tree.OnSelected = func(id string) {
+		s.selID = id
+		s.tree.Refresh() // repaint so the row's white-on-blue text follows
 		if !isBranch(id) && s.onSelect != nil {
 			s.onSelect(id)
 		}
@@ -369,7 +428,7 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 	body := s.body
 
 	root := container.NewBorder(
-		container.NewVBox(modeRow, s.searchWrap),
+		container.NewVBox(container.NewPadded(modeRow), s.searchWrap),
 		s.schemaWrap,
 		nil, nil,
 		container.NewStack(body),
@@ -438,8 +497,9 @@ func (s *sidebar) setMode(m sidebarMode) {
 // sidebarBody switches between the tree, the queries list and history text.
 type sidebarBody struct {
 	widget.BaseWidget
-	s     *sidebar
-	stack *fyne.Container
+	s      *sidebar
+	stack  *fyne.Container
+	status *widget.Label
 	treeWrap,
 	queries,
 	history,
@@ -453,11 +513,15 @@ func (b *sidebarBody) CreateRenderer() fyne.WidgetRenderer {
 		fyne.TextAlignCenter, fyne.TextStyle{})
 	noDB.Wrapping = fyne.TextWrapWord
 	noDB.Importance = widget.LowImportance
+	status := widget.NewLabelWithStyle("", fyne.TextAlignCenter, fyne.TextStyle{})
+	status.Wrapping = fyne.TextWrapWord
+	status.Importance = widget.LowImportance
 	b.queries = b.s.queriesPane // live saved-query panel (rebuilt on demand)
 	b.history = history
 	b.noDB = noDB
+	b.status = status
 	b.treeWrap = container.NewPadded(b.s.tree)
-	b.stack = container.NewStack(b.treeWrap, b.queries, b.history, container.NewCenter(noDB))
+	b.stack = container.NewStack(b.treeWrap, b.queries, b.history, container.NewCenter(noDB), container.NewCenter(status))
 	b.applyPane() // establish the initially visible pane
 	return widget.NewSimpleRenderer(b.stack)
 }
@@ -477,6 +541,15 @@ func (b *sidebarBody) applyPane() {
 	}
 	if b.s.noDB {
 		idx = 3 // "未选择数据库" prompt
+	} else if idx == 0 {
+		// Items (tree) mode: surface loading / error / empty / no-match states
+		// instead of a bare, ambiguous empty group list.
+		if txt, show := b.s.treeStatusText(); show {
+			if b.status != nil {
+				b.status.SetText(txt)
+			}
+			idx = 4
+		}
 	}
 	for i, o := range b.stack.Objects {
 		if i == idx {
@@ -515,28 +588,86 @@ func (b *sidebarBody) Refresh() {
 // treeItem is one row of the Items tree. It renders an icon + label like
 // Fyne's default node, and implements fyne.Tappable / fyne.SecondaryTappable
 // so both a left click (open/select) and a right click (context menu) work.
+// The label is a canvas.Text (not widget.Label) so the row can paint white
+// text over the blue selection highlight; clipping to the row width replaces
+// widget.Label's ellipsis truncation.
 type treeItem struct {
 	widget.BaseWidget
 	id          string
+	text        string // raw (unclipped) label
 	icon        *canvas.Image
-	label       *widget.Label
+	label       *canvas.Text
 	onTap       func(id string)
 	onSecondary func(id string, pos fyne.Position)
+	isSel       func() bool // whether this row carries the tree selection
 }
 
 func newTreeItem() *treeItem {
 	it := &treeItem{
 		icon:  canvas.NewImageFromResource(theme.StorageIcon()),
-		label: widget.NewLabel("template"),
+		label: canvas.NewText("template", pal().foreground),
 	}
 	it.icon.SetMinSize(fyne.NewSize(16, 16))
-	it.label.Truncation = fyne.TextTruncateEllipsis
+	// Border stretches the left slot to the full row height; Contain keeps the
+	// glyph square and centred instead of smearing it into a vertical blob.
+	it.icon.FillMode = canvas.ImageFillContain
+	it.icon.Translucency = 0.35 // fade the glyph so it reads as a hint, not a blob
+	it.label.TextSize = 13
 	it.ExtendBaseWidget(it)
 	return it
 }
 
+// setText stores the raw label and repaints (clipping happens in Layout).
+func (it *treeItem) setText(s string) {
+	if it.text != s {
+		it.text = s
+		it.Refresh()
+	}
+}
+
 func (it *treeItem) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(container.NewBorder(nil, nil, it.icon, nil, it.label))
+	return &treeItemRenderer{it: it}
+}
+
+type treeItemRenderer struct {
+	it *treeItem
+}
+
+func (r *treeItemRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.it.icon, r.it.label}
+}
+
+// MinSize stays narrow on purpose: rows clip with an ellipsis instead of
+// forcing the sidebar wider than the user dragged it.
+func (r *treeItemRenderer) MinSize() fyne.Size {
+	return fyne.NewSize(62, 24)
+}
+
+func (r *treeItemRenderer) Layout(size fyne.Size) {
+	icSz := float32(16)
+	r.it.icon.Move(fyne.NewPos(0, (size.Height-icSz)/2))
+	r.it.icon.Resize(fyne.NewSize(icSz, icSz))
+	x := icSz + 6
+	w := size.Width - x - 4
+	if w < 0 {
+		w = 0
+	}
+	r.it.label.Text = fitCellText(r.it.text, w, r.it.label.TextSize, r.it.label.TextStyle)
+	t := r.it.label.MinSize()
+	r.it.label.Move(fyne.NewPos(x, (size.Height-t.Height)/2))
+}
+
+func (r *treeItemRenderer) Destroy() {}
+
+func (r *treeItemRenderer) Refresh() {
+	p := pal()
+	if r.it.isSel != nil && r.it.isSel() {
+		r.it.label.Color = p.selFG // white over the blue selection
+	} else {
+		r.it.label.Color = p.foreground
+	}
+	r.it.label.Refresh()
+	r.it.icon.Refresh()
 }
 
 func (it *treeItem) Tapped(*fyne.PointEvent) {
@@ -588,7 +719,7 @@ func (b *sideModeButton) CreateRenderer() fyne.WidgetRenderer {
 		fg = p.activeTabFG
 	}
 	bg := canvas.NewRectangle(fill)
-	bg.CornerRadius = 7
+	bg.CornerRadius = 6
 	text := canvas.NewText(b.label, fg)
 	text.TextSize = 13
 	text.TextStyle.Bold = b.active
@@ -607,7 +738,7 @@ func (r *sideModeBtnRenderer) Objects() []fyne.CanvasObject {
 }
 
 func (r *sideModeBtnRenderer) MinSize() fyne.Size {
-	return fyne.NewSize(r.text.MinSize().Width+24, 28)
+	return fyne.NewSize(r.text.MinSize().Width+20, 24)
 }
 
 func (r *sideModeBtnRenderer) Destroy() {}
@@ -648,7 +779,7 @@ type queryRow struct {
 
 func newQueryRow(q SavedQuery, s *sidebar) *queryRow {
 	r := &queryRow{q: q, s: s}
-	r.icon = canvas.NewImageFromResource(theme.DocumentIcon())
+	r.icon = canvas.NewImageFromResource(icons.Document)
 	r.icon.SetMinSize(fyne.NewSize(16, 16))
 	r.name = canvas.NewText(q.Name, pal().foreground)
 	r.name.TextSize = 13

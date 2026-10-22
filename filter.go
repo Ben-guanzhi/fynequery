@@ -38,10 +38,15 @@ func (ws *workspace) showFilterDialog() {
 	valEntry.SetPlaceHolder("value")
 
 	opSel.OnChanged = func(string) {
-		if opSel.Selected == "IS NULL" || opSel.Selected == "IS NOT NULL" {
+		switch opSel.Selected {
+		case "IS NULL", "IS NOT NULL":
 			valEntry.Disable()
-		} else {
+		case "IN":
 			valEntry.Enable()
+			valEntry.SetPlaceHolder("1, 2, 3")
+		default:
+			valEntry.Enable()
+			valEntry.SetPlaceHolder("value")
 		}
 	}
 	opSel.SetSelected("=")
@@ -79,14 +84,14 @@ func (ws *workspace) showFilterDialog() {
 	})
 	applyBtn.Importance = widget.HighImportance
 
-	body := container.NewVBox(
+	body := container.NewPadded(container.NewVBox(
 		container.NewGridWithColumns(3, colSel, opSel, valEntry),
 		container.NewHBox(layout.NewSpacer(), addBtn),
-		widget.NewSeparator(),
+		spacerH(4),
 		widget.NewLabelWithStyle("WHERE", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		whereEntry,
 		container.NewHBox(layout.NewSpacer(), clearBtn, cancelBtn, applyBtn),
-	)
+	))
 
 	dlg = dialog.NewCustom("Filter", "", body, ws.window)
 	dlg.Resize(fyne.NewSize(560, 220))
@@ -113,17 +118,33 @@ func (ws *workspace) whereClause() string {
 	return " WHERE " + ws.filterSQL
 }
 
+// refreshFilterChip marks the bottom-bar Filter button with a dot while a
+// filter is active, so a narrowed result set is never a mystery.
+func (ws *workspace) refreshFilterChip() {
+	if ws.filterBtn == nil {
+		return
+	}
+	if strings.TrimSpace(ws.filterSQL) == "" {
+		ws.filterBtn.setLabel("Filter")
+	} else {
+		ws.filterBtn.setLabel("Filter ●")
+	}
+}
+
 // applyFilter reloads the data view honoring the current filter. Clearing the
 // filter on a driver without paging falls back to the plain table browse.
 func (ws *workspace) applyFilter() {
-	if ws.tableName == "" {
+	t := ws.activeData
+	if t == nil || t.name == "" {
 		return
 	}
+	t.filterSQL = ws.filterSQL // the filter lives on the open tab
+	ws.refreshFilterChip()
 	if strings.TrimSpace(ws.filterSQL) == "" && !ws.pageSupported() {
-		ws.openTable(ws.tableName)
+		ws.reloadActiveData()
 		return
 	}
-	ws.offset = -1 // force a reload even when the target offset is 0
+	t.offset = -1 // force a reload even when the target offset is 0
 	ws.gotoOffset(0)
 }
 

@@ -24,6 +24,7 @@ import (
 // live session; dial errors surface in an error dialog.
 func showConnectionPicker(w fyne.Window, conns []Connection, onPick func(Connection, db.Session)) {
 	filtered := append([]Connection(nil), conns...)
+	selIdx := -1
 
 	var dlg dialog.Dialog
 	pick := func(c Connection) {
@@ -47,6 +48,18 @@ func showConnectionPicker(w fyne.Window, conns []Connection, onPick func(Connect
 		})
 	}
 
+	noMatch := widget.NewLabelWithStyle("没有匹配的连接", fyne.TextAlignCenter, fyne.TextStyle{})
+	noMatch.Importance = widget.LowImportance
+	noMatch.Hide()
+
+	openBtn := widget.NewButton("打开", func() {
+		if selIdx >= 0 && selIdx < len(filtered) {
+			pick(filtered[selIdx])
+		}
+	})
+	openBtn.Importance = widget.HighImportance
+	openBtn.Disable()
+
 	var list *widget.List
 	search := widget.NewEntry()
 	search.SetPlaceHolder("搜索连接...")
@@ -59,6 +72,13 @@ func showConnectionPicker(w fyne.Window, conns []Connection, onPick func(Connect
 				strings.Contains(strings.ToLower(c.Host), q) {
 				filtered = append(filtered, c)
 			}
+		}
+		selIdx = -1
+		openBtn.Disable()
+		if len(filtered) == 0 {
+			noMatch.Show()
+		} else {
+			noMatch.Hide()
 		}
 		list.Refresh()
 	}
@@ -74,13 +94,28 @@ func showConnectionPicker(w fyne.Window, conns []Connection, onPick func(Connect
 			o.(*connRow).fill(filtered[i])
 		},
 	)
+	// Keyboard: arrows move the highlight (selection); 打开 (or Enter on it)
+	// commits, so arrowing never dials by accident.
+	list.OnSelected = func(i widget.ListItemID) {
+		selIdx = int(i)
+		if selIdx >= 0 && selIdx < len(filtered) {
+			openBtn.Enable()
+		} else {
+			openBtn.Disable()
+		}
+	}
+	list.OnUnselected = func(widget.ListItemID) {
+		selIdx = -1
+		openBtn.Disable()
+	}
+	listArea := container.NewStack(list, container.NewCenter(noMatch))
 
 	cancelBtn := widget.NewButton("取消", func() { dlg.Hide() })
 	body := container.NewBorder(
 		container.NewVBox(search, widget.NewSeparator()),
-		container.NewHBox(layout.NewSpacer(), cancelBtn),
+		container.NewHBox(layout.NewSpacer(), cancelBtn, openBtn),
 		nil, nil,
-		list,
+		listArea,
 	)
 	dlg = dialog.NewCustom("选择连接", "", body, w)
 	dlg.Resize(fyne.NewSize(480, 420))

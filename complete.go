@@ -19,6 +19,8 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
+
+	"fynequery/icons"
 )
 
 // sqlKeywords are the statement/clause words offered by completion.
@@ -67,48 +69,80 @@ func runeOffset(r []rune, row, col int) int {
 	return off
 }
 
-// buildWords merges the keyword/function/identifier candidates into a sorted,
-// de-duplicated list (case-insensitive).
-func buildWords(tables, columns []string) []string {
+// suggestion is one completion candidate: the text to insert plus enough
+// metadata to render the two-column popup (kind icon on the left, the owning
+// scope — keyword / function / database / table — greyed on the right).
+type suggestion struct {
+	label string
+	kind  string // keyword | function | table | view | column
+	owner string // right-column text: "keyword", the database, or the owner table
+}
+
+// iconForKind maps a suggestion kind to its leading glyph.
+func (s suggestion) icon() fyne.Resource {
+	switch s.kind {
+	case "function":
+		return icons.Function
+	case "view":
+		return icons.View
+	case "column":
+		return icons.View
+	case "table":
+		return icons.Table
+	}
+	return icons.Console // SQL keyword / clause
+}
+
+// buildSuggestions merges keyword/function/table/column candidates into a
+// sorted, de-duplicated list (case-insensitive) carrying each one's kind.
+func buildSuggestions(tables []string, cols map[string][]string, dbName string, kinds map[string]string) []suggestion {
 	seen := map[string]bool{}
-	var out []string
-	add := func(words []string) {
-		for _, w := range words {
-			if w == "" {
-				continue
-			}
-			key := strings.ToLower(w)
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			out = append(out, w)
+	var out []suggestion
+	add := func(label, kind, owner string) {
+		if label == "" {
+			return
+		}
+		key := strings.ToLower(label)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, suggestion{label: label, kind: kind, owner: owner})
+	}
+	for _, w := range sqlKeywords {
+		add(w, "keyword", "keyword")
+	}
+	for _, w := range sqlFunctions {
+		add(w, "function", "function")
+	}
+	for _, t := range tables {
+		add(t, kinds[t], dbName)
+	}
+	for _, t := range tables {
+		for _, c := range cols[t] {
+			add(c, "column", t)
 		}
 	}
-	add(sqlKeywords)
-	add(sqlFunctions)
-	add(tables)
-	add(columns)
 	sort.Slice(out, func(i, j int) bool {
-		a, b := strings.ToLower(out[i]), strings.ToLower(out[j])
+		a, b := strings.ToLower(out[i].label), strings.ToLower(out[j].label)
 		if a == b {
-			return out[i] < out[j]
+			return out[i].label < out[j].label
 		}
 		return a < b
 	})
 	return out
 }
 
-// matchWords returns the words starting with prefix (case-insensitive), up to
-// limit entries. An empty prefix returns everything.
-func matchWords(words []string, prefix string, limit int) []string {
+// matchSuggestions returns the candidates whose label starts with prefix
+// (case-insensitive), up to limit entries. An empty prefix returns everything.
+func matchSuggestions(sugs []suggestion, prefix string, limit int) []suggestion {
 	p := strings.ToLower(prefix)
-	var out []string
-	for _, w := range words {
-		if p != "" && !strings.HasPrefix(strings.ToLower(w), p) {
+	var out []suggestion
+	for _, s := range sugs {
+		if p != "" && !strings.HasPrefix(strings.ToLower(s.label), p) {
 			continue
 		}
-		out = append(out, w)
+		out = append(out, s)
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -230,15 +264,43 @@ func (qp *queryPane) tableCandidates() []string {
 	return out
 }
 
-// columnCandidates returns the columns of the given tables, consulting a cache
-// and the session for the rest (best effort; errors are ignored).
-func (qp *queryPane) columnCandidates(tables []string) []string {
+// tableKinds maps each candidate to its tree kind so the popup can pick the
+// right glyph (table vs view vs function).
+func (qp *queryPane) tableKinds() map[string]string {
+	out := map[string]string{}
+	if qp.side == nil {
+		return out
+	}
+	for _, o := range qp.side.objects {
+		switch o.Kind {
+		case "view":
+			out[o.Name] = "view"
+		case "function":
+			out[o.Name] = "function"
+		default:
+			out[o.Name] = "table"
+		}
+	}
+	return out
+}
+
+// currentDB is the database name shown as the owning scope for tables.
+func (qp *queryPane) currentDB() string {
+	if qp.side != nil && qp.side.database != "" {
+		return qp.side.database
+	}
+	return qp.conn.Database
+}
+
+// columnCandidates returns the columns of the given tables keyed by owner,
+// consulting a cache and the session for the rest (best effort; errors ignored).
+func (qp *queryPane) columnCandidates(tables []string) map[string][]string {
 	qp.colMu.Lock()
 	defer qp.colMu.Unlock()
 	if qp.colCache == nil {
 		qp.colCache = map[string][]string{}
 	}
-	var out []string
+	out := make(map[string][]string, len(tables))
 	for _, t := range tables {
 		cols, ok := qp.colCache[t]
 		if !ok {
@@ -251,7 +313,7 @@ func (qp *queryPane) columnCandidates(tables []string) []string {
 			}
 			qp.colCache[t] = cols
 		}
-		out = append(out, cols...)
+		out[t] = cols
 	}
 	return out
 }
@@ -270,8 +332,7 @@ func (qp *queryPane) complete() {
 	refs := referencedTables(qp.editor.Text, tables)
 	safeGo("query.complete", func() {
 		cols := qp.columnCandidates(refs)
-		words := buildWords(tables, cols)
-		sug := matchWords(words, word, 80)
+		sug := matchSuggestions(buildSuggestions(tables, cols, qp.currentDB(), qp.tableKinds()), word, 80)
 		kws := qp.queryKeywordSuggestions(word)
 		safeDo(func() {
 			if len(sug) == 0 && len(kws) == 0 {
@@ -306,7 +367,7 @@ func (qp *queryPane) queryKeywordSuggestions(word string) []queryKeywordHit {
 }
 
 // showCompletionMenu displays the suggestion popup next to the editor.
-func (qp *queryPane) showCompletionMenu(start, wordLen int, suggestions []string, kws []queryKeywordHit) {
+func (qp *queryPane) showCompletionMenu(start, wordLen int, suggestions []suggestion, kws []queryKeywordHit) {
 	if qp.window == nil {
 		return
 	}
@@ -317,8 +378,8 @@ func (qp *queryPane) showCompletionMenu(start, wordLen int, suggestions []string
 	items := make([]*fyne.MenuItem, 0, len(suggestions)+len(kws))
 	for _, s := range suggestions {
 		s := s
-		items = append(items, fyne.NewMenuItem(s, func() {
-			qp.insertCompletion(start, wordLen, s)
+		items = append(items, fyne.NewMenuItem(s.label, func() {
+			qp.insertCompletion(start, wordLen, s.label)
 		}))
 	}
 	if len(kws) > 0 && len(items) > 0 {
@@ -377,6 +438,21 @@ func (qp *queryPane) bindEditorShortcuts() {
 		bindEntryShortcut(qp.editor, sc, func(fyne.Shortcut) { qp.run() })
 	}
 	bindEntryShortcut(qp.editor, space, func(fyne.Shortcut) { qp.complete() })
+
+	// Ctrl+/ toggles a "-- " SQL line comment on the current line.
+	slash := &desktop.CustomShortcut{KeyName: fyne.KeySlash, Modifier: fyne.KeyModifierControl}
+	bindEntryShortcut(qp.editor, slash, func(fyne.Shortcut) { qp.toggleComment() })
+
+	// Focus the editor once this SQL tab is on-screen so typing works at once.
+	ed := qp.editor
+	time.AfterFunc(80*time.Millisecond, func() {
+		safeDo(func() {
+			if c := fyne.CurrentApp().Driver().CanvasForObject(ed); c != nil {
+				c.Focus(ed)
+			}
+		})
+	})
+
 	qp.shortcutBound = true
 }
 
@@ -490,8 +566,7 @@ func (qp *queryPane) autoComplete() {
 	refs := referencedTables(text, tables)
 	safeGo("query.autocomplete", func() {
 		cols := qp.columnCandidates(refs)
-		words := buildWords(tables, cols)
-		sug := matchWords(words, seg, autoCompleteLimit)
+		sug := matchSuggestions(buildSuggestions(tables, cols, qp.currentDB(), qp.tableKinds()), seg, autoCompleteLimit)
 		safeDo(func() {
 			if gen != qp.autoGen {
 				return // a newer keystroke superseded this lookup
@@ -506,7 +581,7 @@ func (qp *queryPane) autoComplete() {
 }
 
 // showAutoSuggestions paints (or updates) the inline popup next to the editor.
-func (qp *queryPane) showAutoSuggestions(start, wordLen int, sug []string) {
+func (qp *queryPane) showAutoSuggestions(start, wordLen int, sug []suggestion) {
 	c := qp.window.Canvas()
 	if c == nil {
 		return
@@ -521,7 +596,11 @@ func (qp *queryPane) showAutoSuggestions(start, wordLen int, sug []string) {
 		qp.autoProxy.onKey = qp.handleAutoKey
 		qp.autoPop = widget.NewPopUp(qp.autoProxy, c)
 	}
-	qp.autoStart, qp.autoWordLen, qp.autoWords = start, wordLen, sug
+	labels := make([]string, len(sug))
+	for i, s := range sug {
+		labels[i] = s.label
+	}
+	qp.autoStart, qp.autoWordLen, qp.autoWords = start, wordLen, labels
 	qp.autoSel = -1 // nothing highlighted until the user presses Up/Down
 	qp.autoRows = qp.autoRows[:0]
 	qp.autoList.Objects = qp.autoList.Objects[:0]
@@ -697,18 +776,21 @@ func (p *editorFocusProxy) KeyUp(e *fyne.KeyEvent) {
 // suggestionRowHeight is the fixed row height of the inline popup list.
 const suggestionRowHeight = float32(24)
 
-// suggestionRow is one clickable line of the inline completion popup:
-// left-aligned text with a hover highlight.
+// suggestionRow is one clickable line of the inline completion popup: a kind
+// icon + label on the left and the owning scope greyed on the right, with a
+// hover / keyboard-selection highlight.
 type suggestionRow struct {
 	widget.BaseWidget
 	label    string
+	icon     fyne.Resource
+	owner    string
 	onTap    func()
 	hover    bool
 	selected bool // keyboard highlight (Up/Down)
 }
 
-func newSuggestionRow(label string, onTap func()) *suggestionRow {
-	r := &suggestionRow{label: label, onTap: onTap}
+func newSuggestionRow(s suggestion, onTap func()) *suggestionRow {
+	r := &suggestionRow{label: s.label, icon: s.icon(), owner: s.owner, onTap: onTap}
 	r.ExtendBaseWidget(r)
 	return r
 }
@@ -736,33 +818,43 @@ func (r *suggestionRow) MouseMoved(*desktop.MouseEvent) {}
 func (r *suggestionRow) CreateRenderer() fyne.WidgetRenderer {
 	bg := canvas.NewRectangle(colorTransparent)
 	bg.CornerRadius = 4
+	ic := widget.NewIcon(r.icon)
 	text := canvas.NewText(r.label, pal().foreground)
 	text.TextSize = 12
-	return &suggestionRowRenderer{r: r, bg: bg, text: text}
+	owner := canvas.NewText(r.owner, pal().metaKeyFG)
+	owner.TextSize = 11
+	return &suggestionRowRenderer{r: r, bg: bg, ic: ic, text: text, owner: owner}
 }
 
 type suggestionRowRenderer struct {
-	r    *suggestionRow
-	bg   *canvas.Rectangle
-	text *canvas.Text
+	r     *suggestionRow
+	bg    *canvas.Rectangle
+	ic    *widget.Icon
+	text  *canvas.Text
+	owner *canvas.Text
 }
 
 func (rd *suggestionRowRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{rd.bg, rd.text}
+	return []fyne.CanvasObject{rd.bg, rd.ic, rd.text, rd.owner}
 }
 
 func (rd *suggestionRowRenderer) MinSize() fyne.Size {
-	w := rd.text.MinSize().Width + 24
-	if w < 160 {
-		w = 160
+	w := 8 + 16 + 6 + rd.text.MinSize().Width + 12 + rd.owner.MinSize().Width + 10
+	if w < 260 {
+		w = 260
 	}
 	return fyne.NewSize(w, suggestionRowHeight)
 }
 
 func (rd *suggestionRowRenderer) Layout(size fyne.Size) {
 	rd.bg.Resize(size)
+	icSz := float32(16)
+	rd.ic.Move(fyne.NewPos(8, (size.Height-icSz)/2))
+	rd.ic.Resize(fyne.NewSize(icSz, icSz))
 	t := rd.text.MinSize()
-	rd.text.Move(fyne.NewPos(10, (size.Height-t.Height)/2))
+	rd.text.Move(fyne.NewPos(8+icSz+6, (size.Height-t.Height)/2))
+	o := rd.owner.MinSize()
+	rd.owner.Move(fyne.NewPos(size.Width-o.Width-10, (size.Height-o.Height)/2))
 }
 
 func (rd *suggestionRowRenderer) Destroy() {}
@@ -770,8 +862,9 @@ func (rd *suggestionRowRenderer) Destroy() {}
 func (rd *suggestionRowRenderer) Refresh() {
 	p := pal()
 	if rd.r.selected {
-		rd.bg.FillColor = p.treeSel // same accent used for sidebar selection
-		rd.text.Color = colorWhite
+		rd.bg.FillColor = p.treeSel // blue selection, matching tree/grid/db rows
+		rd.text.Color = p.selFG
+		rd.owner.Color = p.selFG
 	} else {
 		if rd.r.hover {
 			rd.bg.FillColor = p.hover
@@ -779,8 +872,12 @@ func (rd *suggestionRowRenderer) Refresh() {
 			rd.bg.FillColor = colorTransparent
 		}
 		rd.text.Color = p.foreground
+		rd.owner.Color = p.metaKeyFG
 	}
 	rd.text.Text = rd.r.label
+	rd.owner.Text = rd.r.owner
 	rd.bg.Refresh()
+	rd.ic.Refresh()
 	rd.text.Refresh()
+	rd.owner.Refresh()
 }

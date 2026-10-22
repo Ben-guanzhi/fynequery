@@ -5,6 +5,7 @@ package main
 // parse it into a Connection and open the prefilled connection sheet.
 
 import (
+	"errors"
 	"net/url"
 	"strings"
 
@@ -22,28 +23,26 @@ import (
 func showImportURLDialog(w fyne.Window, onConnect func(Connection, db.Session)) {
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("mysql://user:pass@host:3306/dbname")
-	entry.SetText("mysql://")
 
 	var dlg dialog.Dialog
-	importBtn := widget.NewButton("Import", func() {
+	doImport := func() {
 		c, ok := parseConnURL(entry.Text)
 		if !ok {
-			showInfo(w, "Import from URL",
-				"Could not parse that URL.\n\nExpected e.g.\n"+
-					"mysql://user:pass@host:3306/db\n"+
-					"postgres://user:pass@host:5432/db\n"+
-					"mssql://sa:pass@host:1433/master")
+			dialog.NewError(errors.New("无法解析该连接 URL，请参考下方示例的格式。"), w).Show()
 			return
 		}
 		dlg.Hide()
 		showConnectionDialog(w, c, onConnect)
-	})
+	}
+	entry.OnSubmitted = func(string) { doImport() }
+	importBtn := widget.NewButton("Import", doImport)
 	importBtn.Importance = widget.HighImportance
 	cancelBtn := widget.NewButton("Cancel", func() { dlg.Hide() })
 
 	hint := widget.NewLabelWithStyle(
-		"Examples:\nmysql://root@localhost:3306/shop\npostgres://user:pass@host:5432/app\nmssql://sa:pass@host:1433/master",
+		"Examples: mysql://root@localhost:3306/shop · postgres://user:pass@host:5432/app · mssql://sa:pass@host:1433/master",
 		fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+	hint.Wrapping = fyne.TextWrapWord
 
 	body := container.NewVBox(
 		widget.NewLabel("Paste a connection URL:"),

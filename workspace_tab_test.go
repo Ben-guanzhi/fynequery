@@ -16,32 +16,10 @@ func newTestWorkspace() *workspace {
 	w := a.NewWindow("t")
 	ws := &workspace{window: w, sess: &fakeSession{}}
 	ws.tabs = newTabBar(func(i int) { ws.tabs.setActive(i); ws.showTab(i) }, func() { ws.addQueryTab() })
-	ws.tabs.addTab("Data", false)
+	ws.tabs.onCloseTab = ws.closeTab
 	ws.tabs.current = 0
-	ws.tabs.tabs[0].setActive(true)
 	ws.dataStack = container.NewStack()
 	ws.content = container.NewStack(ws.dataStack)
-	// The data-tab close handler is assigned in build(); replicate it here so
-	// onCloseTab exercises the real trimming logic.
-	ws.tabs.onCloseTab = func(i int) {
-		if i == 0 {
-			return // the data tab is never closeable
-		}
-		if i-1 < len(ws.queryTabs) {
-			ws.queryTabs = append(ws.queryTabs[:i-1], ws.queryTabs[i:]...)
-		}
-		ws.tabs.removeTab(i)
-		ws.content.Objects = ws.content.Objects[:0]
-		ws.content.Objects = append(ws.content.Objects, ws.dataStack)
-		for _, qp := range ws.queryTabs {
-			ws.content.Objects = append(ws.content.Objects, qp)
-		}
-		if ws.tabs.current >= len(ws.tabs.tabs) {
-			ws.tabs.current = len(ws.tabs.tabs) - 1
-		}
-		ws.tabs.setActive(ws.tabs.current)
-		ws.showTab(ws.tabs.current)
-	}
 	w.SetContent(ws.content)
 	return ws
 }
@@ -64,8 +42,8 @@ func TestQueryTabs(t *testing.T) {
 	}
 
 	ws.addQueryTab()
-	if len(ws.queryTabs) != 1 || ws.tabs.current != 1 {
-		t.Fatalf("after add: queryTabs=%d current=%d, want 1/1", len(ws.queryTabs), ws.tabs.current)
+	if len(ws.queryTabs) != 1 || ws.tabs.current != 0 {
+		t.Fatalf("after add: queryTabs=%d current=%d, want 1/0", len(ws.queryTabs), ws.tabs.current)
 	}
 	active := ws.activeQueryPane()
 	if active == nil || ws.queryTabs[0] != active {
@@ -77,8 +55,8 @@ func TestQueryTabs(t *testing.T) {
 
 	// A second tab starts empty and becomes the active editor.
 	ws.addQueryTab()
-	if len(ws.queryTabs) != 2 || ws.tabs.current != 2 {
-		t.Fatalf("after 2nd add: queryTabs=%d current=%d, want 2/2", len(ws.queryTabs), ws.tabs.current)
+	if len(ws.queryTabs) != 2 || ws.tabs.current != 1 {
+		t.Fatalf("after 2nd add: queryTabs=%d current=%d, want 2/1", len(ws.queryTabs), ws.tabs.current)
 	}
 	p0, p1 := ws.queryTabs[0], ws.queryTabs[1]
 	if p0 == p1 {
@@ -95,8 +73,8 @@ func TestQueryTabs(t *testing.T) {
 	}
 
 	// Switching back re-points the active pane and keeps both texts.
-	ws.tabs.setActive(1)
-	ws.showTab(1)
+	ws.tabs.setActive(0)
+	ws.showTab(0)
 	if ws.activeQueryPane() != p0 {
 		t.Fatal("switching back did not restore the first pane")
 	}
@@ -105,9 +83,8 @@ func TestQueryTabs(t *testing.T) {
 	}
 }
 
-// TestCloseQueryTab drives the close handler: the data tab cannot be closed,
-// closing a query tab removes exactly that pane and rebuilds the content
-// stack (dataStack + survivors) in order.
+// TestCloseQueryTab drives the close handler: closing a query tab removes
+// exactly that pane and leaves the data stack plus the survivors in order.
 func TestCloseQueryTab(t *testing.T) {
 	ws := newTestWorkspace()
 	ws.addQueryTab()
@@ -116,14 +93,8 @@ func TestCloseQueryTab(t *testing.T) {
 		t.Fatalf("want 2 query tabs, got %d", len(ws.queryTabs))
 	}
 
-	// The data tab (index 0) is uncloseable.
-	ws.tabs.onCloseTab(0)
-	if len(ws.queryTabs) != 2 {
-		t.Fatalf("data tab should be uncloseable, got %d", len(ws.queryTabs))
-	}
-
-	// Closing the active (2nd) query tab falls back to the survivor.
-	ws.tabs.onCloseTab(2)
+	// Closing the active (2nd, index 1) query tab falls back to the survivor.
+	ws.tabs.onCloseTab(1)
 	if len(ws.queryTabs) != 1 {
 		t.Fatalf("after close: %d query tabs, want 1", len(ws.queryTabs))
 	}
@@ -133,17 +104,26 @@ func TestCloseQueryTab(t *testing.T) {
 	if ws.content.Objects[0] != ws.dataStack {
 		t.Fatal("data stack must stay first in the content stack")
 	}
+	if ws.activeQueryPane() != ws.queryTabs[0] {
+		t.Fatal("after close the survivor should be active")
+	}
 }
 
-// TestQueryTabIndex pins the 1-based tab-index mapping used by the quick-open
-// palette to focus a query tab.
+// TestQueryTabIndex pins the strip-index mapping used by the quick-open
+// palette to focus a query tab (data docs shift query panes off 0).
 func TestQueryTabIndex(t *testing.T) {
 	ws := &workspace{}
-	ws.queryTabs = []*queryPane{{}, {}, {}}
-	if i := ws.queryTabIndex(ws.queryTabs[0]); i != 1 {
+	q0, q1, q2 := &queryPane{}, &queryPane{}, &queryPane{}
+	ws.docs = []*docTab{
+		{kind: docData, data: &dataTableTab{name: "t"}},
+		{kind: docQuery, qp: q0},
+		{kind: docQuery, qp: q1},
+		{kind: docQuery, qp: q2},
+	}
+	if i := ws.queryTabIndex(q0); i != 1 {
 		t.Fatalf("idx0 = %d, want 1", i)
 	}
-	if i := ws.queryTabIndex(ws.queryTabs[2]); i != 3 {
+	if i := ws.queryTabIndex(q2); i != 3 {
 		t.Fatalf("idx2 = %d, want 3", i)
 	}
 	if i := ws.queryTabIndex(&queryPane{}); i != -1 {
@@ -154,16 +134,90 @@ func TestQueryTabIndex(t *testing.T) {
 // TestActiveQueryPane pins that the active tab's pane is returned, falling
 // back to the last pane when none is active.
 func TestActiveQueryPane(t *testing.T) {
+	q0, q1 := &queryPane{}, &queryPane{}
 	ws := &workspace{
 		tabs:      &tabBar{},
-		queryTabs: []*queryPane{{}, {}},
+		queryTabs: []*queryPane{q0, q1},
 	}
-	if got := ws.activeQueryPane(); got != ws.queryTabs[1] {
-		t.Fatalf("no current tab -> want last pane, got %v", got)
+	if got := ws.activeQueryPane(); got != q1 {
+		t.Fatalf("no docs -> want last pane, got %v", got)
 	}
-	ws.tabs.current = 1
-	if got := ws.activeQueryPane(); got != ws.queryTabs[0] {
-		t.Fatalf("current=1 -> want pane 0, got %v", got)
+	ws.docs = []*docTab{{kind: docQuery, qp: q0}, {kind: docQuery, qp: q1}}
+	ws.tabs.current = 0
+	if got := ws.activeQueryPane(); got != q0 {
+		t.Fatalf("current=0 -> want pane 0, got %v", got)
+	}
+}
+
+// newTabHarness wires just enough of build()'s single-instance chrome for
+// applyDataTab/showTab/closeTab to run without the async DB loads.
+func newTabHarness() *workspace {
+	a := test.NewApp()
+	w := a.NewWindow("t")
+	ws := &workspace{window: w, sess: &fakeSession{}, conn: Connection{Driver: "mysql"}}
+	ws.tabs = newTabBar(func(i int) { ws.tabs.setActive(i); ws.showTab(i) }, func() { ws.addQueryTab() })
+	ws.tabs.onCloseTab = ws.closeTab
+	ws.status = newStatusBar()
+	ws.grid = newDataTable(emptyTableData(), ws.status)
+	ws.dataSlot = container.NewStack(ws.grid)
+	ws.structPane = container.NewStack()
+	ws.indexPane = container.NewStack()
+	ws.dataStack = container.NewStack(ws.dataSlot, ws.structPane, ws.indexPane)
+	ws.content = container.NewStack(ws.dataStack)
+	ws.segment = newSegmented([]string{"Data", "Structure", "Indexes"}, func(int) {})
+	ws.filterBtn = newFlatButton("Filter")
+	ws.details = newDetailsPane()
+	ws.bottomBar = container.NewVBox()
+	ws.body = container.NewStack(ws.content)
+	w.SetContent(ws.body)
+	return ws
+}
+
+// TestMultiTableTabs pins multi-table browsing: each open table is its own
+// closable tab holding an independent grid, switching swaps/restores grids,
+// and closing leaves a survivor active.
+func TestMultiTableTabs(t *testing.T) {
+	ws := newTabHarness()
+
+	t1 := &dataTableTab{name: "users"}
+	t2 := &dataTableTab{name: "orders"}
+	t1.grid = newDataTable(emptyTableData(), ws.status)
+	t2.grid = newDataTable(emptyTableData(), ws.status)
+	ws.dataTabs = append(ws.dataTabs, t1, t2)
+	i1 := ws.addDoc(docData, "users", true, t1, nil)
+	i2 := ws.addDoc(docData, "orders", true, t2, nil)
+
+	ws.tabs.setActive(i1)
+	ws.showTab(i1)
+	if ws.tableName != "users" || ws.activeData != t1 {
+		t.Fatalf("tab1: name=%q active=%v", ws.tableName, ws.activeData == t1)
+	}
+	g1 := ws.grid
+
+	ws.tabs.setActive(i2)
+	ws.showTab(i2)
+	if ws.tableName != "orders" || ws.activeData != t2 {
+		t.Fatalf("tab2: name=%q active=%v", ws.tableName, ws.activeData == t2)
+	}
+	if ws.grid == g1 {
+		t.Fatal("switching tabs did not swap the grid")
+	}
+	if t1.grid == nil || t1.grid == ws.grid {
+		t.Fatal("outgoing tab did not keep its own grid")
+	}
+
+	ws.tabs.setActive(i1)
+	ws.showTab(i1)
+	if ws.grid != g1 {
+		t.Fatal("switching back did not restore the first grid")
+	}
+
+	ws.closeTab(i2)
+	if len(ws.dataTabs) != 1 || ws.dataTabs[0] != t1 {
+		t.Fatalf("after close: dataTabs=%d", len(ws.dataTabs))
+	}
+	if ws.tableName != "users" || ws.activeData != t1 {
+		t.Fatalf("after close: name=%q", ws.tableName)
 	}
 }
 

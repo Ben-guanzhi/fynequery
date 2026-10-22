@@ -59,6 +59,14 @@ func (c *consolePane) clear() {
 	c.refresh()
 }
 
+// copyAll copies the whole log to the clipboard (no-op when empty).
+func (c *consolePane) copyAll() {
+	if len(c.lines) == 0 {
+		return
+	}
+	fyne.CurrentApp().Clipboard().SetContent(strings.Join(c.lines, "\n"))
+}
+
 func (c *consolePane) refresh() {
 	if c.label == nil {
 		return
@@ -101,12 +109,14 @@ func (c *consolePane) CreateRenderer() fyne.WidgetRenderer {
 
 	clearBtn := newToolButton(theme.DeleteIcon(), func() { c.clear() })
 	clearBtn.small = true
+	copyBtn := newToolButton(theme.ContentCopyIcon(), func() { c.copyAll() })
+	copyBtn.small = true
 
 	c.count = widget.NewLabelWithStyle("", fyne.TextAlignTrailing, fyne.TextStyle{Italic: true})
 	c.count.Importance = widget.LowImportance
 
 	bottom := container.NewBorder(nil, nil,
-		container.NewPadded(clearBtn),
+		container.NewHBox(container.NewPadded(copyBtn), container.NewPadded(clearBtn)),
 		container.NewPadded(c.count),
 		layout.NewSpacer(),
 	)

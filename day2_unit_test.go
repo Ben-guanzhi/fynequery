@@ -174,7 +174,8 @@ func TestBuildPreviewSQL(t *testing.T) {
 			changes: map[string]*string{"name": mk("O'Hara"), "active": nil, "level": mk(db.DefaultMarker)}},
 	}
 	deletes := []map[string]*string{{"id": mk("9")}}
-	out := buildPreviewSQL("users", "mysql", updates, deletes)
+	inserts := []map[string]*string{{"name": mk("zoe"), "level": nil}}
+	out := buildPreviewSQL("users", "mysql", updates, deletes, inserts)
 	for _, want := range []string{
 		"UPDATE `users`",
 		"`name` = 'O''Hara'",
@@ -182,6 +183,7 @@ func TestBuildPreviewSQL(t *testing.T) {
 		"`level` = DEFAULT",
 		"`id` = '1'",
 		"DELETE FROM `users` WHERE `id` = '9'",
+		"INSERT INTO `users` (`level`, `name`) VALUES (NULL, 'zoe')",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("preview SQL missing %q:\n%s", want, out)
@@ -339,5 +341,30 @@ func TestMaskedPart(t *testing.T) {
 	privacyMode = false
 	if got := maskedPart("db.example.com"); got != "db.example.com" {
 		t.Errorf("privacy off must not mask, got %q", got)
+	}
+}
+
+// TestColumnWidthFreeze locks the manual column-resize model: once frozen the
+// grid reports the stored absolute widths in both totalMinWidth (scroll range)
+// and columnWidths (ignoring the available width), and hidden columns drop out
+// of the width sum.
+func TestColumnWidthFreeze(t *testing.T) {
+	g := newTestGrid(3, false)
+	auto := g.columnWidths(400)
+	if len(auto) != 2 || auto[0] <= 0 {
+		t.Fatalf("auto widths: %v", auto)
+	}
+	g.frozen = true
+	g.colWidths = []float32{120, 80}
+	if got := g.totalMinWidth(); got != gutterWidth+200 {
+		t.Fatalf("frozen totalMinWidth = %v, want %v", got, gutterWidth+200)
+	}
+	got := g.columnWidths(500)
+	if got[0] != 120 || got[1] != 80 {
+		t.Fatalf("frozen columnWidths = %v, want [120 80]", got)
+	}
+	g.hidden = map[int]bool{1: true}
+	if got := g.totalMinWidth(); got != gutterWidth+120 {
+		t.Fatalf("with hidden col2 totalMinWidth = %v, want %v", got, gutterWidth+120)
 	}
 }

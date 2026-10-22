@@ -74,6 +74,21 @@ type BatchUpdater interface {
 	ApplyChanges(table string, updates []RowEdit, deletes []map[string]*string, inserts []map[string]*string, ddl []string) error
 }
 
+// DatabaseCreator is optionally implemented by Session types that can create a
+// new database on the server. It backs the in-app "new database" flow (the
+// sidebar "+" and the open-database sheet's "新建..." button). charset/collation
+// are passed as opts (e.g. {"charset":"utf8mb4"}); implementors must validate
+// and quote them to avoid injection.
+type DatabaseCreator interface {
+	CreateDatabase(name string, opts map[string]string) error
+}
+
+// CanCreateDatabase reports whether a session can create databases.
+func CanCreateDatabase(s Session) bool {
+	_, ok := s.(DatabaseCreator)
+	return ok
+}
+
 // Canceller is optionally implemented by Session types that can terminate
 // the statement currently running on the session (the editor's Cancel
 // button, TablePlus process-list "Kill QUERY"). The builtin MySQL driver

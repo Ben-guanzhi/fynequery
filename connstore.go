@@ -66,6 +66,11 @@ func dialConn(c Connection) (db.Session, error) {
 }
 
 func configDir() string {
+	// Test/portable override: point the whole config (connections.json, keyring
+	// salt, logs) at a scratch dir. Unset in normal runs → the user config dir.
+	if d := os.Getenv("FYNEQUERY_CONFIG_DIR"); d != "" {
+		return d
+	}
 	base, err := os.UserConfigDir()
 	if err != nil {
 		base = "."

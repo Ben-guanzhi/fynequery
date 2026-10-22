@@ -5,6 +5,9 @@ package main
 // re-queries, and is re-applied whenever a fresh grid is built.
 
 import (
+	"fmt"
+	"strings"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
@@ -41,20 +44,52 @@ func (ws *workspace) showColumnsDialog() {
 		return
 	}
 
-	checks := make([]*widget.Check, 0, len(cols))
+	checks := make([]*widget.Check, len(cols))
 	box := container.NewVBox()
-	for _, name := range cols {
+	for i, name := range cols {
 		chk := widget.NewCheck(name, nil)
 		chk.SetChecked(!ws.hiddenCols[name])
-		checks = append(checks, chk)
+		checks[i] = chk
 		box.Objects = append(box.Objects, chk)
 	}
 	box.Refresh()
+
+	visible := func() int {
+		n := 0
+		for _, c := range checks {
+			if c.Checked {
+				n++
+			}
+		}
+		return n
+	}
+	count := widget.NewLabel("")
+	count.Importance = widget.LowImportance
+	updCount := func() { count.SetText(fmt.Sprintf("%d / %d 可见", visible(), len(cols))) }
+	for _, c := range checks {
+		c.OnChanged = func(bool) { updCount() }
+	}
+	updCount()
+
+	search := widget.NewEntry()
+	search.SetPlaceHolder("搜索列...")
+	search.OnChanged = func(q string) {
+		q = strings.ToLower(strings.TrimSpace(q))
+		for i, c := range checks {
+			if q == "" || strings.Contains(strings.ToLower(cols[i]), q) {
+				c.Show()
+			} else {
+				c.Hide()
+			}
+		}
+		box.Refresh()
+	}
 
 	setAll := func(v bool) {
 		for _, c := range checks {
 			c.SetChecked(v)
 		}
+		updCount()
 	}
 
 	var dlg dialog.Dialog
@@ -62,6 +97,10 @@ func (ws *workspace) showColumnsDialog() {
 	noneBtn := widget.NewButton("None", func() { setAll(false) })
 	cancelBtn := widget.NewButton("Cancel", func() { dlg.Hide() })
 	applyBtn := widget.NewButton("Apply", func() {
+		if visible() == 0 {
+			showInfo(ws.window, "Columns", "至少保留一列可见。")
+			return
+		}
 		hidden := map[string]bool{}
 		for i, c := range checks {
 			if !c.Checked {
@@ -75,13 +114,13 @@ func (ws *workspace) showColumnsDialog() {
 	applyBtn.Importance = widget.HighImportance
 
 	body := container.NewBorder(
-		nil,
+		container.NewPadded(container.NewVBox(search, count)),
 		container.NewHBox(allBtn, noneBtn, layout.NewSpacer(), cancelBtn, applyBtn),
 		nil, nil,
 		container.NewScroll(box),
 	)
 
 	dlg = dialog.NewCustom("Columns", "", body, ws.window)
-	dlg.Resize(fyne.NewSize(360, 460))
+	dlg.Resize(fyne.NewSize(360, 480))
 	dlg.Show()
 }

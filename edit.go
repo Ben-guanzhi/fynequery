@@ -55,7 +55,7 @@ func (t *dataTable) setEditable(e bool) {
 }
 
 func (t *dataTable) changeCount() int {
-	n := len(t.deleted)
+	n := len(t.deleted) + len(t.inserted)
 	for _, m := range t.dirty {
 		n += len(m)
 	}
@@ -63,15 +63,73 @@ func (t *dataTable) changeCount() int {
 }
 
 func (t *dataTable) clearDirty() {
+	// Drop any staged (pending-insert) rows from the view first.
+	if len(t.inserted) > 0 {
+		var kept [][]*string
+		for i, r := range t.data.Rows {
+			if !t.inserted[i] {
+				kept = append(kept, r)
+			}
+		}
+		t.data.Rows = kept
+		t.data.Fetched = len(t.data.Rows)
+		if t.status != nil {
+			t.status.setRows(t.data.Fetched, t.data.Total, false)
+		}
+	}
 	t.dirty = nil
 	t.deleted = nil
+	t.inserted = nil
 	t.Refresh()
 	if t.onDirty != nil {
 		t.onDirty()
 	}
 }
 
+// stageInsert appends a pending new row (Add Row) instead of writing it to the
+// database immediately. It rides the same Commit / Rollback / Preview strip as
+// cell edits and deletions. Returns the new row index.
+func (t *dataTable) stageInsert(values map[string]*string) int {
+	row := make([]*string, len(t.data.Cols))
+	for i, c := range t.data.Cols {
+		if v, ok := values[c.Name]; ok {
+			row[i] = v
+		}
+	}
+	t.data.Rows = append(t.data.Rows, row)
+	idx := len(t.data.Rows) - 1
+	if t.inserted == nil {
+		t.inserted = map[int]bool{}
+	}
+	t.inserted[idx] = true
+	t.data.Fetched = len(t.data.Rows)
+	if t.data.Fetched > t.data.Total {
+		t.data.Total = t.data.Fetched
+	}
+	if t.status != nil {
+		t.status.setRows(t.data.Fetched, t.data.Total, false)
+	}
+	t.Refresh()
+	if t.rows != nil {
+		t.rows.ensureVisible(idx)
+	}
+	if t.onDirty != nil {
+		t.onDirty()
+	}
+	return idx
+}
+
 func (t *dataTable) setCell(row, col int, v *string) {
+	// Compare against the stored (original) value: setting a cell back to its
+	// original value is not a change and must not create a phantom pending edit.
+	var orig *string
+	if row >= 0 && row < len(t.data.Rows) {
+		orig = cellStr(t.data.Rows[row], col)
+	}
+	if ptrEqual(orig, v) {
+		t.revertCell(row, col)
+		return
+	}
 	if t.dirty == nil {
 		t.dirty = map[int]map[int]*string{}
 	}
@@ -83,6 +141,15 @@ func (t *dataTable) setCell(row, col int, v *string) {
 	if t.onDirty != nil {
 		t.onDirty()
 	}
+}
+
+// ptrEqual reports whether two *string values are both nil or hold equal text
+// (used to detect no-op cell edits).
+func ptrEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func (t *dataTable) revertCell(row, col int) {
@@ -135,8 +202,7 @@ type rowUpdate struct {
 }
 
 // pending snapshots the unsaved edits and deletions for commit (UI thread).
-func (t *dataTable) pending() ([]rowUpdate, []map[string]*string) {
-	var updates []rowUpdate
+func (t *dataTable) pending() (updates []rowUpdate, deletes, inserts []map[string]*string) {
 	for row, m := range t.dirty {
 		if t.deleted[row] || len(m) == 0 || row >= len(t.data.Rows) {
 			continue
@@ -153,7 +219,6 @@ func (t *dataTable) pending() ([]rowUpdate, []map[string]*string) {
 		}
 		updates = append(updates, rowUpdate{pk: pk, changes: changes})
 	}
-	var deletes []map[string]*string
 	for row := range t.deleted {
 		if row >= len(t.data.Rows) {
 			continue
@@ -162,7 +227,20 @@ func (t *dataTable) pending() ([]rowUpdate, []map[string]*string) {
 			deletes = append(deletes, pk)
 		}
 	}
-	return updates, deletes
+	for row := range t.inserted {
+		if row >= len(t.data.Rows) {
+			continue
+		}
+		vals := t.rowValues(row) // effective values (incl. edits to the staged row)
+		ins := map[string]*string{}
+		for i, c := range t.data.Cols {
+			if i < len(vals) && vals[i] != nil {
+				ins[c.Name] = vals[i] // nil (unset) columns are omitted -> DB default
+			}
+		}
+		inserts = append(inserts, ins)
+	}
+	return updates, deletes, inserts
 }
 
 // beginEdit opens the cell editor for one cell.
@@ -172,13 +250,26 @@ func (t *dataTable) beginEdit(row, col int) {
 	}
 	colName := t.data.Cols[col].Name
 	var cur string
+	isNull := true
 	if vals := t.rowValues(row); col < len(vals) && vals[col] != nil {
 		cur = *vals[col]
+		isNull = false
 	}
 
 	entry := widget.NewMultiLineEntry()
 	entry.SetText(cur)
-	nullChk := widget.NewCheck("Set NULL", nil)
+	nullChk := widget.NewCheck("Set NULL", func(on bool) {
+		if on {
+			entry.SetText("")
+			entry.Disable()
+		} else {
+			entry.Enable()
+		}
+	})
+	nullChk.SetChecked(isNull)
+	if isNull {
+		entry.Disable()
+	}
 
 	var dlg dialog.Dialog
 	setBtn := widget.NewButton("Set", func() {
@@ -196,17 +287,22 @@ func (t *dataTable) beginEdit(row, col int) {
 		dlg.Hide()
 		t.revertCell(row, col)
 	})
+	// Revert only means something when this cell already carries a pending edit;
+	// otherwise it would silently no-op, so keep it disabled.
+	if _, dirty := t.dirty[row][col]; !dirty {
+		revertBtn.Disable()
+	}
 
 	title := "Edit " + colName
 	if id := t.rowID(row); id != "" {
 		title += " — " + id
 	}
-	body := container.NewBorder(
-		container.NewVBox(nullChk, widget.NewSeparator()),
+	body := container.NewPadded(container.NewBorder(
+		container.NewPadded(nullChk),
 		container.NewHBox(revertBtn, layout.NewSpacer(), cancelBtn, setBtn),
 		nil, nil,
 		entry,
-	)
+	))
 	dlg = dialog.NewCustom(title, "", body, t.window)
 	dlg.Resize(fyne.NewSize(460, 300))
 	dlg.Show()
@@ -256,10 +352,13 @@ func (ws *workspace) prepGrid(g *dataTable) {
 // gotoTable opens the target table filtered by column = value — the click
 // action behind Query-Magics "__goto__" aliases and TablePlus' FK arrows.
 func (ws *workspace) gotoTable(table, column, value string) {
+	// Jump to the target table filtered by column = value. Each table keeps its
+	// own filter per tab, so the goto filter is applied to that tab directly.
+	filter := ""
 	if column != "" {
-		ws.filterSQL = ws.quoteTable(column) + " = '" + strings.ReplaceAll(value, "'", "''") + "'"
+		filter = ws.quoteTable(column) + " = '" + strings.ReplaceAll(value, "'", "''") + "'"
 	}
-	ws.openTable(table)
+	ws.openTableFiltered(table, filter)
 }
 
 // toggleEditMode flips the edit mode (toolbar button).
@@ -425,8 +524,8 @@ func (ws *workspace) commitEdits() {
 		return
 	}
 	up, ok := ws.sess.(db.Updater)
-	updates, deletes := g.pending()
-	if !ok && len(updates)+len(deletes) > 0 {
+	updates, deletes, inserts := g.pending()
+	if !ok && len(updates)+len(deletes)+len(inserts) > 0 {
 		showInfo(ws.window, "Commit", "This connection does not support editing.")
 		return
 	}
@@ -435,16 +534,19 @@ func (ws *workspace) commitEdits() {
 	// Safe Mode gate: committing pending edits is a write, so prompt per
 	// the connection's level before the batch reaches the server.
 	desc := fmt.Sprintf("commit %d row change(s)", g.changeCount())
+	if len(inserts) > 0 {
+		desc += fmt.Sprintf(", %d new row(s)", len(inserts))
+	}
 	if len(ddl) > 0 {
 		desc += fmt.Sprintf(" and %d DDL statement(s)", len(ddl))
 	}
 	gateSafeMode(ws.window, ws.conn, "COMMIT — "+desc, func() {
-		ws.commitGated(up, ok, table, updates, deletes, ddl)
+		ws.commitGated(up, ok, table, updates, deletes, inserts, ddl)
 	})
 }
 
 // commitGated applies one already-gated commit batch and reloads the page.
-func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates []rowUpdate, deletes []map[string]*string, ddl []string) {
+func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates []rowUpdate, deletes, inserts []map[string]*string, ddl []string) {
 	progress := dialog.NewProgressInfinite("Commit", "Saving changes…", ws.window)
 	progress.Show()
 	safeGo("commit", func() {
@@ -457,7 +559,7 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 			for _, u := range updates {
 				rowEdits = append(rowEdits, db.RowEdit{PK: u.pk, Changes: u.changes})
 			}
-			ferr = batcher.ApplyChanges(table, rowEdits, deletes, nil, ddl)
+			ferr = batcher.ApplyChanges(table, rowEdits, deletes, inserts, ddl)
 		} else {
 			// Fallback for sessions without transaction support: one statement at
 			// a time (each autocommit).
@@ -477,6 +579,15 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 					}
 				}
 			}
+			// Then the staged new rows (INSERTs).
+			if ferr == nil && ok {
+				for _, ins := range inserts {
+					if err := up.InsertRow(table, ins); err != nil {
+						ferr = err
+						break
+					}
+				}
+			}
 			// Then the queued structural DDL (ALTER statements).
 			if ferr == nil && len(ddl) > 0 {
 				for _, stmt := range ddl {
@@ -490,6 +601,9 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 		safeDo(func() {
 			progress.Hide()
 			if ferr != nil {
+				if len(ddl) > 0 {
+					ferr = fmt.Errorf("%w（排队的 %d 条 DDL 已丢弃，请手动重新排队）", ferr, len(ddl))
+				}
 				ws.pendingDDL = nil // failed commit: drop the queue, re-queue manually
 				dialog.NewError(ferr, ws.window).Show()
 				return
@@ -502,11 +616,25 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 
 // rollbackEdits discards all unsaved changes and any queued DDL.
 func (ws *workspace) rollbackEdits() {
+	pending := 0
 	if ws.grid != nil {
-		ws.grid.clearDirty()
+		pending = ws.grid.changeCount()
 	}
-	ws.pendingDDL = nil
-	ws.refreshTxnBar()
+	if pending == 0 && len(ws.pendingDDL) == 0 {
+		return // nothing to discard
+	}
+	dialog.NewConfirm("Rollback",
+		fmt.Sprintf("Discard %d unsaved change(s) and %d queued DDL statement(s)?", pending, len(ws.pendingDDL)),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			if ws.grid != nil {
+				ws.grid.clearDirty()
+			}
+			ws.pendingDDL = nil
+			ws.refreshTxnBar()
+		}, ws.window).Show()
 }
 
 // markRowDeleted flags the selected row for deletion (bottom-bar "− Row").
@@ -528,8 +656,7 @@ func (ws *workspace) showInsertRowDialog() {
 		showInfo(ws.window, "Add Row", "Enable edit mode first.")
 		return
 	}
-	up, ok := ws.sess.(db.Updater)
-	if !ok {
+	if _, ok := ws.sess.(db.Updater); !ok {
 		showInfo(ws.window, "Add Row", "This connection does not support editing.")
 		return
 	}
@@ -551,7 +678,7 @@ func (ws *workspace) showInsertRowDialog() {
 	table := ws.tableName
 	var dlg dialog.Dialog
 	cancelBtn := widget.NewButton("Cancel", func() { dlg.Hide() })
-	insertBtn := widget.NewButton("Insert", func() {
+	insertBtn := widget.NewButton("Add", func() {
 		values := map[string]*string{}
 		for i, e := range entries {
 			if e.Text != "" {
@@ -564,24 +691,15 @@ func (ws *workspace) showInsertRowDialog() {
 			return
 		}
 		dlg.Hide()
-		progress := dialog.NewProgressInfinite("Add Row", "Inserting…", ws.window)
-		progress.Show()
-		safeGo("insert-row", func() {
-			err := up.InsertRow(table, values)
-			safeDo(func() {
-				progress.Hide()
-				if err != nil {
-					dialog.NewError(err, ws.window).Show()
-					return
-				}
-				ws.reloadTable()
-			})
-		})
+		// Stage the row (pending insert) like any other edit; Commit writes it.
+		idx := ws.grid.stageInsert(values)
+		ws.grid.selectRow(idx)
+		ws.refreshTxnBar()
 	})
 	insertBtn.Importance = widget.HighImportance
 
 	body := container.NewBorder(
-		widget.NewLabel("Empty columns are left to the database default."),
+		widget.NewLabel("Empty columns use the database default. The row is staged until you Commit."),
 		container.NewHBox(layout.NewSpacer(), cancelBtn, insertBtn),
 		nil, nil,
 		container.NewScroll(form),

@@ -12,28 +12,28 @@ import (
 )
 
 func TestBuildWordsAndMatch(t *testing.T) {
-	words := buildWords([]string{"users", "Users"}, []string{"id", "name"})
+	sugs := buildSuggestions([]string{"users", "Users"}, map[string][]string{"users": {"id", "name"}}, "shop", nil)
 	count := 0
-	for _, w := range words {
-		if strings.EqualFold(w, "users") {
+	for _, s := range sugs {
+		if strings.EqualFold(s.label, "users") {
 			count++
 		}
 	}
 	if count != 1 {
 		t.Fatalf("users appears %d times, want 1", count)
 	}
-	if got := matchWords(words, "sel", 10); len(got) == 0 || got[0] != "SELECT" {
-		t.Fatalf("matchWords(sel) = %v", got)
+	if got := matchSuggestions(sugs, "sel", 10); len(got) == 0 || got[0].label != "SELECT" {
+		t.Fatalf("matchSuggestions(sel) = %v", got)
 	}
-	if got := matchWords(words, "xyz", 10); len(got) != 0 {
-		t.Fatalf("matchWords(xyz) = %v, want none", got)
+	if got := matchSuggestions(sugs, "xyz", 10); len(got) != 0 {
+		t.Fatalf("matchSuggestions(xyz) = %v, want none", got)
 	}
-	if got := matchWords(words, "", 3); len(got) != 3 {
+	if got := matchSuggestions(sugs, "", 3); len(got) != 3 {
 		t.Fatalf("limit not respected: got %d", len(got))
 	}
-	for i := 1; i < len(words); i++ {
-		if strings.ToLower(words[i-1]) > strings.ToLower(words[i]) {
-			t.Fatalf("not sorted at %d: %q > %q", i, words[i-1], words[i])
+	for i := 1; i < len(sugs); i++ {
+		if strings.ToLower(sugs[i-1].label) > strings.ToLower(sugs[i].label) {
+			t.Fatalf("not sorted at %d: %q > %q", i, sugs[i-1].label, sugs[i].label)
 		}
 	}
 }
@@ -147,7 +147,10 @@ func TestAutoCompleteKeyboardSelection(t *testing.T) {
 	ed.SetText("se")
 	qp.setCursorRune(2)
 
-	qp.showAutoSuggestions(0, 2, []string{"SELECT", "SET"})
+	qp.showAutoSuggestions(0, 2, []suggestion{
+		{label: "SELECT", kind: "keyword", owner: "keyword"},
+		{label: "SET", kind: "keyword", owner: "keyword"},
+	})
 	if qp.autoSel != -1 {
 		t.Fatalf("initial selection = %d, want none", qp.autoSel)
 	}

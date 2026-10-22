@@ -174,14 +174,18 @@ func (ws *workspace) showERWindow(m *erModel) {
 		layoutERModel(m)
 		diagram.applyPositions()
 	}
-	legend := widget.NewLabel("Drag a table to move it.  ● marks primary-key columns.  Lines are foreign keys.")
-	toolbar := container.NewHBox(container.NewPadded(reset), container.NewPadded(legend))
+	// Top bar: just the reset action. Bottom status: counts + usage hint.
+	toolbar := container.NewBorder(nil, nil, container.NewPadded(reset), nil, nil)
+	status := widget.NewLabel(fmt.Sprintf("%d 张表 · %d 个外键 · 拖动表格移动，● 为主键，连线为外键",
+		len(m.Tables), len(m.FKs)))
+	status.Importance = widget.LowImportance
+	bottom := container.NewPadded(status)
 
 	app := fyne.CurrentApp()
 	w := app.NewWindow(fmt.Sprintf("ER — %s", ws.currentDB))
 	w.Resize(fyne.NewSize(920, 640))
 	erdBG := newPanelBackground(diagram, func() color.Color { return pal().contentBG })
-	w.SetContent(container.NewBorder(toolbar, nil, nil, nil, erdBG))
+	w.SetContent(container.NewBorder(toolbar, bottom, nil, nil, erdBG))
 	w.Show()
 }
 

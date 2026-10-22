@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -32,7 +33,7 @@ func sqlLiteral(v *string) string {
 
 // buildPreviewSQL renders the pending edits of one grid as statements for the
 // given table (empty table name → "table" placeholder, e.g. query results).
-func buildPreviewSQL(table, driver string, updates []rowUpdate, deletes []map[string]*string) string {
+func buildPreviewSQL(table, driver string, updates []rowUpdate, deletes, inserts []map[string]*string) string {
 	if table == "" {
 		table = "table"
 	}
@@ -56,6 +57,21 @@ func buildPreviewSQL(table, driver string, updates []rowUpdate, deletes []map[st
 		}
 		fmt.Fprintf(&b, "DELETE FROM %s WHERE %s;\n", qt, strings.Join(where, " AND "))
 	}
+	for _, ins := range inserts {
+		cols := make([]string, 0, len(ins))
+		for c := range ins {
+			cols = append(cols, c)
+		}
+		sort.Strings(cols) // stable column order for a readable preview
+		colParts := make([]string, len(cols))
+		valParts := make([]string, len(cols))
+		for i, c := range cols {
+			colParts[i] = quoteCol(c, driver)
+			valParts[i] = sqlLiteral(ins[c])
+		}
+		fmt.Fprintf(&b, "INSERT INTO %s (%s) VALUES (%s);\n",
+			qt, strings.Join(colParts, ", "), strings.Join(valParts, ", "))
+	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -66,8 +82,8 @@ func (ws *workspace) previewEdits() {
 	if g == nil || (g.changeCount() == 0 && len(ws.pendingDDL) == 0) {
 		return
 	}
-	updates, deletes := g.pending()
-	sqlText := buildPreviewSQL(ws.tableName, ws.conn.Driver, updates, deletes)
+	updates, deletes, inserts := g.pending()
+	sqlText := buildPreviewSQL(ws.tableName, ws.conn.Driver, updates, deletes, inserts)
 	if d := strings.Join(ws.pendingDDL, "\n"); d != "" {
 		if sqlText != "" {
 			sqlText += "\n\n"

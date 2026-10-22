@@ -21,11 +21,45 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"fynequery/db"
+	"fynequery/icons"
 	"fynequery/proto"
 )
 
 // browseLimit is how many rows a table data tab loads (one page).
 const browseLimit = 300
+
+// docKind distinguishes the two document-tab flavours in the strip.
+type docKind int
+
+const (
+	docData  docKind = iota // a browsed table/view
+	docQuery                // an SQL editor pane
+)
+
+// dataTableTab is one open table's view state. The grid widget, paging cursor,
+// filter and structure/index panes are stored per tab so several tables stay
+// open at once and switching restores each one exactly as it was.
+type dataTableTab struct {
+	name        string
+	grid        *dataTable
+	cols        []ColumnInfo
+	offset      int
+	totalRows   int
+	totalApprox bool
+	filterSQL   string
+	segIdx      int // which of Data/Structure/Indexes is showing
+	structObj   fyne.CanvasObject
+	indexObj    fyne.CanvasObject
+	gen         int // per-tab load generation (discards stale async results)
+	loaded      bool
+}
+
+// docTab ties one strip entry to its content (a table view or a query pane).
+type docTab struct {
+	kind docKind
+	data *dataTableTab
+	qp   *queryPane
+}
 
 type workspace struct {
 	window           fyne.Window
@@ -41,6 +75,9 @@ type workspace struct {
 	indexPane        *fyne.Container   // 索引 segment content
 	dataStack        *fyne.Container   // dataSlot + struct + index (tab 0 content)
 	queryTabs        []*queryPane      // one independent query pane per SQL tab
+	docs             []*docTab         // parallel to ws.tabs.tabs (data or query)
+	dataTabs         []*dataTableTab   // open table views (multi-tab browsing)
+	activeData       *dataTableTab     // the table tab currently on screen
 	details          *detailsPane      // right sidebar
 	detailWrap       fyne.CanvasObject // toggled by the toolbar button
 	currentDB        string            // selected database ("" = none yet)
@@ -65,12 +102,13 @@ type workspace struct {
 	bottomBar        fyne.CanvasObject // data-view bottom bar (hidden in query tabs)
 	pendingDDL       []string          // queued ALTER TABLE statements (Preview/Commit)
 	findCounterLabel *widget.Label     // "cur/total" counter for the data-grid find box
+	filterBtn        *flatButton       // bottom-bar Filter button (shows an active-filter dot)
 	loadingMu        sync.Mutex
 	loadingGen       int // generation counter to discard stale async results
 	// toolbar
 	ribbon        *serverRibbon     // connection ribbon (opens the connection picker)
 	ribbonTLS     string            // TLS version shown in the ribbon ("" = omit)
-	dbSelect      *crumbPill        // database selector pill (opens 打开数据库)
+	dbSelect      *clickableIcon    // database selector icon (opens 打开数据库)
 	sideBtn       *clickableIcon    // toolbar sidebar toggle (selected state)
 	detailBtn     *clickableIcon    // toolbar details toggle
 	consoleBtn    *clickableIcon    // toolbar console toggle
@@ -93,7 +131,8 @@ type workspace struct {
 func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, onClose func()) {
 	darkMode = dark
 	w := app.NewWindow("TablePro — " + conn.Name)
-	w.Resize(fyne.NewSize(1360, 860))
+	want := fyne.NewSize(1360, 860)
+	w.Resize(want)
 
 	// TablePlus opens at the server level with no database selected. Re-dial
 	// without a default database so the workspace starts in the "未选择数据库"
@@ -145,7 +184,22 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 	// database picker remains reachable from the toolbar database pill.
 	w.Canvas().AddShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyK, Modifier: fyne.KeyModifierControl},
 		func(fyne.Shortcut) { ws.showQuickOpen() })
+	// Ctrl+F toggles the in-result search bar (hidden by default).
+	w.Canvas().AddShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyF, Modifier: fyne.KeyModifierControl},
+		func(fyne.Shortcut) {
+			if qp := ws.activeQueryPane(); qp != nil {
+				qp.toggleFindBar()
+			}
+		})
 	w.Show()
+	// Strip the native caption so the title row above becomes the window's top
+	// row. Deferred past the first frames: glfw must have finished its initial
+	// client-area sizing first. enableCustomChrome also resizes the native
+	// window to the canvas — a Fyne Resize afterwards would re-add the removed
+	// caption margins and leave a blank band with misaligned pointer hits.
+	time.AfterFunc(300*time.Millisecond, func() {
+		safeDo(func() { enableCustomChrome(w) })
+	})
 	// Refresh the theme only now that the window has a native handle; pushing
 	// the app theme earlier would make Fyne walk every window's HWND for
 	// dark-mode and panic on any that is not yet shown.
@@ -153,7 +207,7 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 	// The window was sized before the monitor scale was known; re-apply it so
 	// the canvas matches the real client area (otherwise the content is
 	// rendered larger than the window and clipped).
-	fitWindowWhenScaled(w, fyne.NewSize(1360, 860))
+	fitWindowWhenScaled(w, want)
 	ws.startKeepAlive()
 }
 
@@ -174,13 +228,18 @@ func (ws *workspace) serverLabel() string {
 // updateBanner refreshes the toolbar database selector pill (the current
 // database, or a "选择数据库" hint when none is picked) and the green
 // server-info ribbon.
+// dbPickTip is the hover description for the toolbar database icon: the
+// TablePlus-style hint plus the currently selected database, if any.
+func dbPickTip(current string) string {
+	if current == "" {
+		return "显示数据库列表（Ctrl K）"
+	}
+	return current + " — 显示数据库列表（Ctrl K）"
+}
+
 func (ws *workspace) updateBanner() {
 	if ws.dbSelect != nil {
-		name := ws.currentDB
-		if name == "" {
-			name = "选择数据库"
-		}
-		ws.dbSelect.setText(name)
+		ws.dbSelect.setTip(dbPickTip(ws.currentDB))
 	}
 	ws.refreshRibbon()
 }
@@ -211,7 +270,7 @@ func (ws *workspace) refreshRibbon() {
 		srv = ws.dbType.Name
 	}
 	table := ""
-	if ws.tabs == nil || ws.tabs.current == 0 {
+	if doc := ws.docAt(ws.tabs.current); doc != nil && doc.kind == docData {
 		table = ws.tableName
 	}
 	// Privacy mode redacts where the server lives on the ribbon.
@@ -229,11 +288,11 @@ func (ws *workspace) refreshRibbon() {
 }
 
 // openDatabasePicker shows the "打开数据库" sheet for the current server.
-func (ws *workspace) openDatabasePicker() {
+func (ws *workspace) openDatabasePicker(pos fyne.Position) {
 	if ws.sess == nil {
 		return
 	}
-	showOpenDatabaseDialog(ws.window, ws.sess, ws.conn.Driver, ws.currentDB, func(name string) {
+	showOpenDatabaseDialog(ws.window, pos, ws.sess, ws.conn.Driver, ws.currentDB, func(name string) {
 		ws.switchDatabase(name)
 	})
 }
@@ -397,7 +456,7 @@ func (ws *workspace) switchDatabase(name string) {
 	ws.setSession(sess)
 	ws.conn = newConn
 	ws.currentDB = name
-	ws.tableName = ""
+	ws.closeAllDataTabs() // open table grids belong to the old database
 	ws.updateBanner()
 	ws.logf("已选择数据库 %s", name)
 	ws.syncChrome() // blank center until a table is opened
@@ -492,33 +551,16 @@ func (ws *workspace) build() fyne.CanvasObject {
 	}, func() {
 		ws.addQueryTab()
 	})
-	ws.tabs.onCloseTab = func(i int) {
-		if i == 0 {
-			return // the data tab is never closeable
-		}
-		if i-1 < len(ws.queryTabs) {
-			ws.queryTabs = append(ws.queryTabs[:i-1], ws.queryTabs[i:]...)
-		}
-		ws.tabs.removeTab(i)
-		// Rebuild the content stack from the data stack + the surviving panes.
-		ws.content.Objects = ws.content.Objects[:0]
-		ws.content.Objects = append(ws.content.Objects, ws.dataStack)
-		for _, qp := range ws.queryTabs {
-			ws.content.Objects = append(ws.content.Objects, qp)
-		}
-		if ws.tabs.current >= len(ws.tabs.tabs) {
-			ws.tabs.current = len(ws.tabs.tabs) - 1
-		}
-		ws.tabs.setActive(ws.tabs.current)
-		ws.showTab(ws.tabs.current)
-		ws.syncTabStrip()
-	}
-	// seed tabs: one data tab (empty until a table is opened). SQL editor
-	// tabs are only created on demand (SQL button / +), matching TablePlus.
-	dataTab := ws.tabs.addTab("Data", false)
-	dataTab.active = true
+	ws.tabs.onCloseTab = ws.closeTab
+	// No seed tab: the centre stays blank until a table or query is opened,
+	// and the strip only appears once a second document exists (mockup).
 	ws.tabs.current = 0
-	ws.tabs.tabs[0].setActive(true)
+	// The document tab strip sits at the top of the centre column so it lines
+	// up on one row with the sidebar (项目/查询/历史) and details (详情/帮助)
+	// mode switchers instead of occupying its own full-width band.
+	ws.tabStrip = newPanelBackground(container.NewPadded(ws.tabs),
+		func() color.Color { return pal().stripBG })
+	ws.tabStrip.Hide()
 
 	// ---- sidebar (resizable, like TablePlus) ----
 	ws.side = newSidebar(func(name string) {
@@ -544,6 +586,13 @@ func (ws *workspace) build() fyne.CanvasObject {
 	ws.details = newDetailsPane()
 	ws.details.onEdit = ws.editRowField
 	ws.details.onSet = ws.setRowField
+	ws.details.onView = func(f detailsField) {
+		val := ""
+		if f.Value != nil {
+			val = *f.Value
+		}
+		showFullValueDialog(ws.window, f.Name, val)
+	}
 	ws.detailWrap = newPanelBackground(ws.details, func() color.Color { return pal().detailBG })
 
 	// ---- structure + index panes (segments) ----
@@ -562,7 +611,7 @@ func (ws *workspace) build() fyne.CanvasObject {
 	// Shown only on the data tab; the query tab has its own status bar and,
 	// like TablePlus's query workspace, no 数据/结构/索引 segmented control.
 	ws.bottomBar = container.NewVBox(ws.buildBottomBar())
-	centerCol := container.NewBorder(nil, ws.bottomBar, nil, nil, ws.content)
+	centerCol := container.NewBorder(ws.tabStrip, ws.bottomBar, nil, nil, ws.content)
 
 	// Bottom console log (mockup "控制台日志"): part of the centre column so
 	// the sidebars keep running the full window height.
@@ -640,7 +689,7 @@ func (ws *workspace) loadInventory() {
 				return
 			}
 			if err != nil {
-				showInfo(ws.window, "Load Tables", "Could not list tables:\n"+err.Error())
+				ws.side.setLoadError(err.Error()) // inline, persistent (was a transient dialog)
 				return
 			}
 			list := make([]TableInfo, 0, len(objs))
@@ -682,11 +731,15 @@ func (ws *workspace) loadDatabases() {
 	})
 }
 
-// newDatabase is the sidebar "+" handler: creating a database is not supported
-// in-app, so point the user at the SQL editor.
+// newDatabase is the sidebar "+" handler: opens the in-app "新建数据库" sheet.
+// On success it switches the workspace to the newly created database.
 func (ws *workspace) newDatabase() {
-	showInfo(ws.window, "新建数据库",
-		"暂不支持在应用内创建数据库。\n请在 SQL 标签页执行 CREATE DATABASE。")
+	if ws.sess == nil {
+		return
+	}
+	showCreateDatabaseDialog(ws.window, ws.sess, ws.conn.Driver, func(name string) {
+		ws.switchDatabase(name)
+	})
 }
 
 // loadTLS fills the ribbon's TLS segment in the background (best effort).
@@ -797,22 +850,23 @@ func (ws *workspace) buildStrip() fyne.CanvasObject {
 		newToolButton(theme.GridIcon(), func() { ws.openERDiagram() }),
 	)
 
-	dbName := ws.currentDB
-	if dbName == "" {
-		dbName = "选择数据库"
-	}
-	ws.dbSelect = newCrumbPill(widget.NewIcon(theme.StorageIcon()), dbName,
-		theme.MenuDropDownIcon(), func() { ws.openDatabasePicker() })
+	// Database selector is an icon-only button (TablePlus style); the current
+	// database name lives in its hover tooltip, not in the toolbar text.
+	ws.dbSelect = newToolButton(theme.StorageIcon(), func() {
+		pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(ws.dbSelect)
+		ws.openDatabasePicker(pos)
+	})
+	ws.dbSelect.setTip(dbPickTip(ws.currentDB))
 	dbSQLGroup := newToolGroup(
 		ws.dbSelect,
 		newIconTextButton(theme.DocumentCreateIcon(), "SQL", func() { ws.addQueryTab() }),
 	)
 
-	left := container.NewHBox(menuGroup, spacerW(6), connBtn, spacerW(6),
-		viewGroup, spacerW(6), dbSQLGroup)
+	left := container.NewHBox(menuGroup, spacerW(4), connBtn, spacerW(4),
+		viewGroup, spacerW(4), dbSQLGroup)
 
 	// ---- right: connection/refresh/settings, console/details toggles ----
-	ws.editBtn = newToolButton(theme.DocumentCreateIcon(), func() { ws.toggleEditMode() })
+	ws.editBtn = newToolButton(icons.Edit, func() { ws.toggleEditMode() })
 	opsGroup := newToolGroup(
 		newToolButton(theme.InfoIcon(), func() {
 			showInfo(ws.window, "Connection", ws.connInfoText())
@@ -820,24 +874,70 @@ func (ws *workspace) buildStrip() fyne.CanvasObject {
 		ws.editBtn,
 		newToolButton(theme.SettingsIcon(), func() { ws.openMoreMenu() }),
 	)
-	ws.consoleBtn = newToolButton(theme.DocumentIcon(), func() { ws.toggleConsole() })
+	ws.consoleBtn = newToolButton(icons.Console, func() { ws.toggleConsole() })
 	ws.consoleBtn.setSelected(true)
 	ws.detailBtn = newToolButton(theme.ViewRestoreIcon(), func() { ws.toggleDetails() })
 	ws.detailBtn.setSelected(true)
 	paneGroup := newToolGroup(ws.consoleBtn, ws.detailBtn)
-	right := container.NewHBox(opsGroup, spacerW(6), paneGroup)
+	right := container.NewHBox(opsGroup, spacerW(4), paneGroup)
+	if chromeEnabled {
+		// custom chrome: the window buttons live in the title row
+		winGroup := newToolGroup(
+			newToolButton(icons.WinMin, chromeMinimize),
+			newToolButton(icons.WinMax, chromeToggleMax),
+			newToolButton(icons.Cancel, func() { ws.window.Close() }),
+		)
+		right = container.NewHBox(opsGroup, spacerW(4), paneGroup, spacerW(6), winGroup)
+	}
 
-	toolRow := container.NewBorder(nil, nil, left, right,
-		container.NewPadded(ws.ribbon))
-	toolBox := newPanelBackground(container.NewPadded(toolRow),
+	// Keep only horizontal breathing room around the ribbon; the old padded
+	// wrapper also added 8px of vertical padding and made the strip too tall.
+	ribbonArea := container.NewBorder(nil, nil, spacerW(8), spacerW(8), ws.ribbon)
+	toolRow := container.NewBorder(nil, nil, left, right, ribbonArea)
+	// Empty title-row space stays draggable so the window can still be moved
+	// (and double-click maximised) now that the native caption is gone.
+	stack := container.NewStack(newChromeDragArea(), toolRow)
+	toolBox := newPanelBackground(container.NewPadded(stack),
 		func() color.Color { return pal().toolbarBG })
 
-	// ---- document tabs (hidden while the data tab is alone) ----
-	ws.tabStrip = newPanelBackground(container.NewPadded(ws.tabs),
-		func() color.Color { return pal().stripBG })
-	ws.tabStrip.Hide()
+	// The document tab strip lives at the top of the centre column (see
+	// build()), on the same row as the sidebar / details mode switchers.
+	return toolBox
+}
 
-	return container.NewVBox(toolBox, ws.tabStrip)
+// chromeDragArea fills the title row behind the widgets: dragging empty space
+// moves the window via the OS caption dragger, double-click toggles maximise.
+type chromeDragArea struct {
+	widget.BaseWidget
+	lastDrag time.Time
+}
+
+func newChromeDragArea() *chromeDragArea {
+	d := &chromeDragArea{}
+	d.ExtendBaseWidget(d)
+	return d
+}
+
+func (d *chromeDragArea) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(canvas.NewRectangle(color.Transparent))
+}
+
+func (d *chromeDragArea) Dragged(*fyne.DragEvent) {
+	// The OS move loop swallows the rest of the gesture (no DragEnd), so gate
+	// on time instead of a per-gesture flag.
+	if time.Since(d.lastDrag) < 300*time.Millisecond {
+		return
+	}
+	d.lastDrag = time.Now()
+	chromeStartDrag()
+}
+
+func (d *chromeDragArea) DragEnd() {}
+
+func (d *chromeDragArea) DoubleTapped(*fyne.PointEvent) {
+	if chromeEnabled {
+		chromeToggleMax()
+	}
 }
 
 // syncTabStrip shows the document tab strip only when there is more than one
@@ -877,6 +977,9 @@ func (ws *workspace) buildBottomBar() fyne.CanvasObject {
 	ws.segment = newSegmented([]string{"Data", "Structure", "Indexes"}, func(i int) {
 		if ws.structPane == nil {
 			return
+		}
+		if ws.activeData != nil {
+			ws.activeData.segIdx = i // remember per tab which pane is showing
 		}
 		if i == 1 {
 			ws.dataSlot.Hide()
@@ -932,6 +1035,7 @@ func (ws *workspace) buildBottomBar() fyne.CanvasObject {
 	pageMark.onTap = func() { ws.showColumnsDialog() }
 	filtersBtn := newFlatButton("Filter")
 	filtersBtn.onTap = func() { ws.showFilterDialog() }
+	ws.filterBtn = filtersBtn
 	columnsBtn := newFlatButton("Columns")
 	columnsBtn.onTap = func() { ws.showColumnsDialog() }
 	row2right := container.NewHBox(filtersBtn, spacerW(6), columnsBtn, spacerW(10),
@@ -968,6 +1072,7 @@ type flatButton struct {
 	widget.BaseWidget
 	label   string
 	enabled bool
+	hover   bool
 	onTap   func()
 }
 
@@ -984,6 +1089,13 @@ func (b *flatButton) SetEnabled(e bool) {
 	}
 }
 
+func (b *flatButton) setLabel(s string) {
+	if b.label != s {
+		b.label = s
+		b.Refresh()
+	}
+}
+
 func (b *flatButton) Tapped(*fyne.PointEvent) {
 	if b.enabled && b.onTap != nil {
 		b.onTap()
@@ -991,11 +1103,14 @@ func (b *flatButton) Tapped(*fyne.PointEvent) {
 }
 func (b *flatButton) Cursor() desktop.Cursor { return desktop.DefaultCursor }
 
+func (b *flatButton) MouseIn(*desktop.MouseEvent)    { b.hover = true; b.Refresh() }
+func (b *flatButton) MouseOut()                      { b.hover = false; b.Refresh() }
+func (b *flatButton) MouseMoved(*desktop.MouseEvent) {}
+
 func (b *flatButton) CreateRenderer() fyne.WidgetRenderer {
-	bg := canvas.NewRectangle(pal().hover)
-	bg.CornerRadius = 6
-	bg.StrokeWidth = 1
-	bg.StrokeColor = pal().line
+	// Ghost style: transparent by default, a soft fill on hover — no border.
+	bg := canvas.NewRectangle(colorTransparent)
+	bg.CornerRadius = 7
 	text := canvas.NewText(b.label, pal().foreground)
 	text.TextSize = 12
 	return &flatBtnRenderer{b: b, bg: bg, text: text}
@@ -1009,7 +1124,7 @@ type flatBtnRenderer struct {
 
 func (r *flatBtnRenderer) Objects() []fyne.CanvasObject { return []fyne.CanvasObject{r.bg, r.text} }
 func (r *flatBtnRenderer) MinSize() fyne.Size {
-	return fyne.NewSize(r.text.MinSize().Width+20, 26)
+	return fyne.NewSize(r.text.MinSize().Width+18, 24)
 }
 
 func (r *flatBtnRenderer) Destroy() {}
@@ -1019,14 +1134,19 @@ func (r *flatBtnRenderer) Layout(size fyne.Size) {
 	r.text.Move(fyne.NewPos((size.Width-t.Width)/2, (size.Height-t.Height)/2))
 }
 func (r *flatBtnRenderer) Refresh() {
+	if r.text.Text != r.b.label {
+		r.text.Text = r.b.label
+	}
 	p := pal()
-	if !r.b.enabled {
-		r.bg.FillColor = color.Transparent
-		r.bg.StrokeColor = color.Transparent
+	switch {
+	case !r.b.enabled:
+		r.bg.FillColor = colorTransparent
 		r.text.Color = p.gridNullFG
-	} else {
+	case r.b.hover:
 		r.bg.FillColor = p.hover
-		r.bg.StrokeColor = p.line
+		r.text.Color = p.foreground
+	default:
+		r.bg.FillColor = colorTransparent
 		r.text.Color = p.foreground
 	}
 	r.bg.Refresh()
@@ -1034,6 +1154,156 @@ func (r *flatBtnRenderer) Refresh() {
 }
 
 // tab management ------------------------------------------------------------
+
+// addDoc appends one strip entry of the given kind and returns its index.
+// ws.docs stays parallel to ws.tabs.tabs so an index maps to its content.
+func (ws *workspace) addDoc(kind docKind, title string, closeable bool, data *dataTableTab, qp *queryPane) int {
+	ws.tabs.addTab(title, closeable)
+	ws.docs = append(ws.docs, &docTab{kind: kind, data: data, qp: qp})
+	return len(ws.docs) - 1
+}
+
+// docAt returns the document at strip index i (nil when out of range).
+func (ws *workspace) docAt(i int) *docTab {
+	if i < 0 || i >= len(ws.docs) {
+		return nil
+	}
+	return ws.docs[i]
+}
+
+// dataDocIndex returns the strip index of the open table tab named name, or -1.
+func (ws *workspace) dataDocIndex(name string) int {
+	for i, d := range ws.docs {
+		if d.kind == docData && d.data != nil && d.data.name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// removeDocAt drops strip index i from both the bar and the docs slice.
+func (ws *workspace) removeDocAt(i int) {
+	if i < 0 || i >= len(ws.docs) {
+		return
+	}
+	ws.docs = append(ws.docs[:i], ws.docs[i+1:]...)
+	ws.tabs.removeTab(i)
+}
+
+// removeCanvasObject returns objs without the first occurrence of o.
+func removeCanvasObject(objs []fyne.CanvasObject, o fyne.CanvasObject) []fyne.CanvasObject {
+	for i, x := range objs {
+		if x == o {
+			return append(objs[:i], objs[i+1:]...)
+		}
+	}
+	return objs
+}
+
+// closeTab removes strip index i (a query pane or a table view) and switches to
+// a surviving document. Every document tab is closeable.
+func (ws *workspace) closeTab(i int) {
+	doc := ws.docAt(i)
+	if doc == nil {
+		return
+	}
+	if doc.kind == docQuery && doc.qp != nil {
+		for k, qp := range ws.queryTabs {
+			if qp == doc.qp {
+				ws.queryTabs = append(ws.queryTabs[:k], ws.queryTabs[k+1:]...)
+				break
+			}
+		}
+		ws.content.Objects = removeCanvasObject(ws.content.Objects, doc.qp)
+	} else if doc.kind == docData && doc.data != nil {
+		for k, t := range ws.dataTabs {
+			if t == doc.data {
+				ws.dataTabs = append(ws.dataTabs[:k], ws.dataTabs[k+1:]...)
+				break
+			}
+		}
+		if ws.activeData == doc.data {
+			ws.activeData = nil
+		}
+	}
+	ws.removeDocAt(i)
+	if ws.tabs.current >= len(ws.docs) {
+		ws.tabs.current = len(ws.docs) - 1
+	}
+	if ws.tabs.current < 0 {
+		ws.tabs.current = 0
+	}
+	ws.tabs.setActive(ws.tabs.current)
+	ws.showTab(ws.tabs.current)
+	ws.syncTabStrip()
+}
+
+// saveActiveData persists the shared data-view state into the active table tab
+// so switching away and back restores it exactly.
+func (ws *workspace) saveActiveData() {
+	t := ws.activeData
+	if t == nil {
+		return
+	}
+	t.name = ws.tableName
+	t.grid = ws.grid
+	t.cols = ws.tableCols
+	t.offset = ws.offset
+	t.totalRows = ws.totalRows
+	t.totalApprox = ws.totalApprox
+	t.filterSQL = ws.filterSQL
+	t.loaded = ws.tableName != ""
+}
+
+// applyDataTab loads a table tab's state into the shared data-view widgets and
+// makes it the active one. The bottom bar / details are single-instance, so
+// they are re-synced from the tab on every switch.
+func (ws *workspace) applyDataTab(t *dataTableTab) {
+	ws.saveActiveData() // park the outgoing tab first
+	ws.activeData = t
+	ws.tableName = t.name
+	ws.tableCols = t.cols
+	ws.offset = t.offset
+	ws.totalRows = t.totalRows
+	ws.totalApprox = t.totalApprox
+	ws.filterSQL = t.filterSQL
+
+	// grid + structure/index panes are per-tab widgets; swap them in.
+	if t.grid == nil {
+		t.grid = newDataTable(emptyTableData(), ws.status)
+		ws.prepGrid(t.grid)
+		ws.bindDataFind()
+	}
+	ws.grid = t.grid
+	ws.dataSlot.Objects = []fyne.CanvasObject{ws.grid}
+	ws.dataSlot.Refresh()
+	if t.structObj != nil {
+		ws.structPane.Objects = []fyne.CanvasObject{t.structObj}
+	}
+	if t.indexObj != nil {
+		ws.indexPane.Objects = []fyne.CanvasObject{t.indexObj}
+	}
+	ws.structPane.Refresh()
+	ws.indexPane.Refresh()
+	ws.segment.set(t.segIdx)
+
+	// re-sync the shared status/paging/filter chrome for this table.
+	ws.status.setTable(t.name)
+	ws.status.setColumns(len(t.cols))
+	ws.status.setRows(t.gridRowCount(), t.totalRows, t.totalApprox)
+	ws.status.setFrom(t.offset + 1)
+	ws.updatePaging(t.offset > 0, t.gridRowCount() >= browseLimit)
+	ws.refreshFilterChip()
+	ws.refreshRowDetails()
+}
+
+// gridRowCount reports how many rows a tab's grid currently shows.
+func (t *dataTableTab) gridRowCount() int {
+	if t == nil || t.grid == nil || t.grid.data == nil {
+		return 0
+	}
+	return len(t.grid.data.Rows)
+}
 
 // newQueryTabPane builds one independent SQL tab: its own editor, result
 // grid and find box. Each pane consults the workspace's live session, so
@@ -1051,8 +1321,8 @@ func (ws *workspace) newQueryTabPane() *queryPane {
 // activeQueryPane returns the query pane for the current tab, or the last one
 // if no tab is active. Used by the quick-open palette to fill an editor.
 func (ws *workspace) activeQueryPane() *queryPane {
-	if ws.tabs.current >= 1 && ws.tabs.current-1 < len(ws.queryTabs) {
-		return ws.queryTabs[ws.tabs.current-1]
+	if doc := ws.docAt(ws.tabs.current); doc != nil && doc.kind == docQuery {
+		return doc.qp
 	}
 	if len(ws.queryTabs) > 0 {
 		return ws.queryTabs[len(ws.queryTabs)-1]
@@ -1072,11 +1342,10 @@ func (ws *workspace) addQueryTab() {
 // addQueryTabTitled opens a new editor tab with the given title and optional
 // pre-filled SQL (used by the DDL route). Returns the pane.
 func (ws *workspace) addQueryTabTitled(title, sql string) *queryPane {
-	ws.tabs.addTab(title, true)
 	qp := ws.newQueryTabPane()
 	ws.queryTabs = append(ws.queryTabs, qp)
 	ws.content.Objects = append(ws.content.Objects, qp)
-	idx := len(ws.queryTabs) // 1-based tab index (tab 0 is the data tab)
+	idx := ws.addDoc(docQuery, title, true, nil, qp)
 	ws.tabs.setActive(idx)
 	ws.showTab(idx)
 	ws.syncTabStrip()
@@ -1241,11 +1510,18 @@ func (ws *workspace) showQueryMenu(q SavedQuery, pos fyne.Position) {
 		}),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("删除", func() {
-			if err := deleteSavedQuery(q.Name); err != nil {
-				dialog.NewError(err, ws.window).Show()
-				return
-			}
-			ws.side.refreshQueries()
+			dialog.NewConfirm("删除查询",
+				fmt.Sprintf("删除已保存的查询 %q？数据库本身不受影响。", q.Name),
+				func(ok bool) {
+					if !ok {
+						return
+					}
+					if err := deleteSavedQuery(q.Name); err != nil {
+						dialog.NewError(err, ws.window).Show()
+						return
+					}
+					ws.side.refreshQueries()
+				}, ws.window).Show()
 		}),
 	)
 	widget.ShowPopUpMenuAtPosition(menu, canvas, pos)
@@ -1258,8 +1534,9 @@ func (ws *workspace) syncChrome() {
 	if ws.bottomBar == nil {
 		return
 	}
-	dataTab := ws.tabs.current == 0
-	hasTable := ws.tableName != ""
+	doc := ws.docAt(ws.tabs.current)
+	dataTab := doc != nil && doc.kind == docData
+	hasTable := dataTab && ws.tableName != ""
 	if dataTab && hasTable {
 		ws.bottomBar.Show() // data tab: 数据/结构/索引 + paging
 	} else {
@@ -1279,20 +1556,27 @@ func (ws *workspace) syncChrome() {
 	}
 }
 
-// showTab switches the visible content between the data stack (tab 0) and
-// the matching independent query pane (every other tab).
+// showTab switches the visible content to the document at strip index i: a
+// table view (data stack, re-synced from that tab's stored state) or an
+// independent query pane. Everything else is hidden.
 func (ws *workspace) showTab(i int) {
-	if i == 0 {
-		ws.dataStack.Show()
-	} else {
-		ws.dataStack.Hide()
+	ws.dataStack.Hide()
+	for _, qp := range ws.queryTabs {
+		qp.hideAuto() // the popup is a canvas overlay, not clipped by the hidden pane
+		qp.Hide()
 	}
-	for k, qp := range ws.queryTabs {
-		if k+1 == i {
-			qp.Show()
-		} else {
-			qp.hideAuto() // the popup is a canvas overlay, not clipped by the hidden pane
-			qp.Hide()
+	doc := ws.docAt(i)
+	if doc != nil {
+		switch doc.kind {
+		case docData:
+			if doc.data != nil && ws.activeData != doc.data {
+				ws.applyDataTab(doc.data)
+			}
+			ws.dataStack.Show()
+		case docQuery:
+			if doc.qp != nil {
+				doc.qp.Show()
+			}
 		}
 	}
 	ws.syncChrome()
@@ -1300,100 +1584,263 @@ func (ws *workspace) showTab(i int) {
 	ws.content.Refresh()
 }
 
-// openTable loads the first page of a table (or view) into the data tab.
+// openTable opens a table (or view) in a document tab. A table that already
+// has a tab is brought to the front with its grid/paging restored; otherwise a
+// new closable tab is created and its first page loaded.
 func (ws *workspace) openTable(name string) {
-	if name != ws.tableName {
-		ws.filterSQL = "" // filters never leak across tables
-		ws.offset = 0
+	if idx := ws.dataDocIndex(name); idx >= 0 {
+		ws.tabs.setActive(idx)
+		ws.showTab(idx)
+		ws.syncTabStrip()
+		return
 	}
-	ws.tableName = name
+	t := &dataTableTab{name: name}
+	ws.dataTabs = append(ws.dataTabs, t)
+	idx := ws.addDoc(docData, name, true, t, nil)
+	ws.tabs.setActive(idx)
+	ws.showTab(idx) // applies the tab: placeholder grid + chrome
+	ws.syncTabStrip()
 	ws.updateBanner()
 	ws.logf("打开表 %s …", name)
-	if len(ws.tabs.tabs) > 0 {
-		ws.tabs.tabs[0].setTitle(name)
-	}
-	ws.tabs.setActive(0)
-	ws.showTab(0)
-	ws.segment.set(0)
+	ws.loadTableData(t, 0)
+}
 
-	ws.offset = 0
-	ws.status.setFrom(1)
-	ws.status.setTable(name)
-	ws.status.setRows(0, 0, false)
-	ws.updatePaging(false, false)
-	// Swap in a fresh placeholder grid; the grid's renderer bakes in the
-	// column layout, so data changes must replace the widget.
-	ws.grid = newDataTable(emptyTableData(), ws.status)
-	ws.prepGrid(ws.grid)
+// openTableFiltered opens (or reuses) a table tab and applies a goto filter,
+// reloading its first page. Used by the cross-table "goto row" jump, where the
+// filter is intentional and must survive the tab switch.
+func (ws *workspace) openTableFiltered(name, filter string) {
+	idx := ws.dataDocIndex(name)
+	if idx < 0 {
+		t := &dataTableTab{name: name, filterSQL: filter}
+		ws.dataTabs = append(ws.dataTabs, t)
+		idx = ws.addDoc(docData, name, true, t, nil)
+	}
+	ws.tabs.setActive(idx)
+	ws.showTab(idx)
+	ws.syncTabStrip()
+	if doc := ws.docAt(idx); doc != nil && doc.data != nil {
+		doc.data.filterSQL = filter
+	}
+	ws.filterSQL = filter
+	ws.refreshFilterChip()
+	ws.updateBanner()
+	ws.reloadActiveData()
+}
+
+// tabOpen reports whether t is still an open document tab.
+func (ws *workspace) tabOpen(t *dataTableTab) bool {
+	for _, x := range ws.dataTabs {
+		if x == t {
+			return true
+		}
+	}
+	return false
+}
+
+// pushTabGrid installs a tab's grid (and paging/status) into the shared data
+// view when that tab is the active one.
+func (ws *workspace) pushTabGrid(t *dataTableTab) {
+	if ws.activeData != t || t.grid == nil {
+		return
+	}
+	ws.grid = t.grid
 	ws.bindDataFind()
 	ws.dataSlot.Objects = []fyne.CanvasObject{ws.grid}
 	ws.dataSlot.Refresh()
-	ws.tableCols = nil
+	ws.status.setTable(t.name)
+	ws.status.setColumns(len(t.cols))
+	ws.status.setRows(t.gridRowCount(), t.totalRows, t.totalApprox)
+	ws.status.setFrom(t.offset + 1)
+	ws.updatePaging(t.offset > 0, t.gridRowCount() >= browseLimit)
 	ws.refreshRowDetails()
-	gen := ws.nextGen()
-	safeGo("openTable "+name, func() {
+}
+
+// loadTableData fetches one page of a tab's table in the background and stores
+// the resulting grid on the tab, pushing it to the shared view only if the tab
+// is still open and active when the result lands.
+func (ws *workspace) loadTableData(t *dataTableTab, offset int) {
+	sess := ws.liveSession()
+	if sess == nil || t == nil {
+		return
+	}
+	name := t.name
+	filter := t.filterSQL
+	t.gen++
+	gen := t.gen
+	safeGo("loadTable "+name, func() {
 		var res proto.QueryResult
 		var err error
-		if strings.TrimSpace(ws.filterSQL) == "" {
-			res, err = ws.sess.Browse(name, browseLimit)
+		if strings.TrimSpace(filter) == "" {
+			res, err = sess.Browse(name, browseLimit)
 		} else {
-			res, err = ws.sess.Query(
+			res, err = sess.Query(
 				fmt.Sprintf("SELECT * FROM %s WHERE %s LIMIT %d",
-					ws.quoteTable(name), ws.filterSQL, browseLimit), browseLimit)
+					ws.quoteTable(name), filter, browseLimit), browseLimit)
 		}
 		safeDo(func() {
-			if !ws.current(gen) || ws.sess == nil {
+			if ws.liveSession() != sess || gen != t.gen || !ws.tabOpen(t) {
 				return
 			}
 			if err != nil {
 				ws.logf("打开表 %s 失败：%v", name, err)
-				showInfo(ws.window, "Load "+name, err.Error())
+				if ws.activeData == t {
+					showInfo(ws.window, "Load "+name, err.Error())
+				}
 				return
 			}
 			data := tableDataFromResult(res, -1, false)
-			ws.totalRows = data.Fetched
-			ws.totalApprox = false
-			ws.grid = newDataTable(data, ws.status)
-			ws.prepGrid(ws.grid)
-			ws.bindDataFind()
-			ws.dataSlot.Objects = []fyne.CanvasObject{ws.grid}
-			ws.dataSlot.Refresh()
-			ws.status.setColumns(len(data.Cols))
-			ws.status.setRows(data.Fetched, data.Total, false)
-			ws.updatePaging(false, len(data.Rows) >= browseLimit)
+			t.totalRows = data.Fetched
+			t.totalApprox = false
+			t.offset = offset
+			t.loaded = true
+			grid := newDataTable(data, ws.status)
+			ws.prepGrid(grid)
+			t.grid = grid
+			ws.pushTabGrid(t)
 			ws.logf("已加载表 %s：%d 行", name, len(data.Rows))
-
-			// structure pane + approximate total in the background
-			ws.loadStructure(name, gen)
+			ws.loadStructureTab(t, sess)
+			ws.loadIndexesTab(t, sess)
 			safeGo("approxRows "+name, func() {
 				total, approx := ws.approxRows(name)
 				safeDo(func() {
-					if !ws.current(gen) || ws.sess == nil {
+					if ws.liveSession() != sess || gen != t.gen || !ws.tabOpen(t) {
 						return
 					}
-					ws.totalRows = total
-					ws.totalApprox = approx
-					ws.status.setRows(data.Fetched, total, approx)
-				})
-			})
-			// right details sidebar shows the selected row's fields
-			ws.refreshRowDetails()
-			safeGo("indexes "+name, func() {
-				idx := fetchIndexes(ws.sess, ws.conn.Database, name)
-				safeDo(func() {
-					if !ws.current(gen) || ws.sess == nil {
-						return
-					}
-					if idx != nil {
-						ws.indexPane.Objects = []fyne.CanvasObject{newListPane(
-							[]string{"Name", "Column", "Unique", "Type"}, indexRows(idx))}
-						ws.indexPane.Hide()
-						ws.indexPane.Refresh()
+					t.totalRows = total
+					t.totalApprox = approx
+					if ws.activeData == t {
+						ws.status.setRows(t.gridRowCount(), total, approx)
 					}
 				})
 			})
 		})
 	})
+}
+
+// loadTablePage loads a specific page (paging ‹/›) for a tab.
+func (ws *workspace) loadTablePage(t *dataTableTab, off int) {
+	sess := ws.liveSession()
+	if sess == nil || t == nil {
+		return
+	}
+	name := t.name
+	t.gen++
+	gen := t.gen
+	safeGo("page "+name, func() {
+		sql := fmt.Sprintf("SELECT * FROM %s%s LIMIT %d OFFSET %d",
+			ws.quoteTable(name), ws.whereClause(), browseLimit+1, off)
+		res, err := sess.Query(sql, browseLimit+1)
+		safeDo(func() {
+			if ws.liveSession() != sess || gen != t.gen || !ws.tabOpen(t) {
+				return
+			}
+			if err != nil {
+				if ws.activeData == t {
+					showInfo(ws.window, "加载 "+name, err.Error())
+				}
+				return
+			}
+			hasMore := len(res.Rows) > browseLimit
+			if hasMore {
+				res.Rows = res.Rows[:browseLimit]
+			}
+			data := tableDataFromResult(res, t.totalRows, t.totalApprox)
+			t.offset = off
+			grid := newDataTable(data, ws.status)
+			ws.prepGrid(grid)
+			t.grid = grid
+			if ws.activeData == t {
+				ws.pushTabGrid(t)
+				ws.updatePaging(off > 0, hasMore)
+			}
+		})
+	})
+}
+
+// loadStructureTab fetches column metadata for a tab's Structure pane.
+func (ws *workspace) loadStructureTab(t *dataTableTab, sess db.Session) {
+	name := t.name
+	gen := t.gen
+	safeGo("loadStructure "+name, func() {
+		cols, err := sess.Columns(name)
+		safeDo(func() {
+			if gen != t.gen || !ws.tabOpen(t) {
+				return
+			}
+			data := &TableData{}
+			if err == nil {
+				for _, c := range cols {
+					data.Cols = append(data.Cols, ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable, Key: c.Key})
+				}
+			}
+			t.cols = data.Cols
+			t.structObj = newStructurePane(data)
+			if ws.activeData == t {
+				ws.tableCols = t.cols
+				ws.structPane.Objects = []fyne.CanvasObject{t.structObj}
+				ws.structPane.Hide()
+				ws.structPane.Refresh()
+				ws.status.setColumns(len(t.cols))
+				ws.refreshRowDetails()
+			}
+			if err != nil && ws.activeData == t {
+				showInfo(ws.window, "Structure "+name, err.Error())
+			}
+		})
+	})
+}
+
+// loadIndexesTab fetches index metadata for a tab's Indexes pane.
+func (ws *workspace) loadIndexesTab(t *dataTableTab, sess db.Session) {
+	name := t.name
+	gen := t.gen
+	safeGo("indexes "+name, func() {
+		idx := fetchIndexes(sess, ws.conn.Database, name)
+		safeDo(func() {
+			if gen != t.gen || !ws.tabOpen(t) {
+				return
+			}
+			if idx != nil {
+				t.indexObj = newListPane([]string{"Name", "Column", "Unique", "Type"}, indexRows(idx))
+				if ws.activeData == t {
+					ws.indexPane.Objects = []fyne.CanvasObject{t.indexObj}
+					ws.indexPane.Hide()
+					ws.indexPane.Refresh()
+				}
+			}
+		})
+	})
+}
+
+// reloadActiveData re-queries the active table tab's first page.
+func (ws *workspace) reloadActiveData() {
+	t := ws.activeData
+	if t == nil || t.name == "" {
+		return
+	}
+	ws.loadTableData(t, 0)
+}
+
+// closeAllDataTabs drops every open table tab (used when the database or
+// session changes, stranding their grids).
+func (ws *workspace) closeAllDataTabs() {
+	for i := len(ws.docs) - 1; i >= 0; i-- {
+		if ws.docs[i].kind == docData {
+			ws.removeDocAt(i)
+		}
+	}
+	ws.dataTabs = nil
+	ws.activeData = nil
+	ws.tableName = ""
+	ws.tableCols = nil
+	if ws.tabs.current >= len(ws.docs) {
+		ws.tabs.current = len(ws.docs) - 1
+	}
+	if ws.tabs.current < 0 {
+		ws.tabs.current = 0
+	}
+	ws.tabs.setActive(ws.tabs.current)
+	ws.syncTabStrip()
 }
 
 // indexRows reshapes a fetched index result (Name/Seq/Column/Unique/Type)
@@ -1456,72 +1903,37 @@ func (ws *workspace) updatePaging(canPrev, canNext bool) {
 	ws.nextBtn.SetEnabled(canNext)
 }
 
-// gotoOffset loads one page of the current table starting at row off.
+// gotoOffset loads one page of the active table starting at row off.
 func (ws *workspace) gotoOffset(off int) {
-	if ws.tableName == "" || ws.sess == nil {
+	t := ws.activeData
+	if t == nil || t.name == "" || ws.sess == nil {
 		return
 	}
-	if !ws.pageSupported() && ws.filterSQL == "" {
+	if !ws.pageSupported() && t.filterSQL == "" {
 		return
 	}
 	if off < 0 {
 		off = 0
 	}
-	if off == ws.offset {
+	if off == t.offset {
 		return
 	}
-	name := ws.tableName
-	gen := ws.nextGen()
-	safeGo("page "+name, func() {
-		sql := fmt.Sprintf("SELECT * FROM %s%s LIMIT %d OFFSET %d",
-			ws.quoteTable(name), ws.whereClause(), browseLimit+1, off)
-		res, err := ws.sess.Query(sql, browseLimit+1)
-		safeDo(func() {
-			if !ws.current(gen) || ws.sess == nil {
-				return
-			}
-			if err != nil {
-				showInfo(ws.window, "翻页", err.Error())
-				return
-			}
-			hasMore := len(res.Rows) > browseLimit
-			if hasMore {
-				res.Rows = res.Rows[:browseLimit]
-			}
-			data := tableDataFromResult(res, ws.totalRows, ws.totalApprox)
-			ws.offset = off
-			ws.grid = newDataTable(data, ws.status)
-			ws.prepGrid(ws.grid)
-			ws.bindDataFind()
-			ws.dataSlot.Objects = []fyne.CanvasObject{ws.grid}
-			ws.dataSlot.Refresh()
-			ws.status.setFrom(off + 1)
-			ws.status.setRows(len(data.Rows), data.Total, data.Approx)
-			ws.updatePaging(off > 0, hasMore)
-		})
-	})
+	ws.loadTablePage(t, off)
 }
 
-// loadIndexes refreshes the index pane for the open table.
+// loadIndexes refreshes the Indexes pane for the active table tab (reusing the
+// cached pane when one was already fetched for this tab).
 func (ws *workspace) loadIndexes() {
-	if ws.tableName == "" {
+	t := ws.activeData
+	if t == nil || t.name == "" {
 		return
 	}
-	name := ws.tableName
-	gen := ws.nextGen()
-	safeGo("indexes-load "+name, func() {
-		idx := fetchIndexes(ws.sess, ws.conn.Database, name)
-		safeDo(func() {
-			if !ws.current(gen) || ws.sess == nil {
-				return
-			}
-			if idx != nil {
-				ws.indexPane.Objects = []fyne.CanvasObject{newListPane(
-					[]string{"Name", "Column", "Unique", "Type"}, indexRows(idx))}
-				ws.indexPane.Refresh()
-			}
-		})
-	})
+	if t.indexObj != nil {
+		ws.indexPane.Objects = []fyne.CanvasObject{t.indexObj}
+		ws.indexPane.Refresh()
+		return
+	}
+	ws.loadIndexesTab(t, ws.liveSession())
 }
 
 // approxRows looks up the inventory entry for the current table.
@@ -1538,41 +1950,10 @@ func (ws *workspace) approxRows(name string) (int, bool) {
 	return -1, false
 }
 
-// loadStructure fetches real column metadata for the Structure pane, in the
-// background (must not block the UI thread).
-func (ws *workspace) loadStructure(table string, gen int) {
-	safeGo("loadStructure "+table, func() {
-		cols, err := ws.sess.Columns(table)
-		safeDo(func() {
-			if !ws.current(gen) || ws.sess == nil {
-				return
-			}
-			data := &TableData{}
-			if err == nil {
-				for _, c := range cols {
-					data.Cols = append(data.Cols, ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable, Key: c.Key})
-				}
-			}
-			ws.structPane.Objects = []fyne.CanvasObject{newStructurePane(data)}
-			ws.structPane.Hide()
-			ws.structPane.Refresh()
-			if err == nil {
-				// The right 详情 panel shows the table structure until a row
-				// is selected, so the table's columns are always visible.
-				ws.tableCols = data.Cols
-				ws.refreshRowDetails()
-			}
-			if err != nil {
-				showInfo(ws.window, "Structure "+table, err.Error())
-			}
-		})
-	})
-}
-
 func (ws *workspace) reloadTable() {
-	if ws.tableName == "" {
+	if ws.activeData == nil || ws.activeData.name == "" {
 		ws.loadInventory()
 		return
 	}
-	ws.openTable(ws.tableName)
+	ws.reloadActiveData()
 }

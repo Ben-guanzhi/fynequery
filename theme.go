@@ -64,12 +64,14 @@ type palette struct {
 	gridRowAltBG    color.RGBA
 	gridRowHoverBG  color.RGBA
 	gridRowSelectBG color.RGBA
+	selFG           color.RGBA // text / icon color on a selected (blue) row
 	gridCellFG      color.RGBA
 	gridNullFG      color.RGBA
 	gridLine        color.RGBA // 1px row separator line
 	gutterBG        color.RGBA // row-number gutter background
 	cellEdited      color.RGBA // an unsaved (edited) cell value
 	rowDeletedBG    color.RGBA // background of a row marked for deletion
+	rowNewBG        color.RGBA // background of a staged (pending-insert) row
 	// server ribbon (green info bar at the top of the workspace)
 	ribbonBG   color.RGBA
 	ribbonFG   color.RGBA
@@ -100,62 +102,64 @@ type palette struct {
 }
 
 var lightPalette = palette{
-	bg:              hex("#FFFFFF"),
-	sidebarBG:       hex("#F6F6F6"),
-	toolbarBG:       hex("#F5F5F5"),
-	contentBG:       hex("#FFFFFF"),
-	stripBG:         hex("#F6F6F6"),
-	tabBG:           hex("#F6F6F6"),
+	bg:              hex("#F4F4FC"), // TablePro window background (cool lavender-gray)
+	sidebarBG:       hex("#F4F4FC"),
+	toolbarBG:       hex("#F4F4FC"),
+	contentBG:       hex("#FFFFFF"), // white content cards on the lavender window
+	stripBG:         hex("#F4F4FC"),
+	tabBG:           hex("#ECECF4"),
 	activeTabBG:     hex("#FFFFFF"),
-	inactiveTabFG:   hex("#8A8A8A"),
-	activeTabFG:     hex("#2B2B2B"),
-	tabUnderline:    hex("#DADADA"),
-	line:            hex("#E6E6E6"),
-	dividerLine:     hex("#E3E3E3"),
-	statusBG:        hex("#F6F6F6"),
-	statusSideBG:    hex("#F6F6F6"),
-	statusFG:        hex("#6B6B6B"),
-	statusLink:      hex("#2F7BD9"),
-	treeSel:         hex("#E8EFF7"),
-	pkHeader:        hex("#8A6D00"),
+	inactiveTabFG:   hex("#9A9AA8"),
+	activeTabFG:     hex("#1F1B16"),
+	tabUnderline:    hex("#E2E2EC"),
+	line:            hex("#E6E6F0"),
+	dividerLine:     hex("#E6E6F0"),
+	statusBG:        hex("#F4F4FC"),
+	statusSideBG:    hex("#F4F4FC"),
+	statusFG:        hex("#6B6B78"),
+	statusLink:      hex("#DC3C44"),
+	treeSel:         hex("#2E7CF6"), // solid blue selection (TablePlus-style)
+	pkHeader:        hex("#9A6700"),
 	cellInt:         hex("#1F6FEB"),
 	cellFloat:       hex("#00856C"),
 	cellDate:        hex("#9A6700"),
 	cellStr:         hex("#C05A1F"),
-	cellDefault:     hex("#333333"),
+	cellDefault:     hex("#1F1B16"),
 	gridHeaderBG:    hex("#FFFFFF"),
-	gridHeaderFG:    hex("#444444"),
-	gridRowAltBG:    hex("#FBFBFB"),
-	gridRowHoverBG:  hex("#F3F7FC"),
-	gridRowSelectBG: hex("#E8EFF7"),
-	gridCellFG:      hex("#333333"),
-	gridNullFG:      hex("#A0A0A0"),
-	gridLine:        hex("#E9E9E9"),
-	gutterBG:        hex("#F7F7F7"),
+	gridHeaderFG:    hex("#3A3A42"),
+	gridRowAltBG:    hex("#FCFCFE"),
+	gridRowHoverBG:  hex("#F2F2F8"),
+	gridRowSelectBG: hex("#2E7CF6"),
+	selFG:           hex("#FFFFFF"),
+	gridCellFG:      hex("#1F1B16"),
+	gridNullFG:      hex("#A0A0A8"),
+	gridLine:        hex("#EFEFF4"),
+	gutterBG:        hex("#F4F4FC"),
 	cellEdited:      hex("#C05621"),
 	rowDeletedBG:    hex("#FDECEA"),
+	rowNewBG:        hex("#E7F6EC"),
 	ribbonBG:        hex("#D9EBC9"),
 	ribbonFG:        hex("#2F5B36"),
 	ribbonInfo:      hex("#F0A93B"),
-	groupBG:         hex("#FFFFFF"),
-	groupBorder:     hex("#E7E7E7"),
+	groupBG:         hex("#FCFCFC"),
+	groupBorder:     hex("#E6E6F0"),
 	okDot:           hex("#2FB344"),
-	crumbBG:         hex("#FFFFFF"),
-	crumbBorder:     hex("#DCDCDC"),
-	detailBG:        hex("#F7F7F7"),
-	detailLine:      hex("#E8E8E8"),
-	metaKeyFG:       hex("#8A8A8A"),
-	metaValFG:       hex("#333333"),
-	foreground:      hex("#333333"),
-	accent:          hex("#2F7BD9"),
-	accentDark:      hex("#1E5AA8"),
-	hover:           hex("#EFEFEF"),
-	segmentBG:       hex("#ECECEC"),
+	crumbBG:         hex("#FCFCFC"),
+	crumbBorder:     hex("#E6E6F0"),
+	detailBG:        hex("#FCFCFC"),
+	detailLine:      hex("#E6E6F0"),
+	metaKeyFG:       hex("#9A9AA8"),
+	metaValFG:       hex("#1F1B16"),
+	foreground:      hex("#1F1B16"),
+	accent:          hex("#DC3C44"), // TablePro coral accent
+	accentDark:      hex("#B22E37"),
+	hover:           hex("#EDEDF5"),
+	segmentBG:       hex("#EDEDF5"),
 	segmentActive:   hex("#FFFFFF"),
-	segmentFG:       hex("#6B6B6B"),
-	segmentActiveFG: hex("#2B2B2B"),
-	welcomePanelBG:  hex("#F5F5F5"),
-	welcomeFG:       hex("#6B6B6B"),
+	segmentFG:       hex("#6B6B78"),
+	segmentActiveFG: hex("#1F1B16"),
+	welcomePanelBG:  hex("#F4F4FC"),
+	welcomeFG:       hex("#6B6B78"),
 }
 
 var darkPalette = palette{
@@ -174,8 +178,8 @@ var darkPalette = palette{
 	statusBG:        hex("#232323"),
 	statusSideBG:    hex("#232323"),
 	statusFG:        hex("#A9A9A9"),
-	statusLink:      hex("#79BEFF"),
-	treeSel:         hex("#3A5B6E"),
+	statusLink:      hex("#FF7A86"),
+	treeSel:         hex("#1F5BB0"),
 	pkHeader:        hex("#FFDF9D"),
 	cellInt:         hex("#79BEFF"),
 	cellFloat:       hex("#BEFFDF"),
@@ -186,13 +190,15 @@ var darkPalette = palette{
 	gridHeaderFG:    hex("#FFFFFF"),
 	gridRowAltBG:    hex("#242424"),
 	gridRowHoverBG:  hex("#2A2A2A"),
-	gridRowSelectBG: hex("#3A5B6E"),
+	gridRowSelectBG: hex("#1F5BB0"),
+	selFG:           hex("#FFFFFF"),
 	gridCellFG:      hex("#FFFFFF"),
 	gridNullFG:      hex("#7A7A7A"),
 	gridLine:        hex("#333333"),
 	gutterBG:        hex("#232323"),
 	cellEdited:      hex("#E5A15C"),
 	rowDeletedBG:    hex("#4A2A2A"),
+	rowNewBG:        hex("#24402E"),
 	ribbonBG:        hex("#2E4632"),
 	ribbonFG:        hex("#CFE9CC"),
 	ribbonInfo:      hex("#F0A93B"),
@@ -206,10 +212,10 @@ var darkPalette = palette{
 	metaKeyFG:       hex("#8A8A8A"),
 	metaValFG:       hex("#DADADA"),
 	foreground:      hex("#CCCCCC"),
-	accent:          hex("#007F3D"),
-	accentDark:      hex("#0A6938"),
-	hover:           hex("#333333"),
-	segmentBG:       hex("#333333"),
+	accent:          hex("#FF5A6A"),
+	accentDark:      hex("#D9444F"),
+	hover:           hex("#3A2C2E"),
+	segmentBG:       hex("#3A2C2E"),
 	segmentActive:   hex("#3D3D3D"),
 	segmentFG:       hex("#A9A9A9"),
 	segmentActiveFG: hex("#FFFFFF"),
@@ -332,7 +338,7 @@ func (t *tablePlusTheme) Size(name fyne.ThemeSizeName) float32 {
 	case theme.SizeNameInputBorder:
 		return 1
 	case theme.SizeNameInputRadius:
-		return 7
+		return 9
 	case theme.SizeNameSeparatorThickness:
 		return 1
 	case theme.SizeNameSplitThickness:
@@ -340,9 +346,9 @@ func (t *tablePlusTheme) Size(name fyne.ThemeSizeName) float32 {
 	case theme.SizeNameScrollBar:
 		return 10
 	case theme.SizeNamePadding:
-		return 5
+		return 8
 	case theme.SizeNameInnerPadding:
-		return 7
+		return 10
 	}
 	return t.base.Size(name)
 }

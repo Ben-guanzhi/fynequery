@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -97,6 +98,29 @@ func (sqliteDialect) ListColumns(db *sql.DB, table string) ([]proto.ColumnInfo, 
 func (sqliteDialect) BrowseSQL(table string, limit int) string {
 	quoted := strings.ReplaceAll(table, `"`, `""`)
 	return fmt.Sprintf("SELECT * FROM \"%s\" LIMIT %d", quoted, limit)
+}
+
+// CreateDatabase for SQLite creates a new database file at the given path.
+// The "name" is treated as a file path; opening with mode=rwc creates the
+// file when absent and is a no-op when it already exists (no clobbering).
+func (sqliteDialect) CreateDatabase(db *sql.DB, name, _, _ string) error {
+	path := strings.TrimSpace(name)
+	if path == "" {
+		return fmt.Errorf("sqlite: no database file specified")
+	}
+	dsn := path
+	if dsn != ":memory:" && !strings.HasPrefix(dsn, "file:") {
+		dsn = "file:" + dsn + "?mode=rwc"
+	}
+	newDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return fmt.Errorf("sqlite create database %q: %w", name, err)
+	}
+	defer newDB.Close()
+	if err := newDB.PingContext(context.Background()); err != nil {
+		return fmt.Errorf("sqlite create database %q: %w", name, err)
+	}
+	return nil
 }
 
 func main() { pluginkit.Main(sqliteDialect{}) }

@@ -1,12 +1,14 @@
 package main
 
-// "Create a new connection..." dialog styled after TablePlus's connection
-// sheet: DB-type selector + host/port/user/password/database fields.
-// Connect dials the database for real, saves the connection and opens the
-// workspace; Test only verifies connectivity.
+// Connection sheet styled after TablePlus's connection form: a DB-type
+// selector + host/port/user/password/database fields, plus status colour, safe
+// mode and keyring options. The same form backs two flows:
+//   - "New connection": submit dials, saves and opens the workspace.
+//   - "Edit connection": submit only saves (no dial) and refreshes the list.
 
 import (
 	"fmt"
+	"strconv"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -21,29 +23,152 @@ func showNewConnectionDialog(w fyne.Window, onConnect func(Connection, db.Sessio
 	showConnectionDialog(w, Connection{}, onConnect)
 }
 
-// showConnectionDialog opens the connection sheet. When seed is non-zero its
-// fields pre-fill the form (used by "Import from URL"); otherwise the form
-// starts on conventional defaults.
+// showConnectionDialog opens the "New Connection" sheet. seed pre-fills the
+// form (Import from URL); an empty seed starts on conventional defaults.
+// Submitting dials the database, saves the connection and opens the workspace.
 func showConnectionDialog(w fyne.Window, seed Connection, onConnect func(Connection, db.Session)) {
-	// Type picker from the driver registry (MySQL builtin + plugins).
+	cf := newConnectionForm(w, seed)
+	if cf == nil {
+		return
+	}
+	test := newTestConnectionButton(w, cf.build)
+
+	d := dialog.NewCustom("New Connection", "", connectionSheetBody(cf, test), w)
+	dialAndSave := func(c Connection) {
+		progress := dialog.NewProgressInfinite("Connecting", fmt.Sprintf("Connecting to %s (%s)...", c.Name, c.Host), w)
+		progress.Show()
+		safeGo("dialog", func() {
+			sess, err := dialConn(c)
+			safeDo(func() {
+				progress.Hide()
+				if err != nil {
+					dialog.NewError(err, w).Show()
+					return
+				}
+				if err := upsertConnection(c); err != nil {
+					dialog.NewError(fmt.Errorf("save connection: %w", err), w).Show()
+					return // keep the sheet open; the connection was not saved
+				}
+				d.Hide() // dismiss the form before opening the workspace
+				if onConnect != nil {
+					onConnect(c, sess)
+				}
+			})
+		})
+	}
+	cf.form.OnSubmit = func() {
+		c := cf.build()
+		// Port must be numeric when set (SQLite is file-based and skips it).
+		if c.Driver != "sqlite" && c.Port != "" {
+			if _, err := strconv.Atoi(c.Port); err != nil {
+				showInfo(w, "New Connection", "端口必须是数字。")
+				return
+			}
+		}
+		// Warn before silently overwriting an existing same-named connection
+		// (the auto-generated "MySQL localhost" name collides easily).
+		if existing, lerr := loadConnections(); lerr == nil {
+			for _, e := range existing {
+				if e.Name == c.Name {
+					dialog.NewConfirm("覆盖连接",
+						fmt.Sprintf("已存在同名连接 %q，覆盖？", c.Name),
+						func(ok bool) {
+							if ok {
+								dialAndSave(c)
+							}
+						}, w).Show()
+					return
+				}
+			}
+		}
+		dialAndSave(c)
+	}
+	cf.form.SubmitText = "Connect"
+	cf.form.CancelText = "Cancel"
+	cf.form.OnCancel = func() { d.Hide() }
+
+	d.Resize(fyne.NewSize(440, 620))
+	d.Show()
+}
+
+// showEditConnectionDialog opens the "Edit Connection" sheet pre-filled from
+// orig. Submitting only saves (it never dials); onSaved refreshes the caller's
+// list afterwards. Grouping/tags are preserved (the sheet does not edit them).
+func showEditConnectionDialog(w fyne.Window, orig Connection, onSaved func()) {
+	seed := orig
+	seed.resolvePassword() // prefill the (possibly keyring-stored) password
+	cf := newConnectionForm(w, seed)
+	if cf == nil {
+		return
+	}
+	test := newTestConnectionButton(w, cf.build)
+
+	d := dialog.NewCustom("Edit Connection", "", connectionSheetBody(cf, test), w)
+	cf.form.OnSubmit = func() {
+		if err := applyConnectionEdit(orig, cf.build()); err != nil {
+			dialog.NewError(err, w).Show()
+			return
+		}
+		d.Hide()
+		if onSaved != nil {
+			onSaved()
+		}
+	}
+	cf.form.SubmitText = "Save"
+	cf.form.CancelText = "Cancel"
+	cf.form.OnCancel = func() { d.Hide() }
+
+	d.Resize(fyne.NewSize(440, 620))
+	d.Show()
+}
+
+// applyConnectionEdit persists an edited connection: it keeps the fields the
+// sheet does not expose (Group/Tags), rejects an empty name, and — when the
+// name changed — removes the old entry (and its keyring secret) before saving
+// the new one. Pure with respect to the UI so it can be unit-tested.
+func applyConnectionEdit(orig, edited Connection) error {
+	edited.Group = orig.Group
+	edited.Tags = orig.Tags
+	if edited.Name == "" {
+		return fmt.Errorf("connection name cannot be empty")
+	}
+	if edited.Name != orig.Name {
+		if err := deleteConnection(orig.Name); err != nil {
+			return fmt.Errorf("rename: %w", err)
+		}
+	}
+	return upsertConnection(edited)
+}
+
+// connectionForm bundles the widgets of the connection sheet so the new/edit
+// flows share one form definition.
+type connectionForm struct {
+	picker *widget.Select // top type selector (also the form's "Type" item)
+	form   *widget.Form
+	build  func() Connection
+}
+
+// newConnectionForm builds the sheet pre-filled from seed (empty seed =
+// conventional defaults). Returns nil (after surfacing an error) when no
+// drivers are registered.
+func newConnectionForm(w fyne.Window, seed Connection) *connectionForm {
 	infos := db.Drivers()
+	if len(infos) == 0 {
+		dialog.NewError(fmt.Errorf("no database drivers registered"), w).Show()
+		return nil
+	}
 	typeNames := make([]string, len(infos))
 	codeByName := map[string]string{}
 	nameByCode := map[string]string{}
-	defaultMySQL := "MySQL"
 	for i, in := range infos {
 		typeNames[i] = in.Name
 		codeByName[in.Name] = in.Code
 		nameByCode[in.Code] = in.Name
 	}
-	if len(typeNames) == 0 {
-		dialog.NewError(fmt.Errorf("no database drivers registered"), w).Show()
-		return
-	}
 
 	picker := widget.NewSelect(typeNames, nil)
 	if _, ok := codeByName["MySQL"]; ok {
-		picker.SetSelected(defaultMySQL)
+		picker.SetSelected("MySQL")
 	} else {
 		picker.SetSelected(typeNames[0])
 	}
@@ -89,7 +214,7 @@ func showConnectionDialog(w fyne.Window, seed Connection, onConnect func(Connect
 	setDefaults(picker.Selected)
 	picker.OnChanged = setDefaults
 
-	// Pre-fill from the seed (Import from URL), overriding the defaults above.
+	// Pre-fill from the seed (edit / import), overriding the defaults above.
 	if seed.Driver != "" {
 		if n, ok := nameByCode[seed.Driver]; ok {
 			picker.SetSelected(n) // triggers setDefaults, then we overwrite below
@@ -137,7 +262,6 @@ func showConnectionDialog(w fyne.Window, seed Connection, onConnect func(Connect
 	}
 
 	form := widget.NewForm(
-		widget.NewFormItem("Type", picker),
 		widget.NewFormItem("Name", name),
 		widget.NewFormItem("Host", host),
 		widget.NewFormItem("Port", port),
@@ -175,8 +299,25 @@ func showConnectionDialog(w fyne.Window, seed Connection, onConnect func(Connect
 		}
 	}
 
-	test := widget.NewButton("Test", func() {
-		c := buildConn()
+	return &connectionForm{picker: picker, form: form, build: buildConn}
+}
+
+// connectionSheetBody lays out the shared sheet: prominent type selector, the
+// form, and an extra action row (the Test button).
+func connectionSheetBody(cf *connectionForm, extra fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewPadded(container.NewVBox(
+		container.NewHBox(layout.NewSpacer(), cf.picker, layout.NewSpacer()),
+		spacerH(6),
+		cf.form,
+		container.NewHBox(layout.NewSpacer(), extra),
+	))
+}
+
+// newTestConnectionButton builds the "Test" button that dials the form's
+// connection and reports the server version, without saving anything.
+func newTestConnectionButton(w fyne.Window, build func() Connection) *widget.Button {
+	return widget.NewButton("Test", func() {
+		c := build()
 		progress := dialog.NewProgressInfinite("Testing", "Connecting to "+c.Host+":"+c.Port+"...", w)
 		progress.Show()
 		safeGo("dialog", func() {
@@ -200,40 +341,4 @@ func showConnectionDialog(w fyne.Window, seed Connection, onConnect func(Connect
 			})
 		})
 	})
-
-	d := dialog.NewCustom("New Connection", "", container.NewVBox(
-		container.NewHBox(layout.NewSpacer(), picker, layout.NewSpacer()),
-		widget.NewSeparator(),
-		form,
-		container.NewHBox(layout.NewSpacer(), test),
-	), w)
-
-	form.OnSubmit = func() {
-		c := buildConn()
-		progress := dialog.NewProgressInfinite("Connecting", fmt.Sprintf("Connecting to %s (%s)...", c.Name, c.Host), w)
-		progress.Show()
-		safeGo("dialog", func() {
-			sess, err := dialConn(c)
-			safeDo(func() {
-				progress.Hide()
-				if err != nil {
-					dialog.NewError(err, w).Show()
-					return
-				}
-				if err := upsertConnection(c); err != nil {
-					dialog.NewError(fmt.Errorf("save connection: %w", err), w).Show()
-				}
-				d.Hide() // dismiss the form before opening the workspace
-				if onConnect != nil {
-					onConnect(c, sess)
-				}
-			})
-		})
-	}
-	form.SubmitText = "Connect"
-	form.CancelText = "Cancel"
-	form.OnCancel = func() {}
-
-	d.Resize(fyne.NewSize(440, 620))
-	d.Show()
 }

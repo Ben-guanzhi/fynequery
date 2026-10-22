@@ -93,7 +93,7 @@ func showLockWindow(a fyne.App, onUnlock func()) {
 
 	entry := widget.NewPasswordEntry()
 	entry.SetPlaceHolder("Passcode")
-	errText := canvas.NewText("", pal().accentDark)
+	errText := canvas.NewText("", color.NRGBA{R: 0xE5, G: 0x39, B: 0x35, A: 0xFF}) // error red, not the accent blue
 	errText.TextSize = 12
 
 	unlock := func() {

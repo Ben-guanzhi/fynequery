@@ -106,24 +106,36 @@ func showRestoreDialog(w fyne.Window, c Connection, sess db.Session) {
 		if rc == nil {
 			return
 		}
-		progress := dialog.NewProgressInfinite("Restore", "Running SQL script…", w)
-		progress.Show()
-		safeGo("restore", func() {
-			data, rerr := io.ReadAll(rc)
-			rc.Close()
-			stmts := 0
-			if rerr == nil {
-				stmts, rerr = runSQLScript(sess, string(data))
-			}
-			safeDo(func() {
-				progress.Hide()
-				if rerr != nil {
-					dialog.NewError(rerr, w).Show()
+		fname := "file"
+		if u := rc.URI(); u != nil {
+			fname = u.Name()
+		}
+		data, rerr := io.ReadAll(rc)
+		rc.Close()
+		if rerr != nil {
+			dialog.NewError(rerr, w).Show()
+			return
+		}
+		dialog.NewConfirm("Restore",
+			fmt.Sprintf("Run %s against %q?\n\nThis executes every statement in the file and cannot be undone.", fname, c.Name),
+			func(ok bool) {
+				if !ok {
 					return
 				}
-				showInfo(w, "Restore", fmt.Sprintf("Restore complete.\n%d statements executed.", stmts))
-			})
-		})
+				progress := dialog.NewProgressInfinite("Restore", "Running SQL script…", w)
+				progress.Show()
+				safeGo("restore", func() {
+					stmts, rerr := runSQLScript(sess, string(data))
+					safeDo(func() {
+						progress.Hide()
+						if rerr != nil {
+							dialog.NewError(rerr, w).Show()
+							return
+						}
+						showInfo(w, "Restore", fmt.Sprintf("Restore complete.\n%d statements executed.", stmts))
+					})
+				})
+			}, w).Show()
 	}, w)
 	open.SetTitleText("Restore “" + c.Name + "” — open SQL file")
 	open.SetFilter(storage.NewExtensionFileFilter([]string{".sql"}))

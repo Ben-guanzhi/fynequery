@@ -163,13 +163,22 @@ func (ws *workspace) showUserDialog(users []userRow) {
 		if host == "" {
 			host = "%"
 		}
+		var stmt, label string
 		if isMySQL {
-			runUserDDL("Delete user", fmt.Sprintf("DROP USER '%s'@'%s'",
-				strings.ReplaceAll(u.user, "'", "''"), strings.ReplaceAll(host, "'", "''")))
+			stmt = fmt.Sprintf("DROP USER '%s'@'%s'",
+				strings.ReplaceAll(u.user, "'", "''"), strings.ReplaceAll(host, "'", "''"))
+			label = u.user + "@" + host
 		} else {
-			runUserDDL("Delete user", fmt.Sprintf(`DROP USER "%s"`,
-				strings.ReplaceAll(u.user, `"`, `""`)))
+			stmt = fmt.Sprintf(`DROP USER "%s"`, strings.ReplaceAll(u.user, `"`, `""`))
+			label = u.user
 		}
+		dialog.NewConfirm("Delete user",
+			fmt.Sprintf("Drop database user %q?\n\nThis revokes all of the user's access and cannot be undone.", label),
+			func(ok bool) {
+				if ok {
+					runUserDDL("Delete user", stmt)
+				}
+			}, ws.window).Show()
 	})
 
 	grantBtn := widget.NewButton("Grant database access", func() {
@@ -182,11 +191,15 @@ func (ws *workspace) showUserDialog(users []userRow) {
 			showInfo(ws.window, "Grant", "Pick a database first (Ctrl+K).")
 			return
 		}
+		host := u.host
+		if host == "" {
+			host = "%"
+		}
 		if isMySQL {
 			runUserDDL("Grant", fmt.Sprintf("GRANT ALL PRIVILEGES ON %s.* TO '%s'@'%s'",
 				ws.quoteTable(ws.currentDB),
 				strings.ReplaceAll(u.user, "'", "''"),
-				strings.ReplaceAll(u.host, "'", "''")))
+				strings.ReplaceAll(host, "'", "''")))
 		} else {
 			runUserDDL("Grant", fmt.Sprintf(`GRANT ALL ON DATABASE %s TO "%s"`,
 				ws.quoteTable(ws.currentDB), strings.ReplaceAll(u.user, `"`, `""`)))

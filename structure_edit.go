@@ -40,9 +40,12 @@ func (ws *workspace) editStructure(name string) {
 	}
 	sess := ws.sess
 	gen := ws.nextGen()
+	progress := dialog.NewProgressInfinite("Edit structure", "Reading columns of "+name+"…", ws.window)
+	progress.Show()
 	safeGo("editStructure "+name, func() {
 		cols, err := sess.Columns(name)
 		safeDo(func() {
+			progress.Hide()
 			if !ws.current(gen) || ws.sess == nil {
 				return
 			}
@@ -69,7 +72,7 @@ func (ws *workspace) showStructureDialog(name string, cols []proto.ColumnInfo) {
 		e.typeEntry.SetText(c.Type)
 		e.nullChk = widget.NewCheck("NULL", nil)
 		e.nullChk.SetChecked(c.Nullable)
-		e.dropChk = widget.NewCheck("drop", nil)
+		e.dropChk = widget.NewCheck("Drop", nil)
 		rows.Objects = append(rows.Objects, container.NewHBox(
 			fixedLabel(c.Name), e.typeEntry, spacerW(6), e.nullChk, spacerW(6), e.dropChk))
 		edits = append(edits, e)
@@ -83,11 +86,19 @@ func (ws *workspace) showStructureDialog(name string, cols []proto.ColumnInfo) {
 	newNull := widget.NewCheck("NULL", nil)
 	newNull.SetChecked(true)
 	newEdit := &colEdit{isNew: true, nameEntry: newName, typeEntry: newType, nullChk: newNull}
-	rows.Objects = append(rows.Objects, widget.NewSeparator(),
+	rows.Objects = append(rows.Objects, spacerH(8),
 		container.NewHBox(fixedLabel("new col"), newName, newType, spacerW(6), newNull))
 
 	var dlg dialog.Dialog
 	apply := widget.NewButton("Queue DDL", func() {
+		if nn := strings.TrimSpace(newName.Text); nn != "" {
+			for _, c := range cols {
+				if strings.EqualFold(c.Name, nn) {
+					showInfo(ws.window, "Edit structure "+name, "Column "+nn+" already exists.")
+					return
+				}
+			}
+		}
 		stmts := buildAlterDDL(ws.conn.Driver, name, quote, edits, newEdit)
 		if len(stmts) == 0 {
 			showInfo(ws.window, "Edit structure "+name, "No structural changes detected.")
@@ -102,12 +113,12 @@ func (ws *workspace) showStructureDialog(name string, cols []proto.ColumnInfo) {
 	apply.Importance = widget.HighImportance
 	cancel := widget.NewButton("Cancel", func() { dlg.Hide() })
 
-	body := container.NewBorder(
+	body := container.NewPadded(container.NewBorder(
 		widget.NewLabel("Change a type or check drop, or add a new column below. Nothing runs until Commit."),
 		container.NewHBox(layout.NewSpacer(), cancel, apply),
 		nil, nil,
 		container.NewScroll(container.NewPadded(rows)),
-	)
+	))
 	dlg = dialog.NewCustom("Edit structure — "+name, "", body, ws.window)
 	dlg.Resize(fyne.NewSize(560, 440))
 	dlg.Show()
