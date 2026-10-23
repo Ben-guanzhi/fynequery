@@ -135,6 +135,26 @@ func (pgDialect) BrowseSQL(table string, limit int) string {
 	return fmt.Sprintf("SELECT * FROM %s LIMIT %d", quotePG(table), limit)
 }
 
+// QuoteIdent quotes a PostgreSQL identifier with double quotes (escaping
+// embedded quotes). Used by the shared DML builders in pluginkit.
+func (pgDialect) QuoteIdent(name string) string { return quotePG(name) }
+
+// Placeholder renders PostgreSQL's positional parameter ($1, $2, ...).
+func (pgDialect) Placeholder(i int) string { return fmt.Sprintf("$%d", i) }
+
+// Metrics returns curated read-only PostgreSQL server metrics.
+func (pgDialect) Metrics(db *sql.DB) ([]proto.Metric, error) {
+	const q = `
+		SELECT 'Version', current_setting('server_version')
+		UNION ALL SELECT 'Database', current_database()
+		UNION ALL SELECT 'Active connections', count(*)::text FROM pg_stat_activity
+		UNION ALL SELECT 'Max connections', current_setting('max_connections')
+		UNION ALL SELECT 'Cache hit ratio',
+			round(100.0*blks_hit/NULLIF(blks_hit+blks_read,0),1)::text || '%'
+			FROM pg_stat_database WHERE datname = current_database()`
+	return pluginkit.KVMetrics(db, "PostgreSQL", q)
+}
+
 func quotePG(name string) string {
 	escaped := ""
 	for _, r := range name {

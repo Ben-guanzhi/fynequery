@@ -261,6 +261,68 @@ func newConnectionForm(w fyne.Window, seed Connection) *connectionForm {
 		keyringChk.Disable() // non-Windows platforms keep the plaintext fallback
 	}
 
+	// --- SSH tunnel section ---
+	sshEnable := widget.NewCheck("Use SSH tunnel", nil)
+	sshHost := widget.NewEntry()
+	sshHost.SetPlaceHolder("bastion.example.com")
+	sshPort := widget.NewEntry()
+	sshPort.SetText("22")
+	sshUser := widget.NewEntry()
+	sshUser.SetPlaceHolder("ssh user")
+	sshAuthMode := widget.NewSelect([]string{"key", "password"}, nil)
+	sshAuthMode.SetSelected("key")
+	sshPass := widget.NewPasswordEntry()
+	sshPass.SetPlaceHolder("password")
+	sshKeyPath := widget.NewEntry()
+	sshKeyPath.SetPlaceHolder("C:\\keys\\id_rsa")
+	sshKeyPass := widget.NewPasswordEntry()
+	sshKeyPass.SetPlaceHolder("(optional)")
+
+	sshFields := []*widget.Entry{sshHost, sshPort, sshUser, sshPass, sshKeyPath, sshKeyPass}
+	setSSHEnabled := func(on bool) {
+		for _, e := range sshFields {
+			if on {
+				e.Enable()
+			} else {
+				e.Disable()
+			}
+		}
+		if on {
+			sshAuthMode.Enable()
+		} else {
+			sshAuthMode.Disable()
+		}
+	}
+	sshEnable.OnChanged = func(on bool) { setSSHEnabled(on) }
+	setSSHEnabled(false) // start collapsed (disabled)
+
+	// Pre-fill SSH from the seed (edit / import); enabled fields only when set.
+	if seed.SSH.Enabled {
+		sshEnable.SetChecked(true)
+		if seed.SSH.Host != "" {
+			sshHost.SetText(seed.SSH.Host)
+		}
+		if seed.SSH.Port != "" {
+			sshPort.SetText(seed.SSH.Port)
+		}
+		if seed.SSH.User != "" {
+			sshUser.SetText(seed.SSH.User)
+		}
+		if seed.SSH.AuthMode != "" {
+			sshAuthMode.SetSelected(seed.SSH.AuthMode)
+		}
+		if seed.SSH.Password != "" {
+			sshPass.SetText(seed.SSH.Password)
+		}
+		if seed.SSH.KeyPath != "" {
+			sshKeyPath.SetText(seed.SSH.KeyPath)
+		}
+		if seed.SSH.KeyPassphrase != "" {
+			sshKeyPass.SetText(seed.SSH.KeyPassphrase)
+		}
+		setSSHEnabled(true)
+	}
+
 	form := widget.NewForm(
 		widget.NewFormItem("Name", name),
 		widget.NewFormItem("Host", host),
@@ -271,6 +333,14 @@ func newConnectionForm(w fyne.Window, seed Connection) *connectionForm {
 		widget.NewFormItem("Status Color", colorSel),
 		widget.NewFormItem("Safe Mode", safeSel),
 		widget.NewFormItem("Password Storage", keyringChk),
+		widget.NewFormItem("Use SSH Tunnel", sshEnable),
+		widget.NewFormItem("SSH Host", sshHost),
+		widget.NewFormItem("SSH Port", sshPort),
+		widget.NewFormItem("SSH User", sshUser),
+		widget.NewFormItem("SSH Auth", sshAuthMode),
+		widget.NewFormItem("SSH Password", sshPass),
+		widget.NewFormItem("SSH Key Path", sshKeyPath),
+		widget.NewFormItem("SSH Key Pass", sshKeyPass),
 	)
 
 	buildConn := func() Connection {
@@ -296,6 +366,16 @@ func newConnectionForm(w fyne.Window, seed Connection) *connectionForm {
 			StatusColor: colorSel.Selected,
 			SafeMode:    safeModeForName(safeSel.Selected),
 			UseKeyring:  keyringChk.Checked && keyringAvailable() && pass.Text != "",
+			SSH: db.SSHConfig{
+				Enabled:       sshEnable.Checked,
+				Host:          sshHost.Text,
+				Port:          sshPort.Text,
+				User:          sshUser.Text,
+				AuthMode:      sshAuthMode.Selected,
+				Password:      sshPass.Text,
+				KeyPath:       sshKeyPath.Text,
+				KeyPassphrase: sshKeyPass.Text,
+			},
 		}
 	}
 
@@ -308,7 +388,7 @@ func connectionSheetBody(cf *connectionForm, extra fyne.CanvasObject) fyne.Canva
 	return container.NewPadded(container.NewVBox(
 		container.NewHBox(layout.NewSpacer(), cf.picker, layout.NewSpacer()),
 		spacerH(6),
-		cf.form,
+		container.NewVScroll(cf.form),
 		container.NewHBox(layout.NewSpacer(), extra),
 	))
 }

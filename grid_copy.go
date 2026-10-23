@@ -52,6 +52,8 @@ func (t *dataTable) copyMenu(row, col int, pos fyne.Position) {
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Copy All Rows as CSV (with header)", func() { t.copyText(t.allCSV()) }),
 		fyne.NewMenuItem("Copy All Rows as SQL INSERTs", func() { t.copyText(t.allInserts()) }),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Export All Rows to File…", func() { t.exportRows(t.window) }),
 	)
 	if t.onPin != nil {
 		items = append(items, fyne.NewMenuItemSeparator(),
@@ -200,6 +202,37 @@ func (t *dataTable) allCSV() string {
 		b.WriteString(strings.Join(fields, ",") + "\n")
 	}
 	return b.String()
+}
+
+// allJSON renders every fetched row (up to maxCopyRows) as a JSON array of
+// objects ({"col": value, ...}); a SQL NULL becomes JSON null.
+func (t *dataTable) allJSON() string {
+	n := len(t.data.Rows)
+	if n > maxCopyRows {
+		n = maxCopyRows
+	}
+	rows := make([]map[string]interface{}, 0, n)
+	for r := 0; r < n; r++ {
+		vals := t.rowValues(r)
+		obj := make(map[string]interface{}, len(t.data.Cols))
+		for i, c := range t.data.Cols {
+			var v *string
+			if i < len(vals) {
+				v = vals[i]
+			}
+			if v == nil {
+				obj[c.Name] = nil
+			} else {
+				obj[c.Name] = *v
+			}
+		}
+		rows = append(rows, obj)
+	}
+	b, err := json.MarshalIndent(rows, "", "  ")
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
 }
 
 // allInserts renders every fetched row as INSERT statements.

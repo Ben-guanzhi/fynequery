@@ -20,6 +20,7 @@ import (
 
 	"fynequery/db"
 	"fynequery/icons"
+	"fynequery/proto"
 )
 
 // colorWhite is used for text on accent backgrounds.
@@ -587,6 +588,14 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 	qp.timer.Color = pal().statusFG
 	qp.timer.Refresh()
 
+	// Streaming path: fetch the result incrementally (bounded memory, paints
+	// progressively). Sessions without the capability fall back to the
+	// materialise-then-draw path below.
+	if st, ok := db.AsStreamer(sess); ok {
+		qp.runStreaming(st, stmt, label, all, i)
+		return
+	}
+
 	safeGo("query.run", func() {
 		res, err := sess.Query(stmt, qp.rowLimit())
 		// Build an empty grid on the UI thread, then stream the rows in so a
@@ -710,10 +719,165 @@ func (qp *queryPane) finishRun() {
 	qp.runBtn.setLabel("Run Current")
 }
 
+// streamBatch is how many rows the streaming path asks for per frame.
+const streamBatch = 500
+
+// streamState holds the per-run streaming UI state. Its fields are only touched
+// on the UI thread (inside safeDo), so no locking is needed.
+type streamState struct {
+	started bool
+	g       *dataTable
+	rows    int64
+}
+
+// runStreaming fetches a statement's result incrementally via the session's
+// Streamer, painting each batch into the grid as it arrives. It mirrors the
+// non-streaming path (generation guard, error handling, chain continuation) so
+// the two behave identically from the user's point of view.
+func (qp *queryPane) runStreaming(st db.Streamer, stmt, label string, all []string, i int) {
+	safeGo("query.stream", func() {
+		myGen := qp.bumpRun()
+		state := &streamState{}
+		limit := qp.rowLimit()
+		start := time.Now()
+		var seen int64
+		res, err := st.QueryStream(stmt, streamBatch, func(pcols []proto.ColumnInfo, rows [][]*string) (bool, error) {
+			// Count on this (background) goroutine so the row cap is enforced
+			// synchronously; safeDo only schedules the paint.
+			seen += int64(len(rows))
+			keep := int(seen) < limit
+			safeDo(func() {
+				if myGen != qp.runGen {
+					return
+				}
+				if g := qp.streamGrid(state, pcols, label); g != nil {
+					g.appendRows(rows)
+					state.rows = seen
+					qp.status.setRows(g.data.Fetched, int(seen), false)
+				}
+			})
+			return keep, nil
+		})
+		// A capped stream returns no aggregate from the host; fall back to the
+		// locally measured elapsed time so the status line still shows a figure.
+		if res.DurationMS == 0 {
+			res.DurationMS = time.Since(start).Milliseconds()
+		}
+		safeDo(func() {
+			if myGen != qp.runGen {
+				return
+			}
+			qp.finishStream(state, res, err, stmt, label, all, i)
+		})
+	})
+}
+
+// streamGrid lazily builds the result grid on the first emitted frame (so the
+// column metadata arrives with the data) and returns it for appending.
+func (qp *queryPane) streamGrid(state *streamState, pcols []proto.ColumnInfo, label string) *dataTable {
+	if state.started {
+		return state.g
+	}
+	state.started = true
+	cols := make([]ColumnInfo, 0, len(pcols))
+	for _, c := range pcols {
+		cols = append(cols, ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable, Key: c.Key})
+	}
+	g := newDataTable(&TableData{Cols: cols, Fetched: 0, Total: -1, Approx: false}, qp.status)
+	g.window = qp.window
+	g.tableName = "" // query results have no owning table
+	g.onPin = qp.pinResult
+	g.onRowSelect = func(idx int) {
+		if qp.onRowSelect != nil {
+			qp.onRowSelect(g.data, idx)
+		}
+	}
+	qp.activePin = -1 // a fresh live run supersedes any pinned view
+	qp.resultSlot.Objects = []fyne.CanvasObject{g}
+	qp.resultSlot.Refresh()
+	qp.bindFind(g)
+	qp.updateResultChrome()
+	qp.status.setQueryInfo(qp.resultStatusLine(label, len(cols), "执行中…"))
+	state.g = g
+	return g
+}
+
+// finishStream finalises a streaming run: surfaces errors (mirroring the
+// non-streaming path), or shows the row/affected count and continues the chain.
+func (qp *queryPane) finishStream(state *streamState, res proto.QueryResult, err error, stmt, label string, all []string, i int) {
+	if err != nil {
+		qp.timer.Color = hex("#E53935")
+		switch {
+		case errors.Is(err, db.ErrQueryCancelled):
+			qp.timer.Text = "cancelled"
+			qp.logQuery("已取消：%s", oneLine(stmt, 80))
+			qp.finishRun()
+		case looksLikeTimeout(err):
+			qp.timer.Text = "timeout"
+			qp.logQuery("执行超时：%s", oneLine(stmt, 80))
+			qp.showTimeoutDialog(stmt, all, i)
+		default:
+			if qp.continueOnError && i+1 < len(all) {
+				qp.timer.Text = fmt.Sprintf("stmt %d failed, continuing…", i+1)
+				qp.timer.Refresh()
+				qp.logQuery("执行失败（继续）：%v", err)
+				go func() {
+					defer func() { recover() }()
+					dialog.NewError(err, qp.window).Show()
+				}()
+				qp.runChainAt(all, i+1)
+				return
+			}
+			qp.timer.Text = "error"
+			qp.timer.Refresh()
+			qp.logQuery("执行失败：%v", err)
+			dialog.NewError(err, qp.window).Show()
+		}
+		qp.finishRun()
+		return
+	}
+
+	// A non-row-returning statement emits no frame, so ensure a grid exists to
+	// display the "rows affected" outcome.
+	if !state.started {
+		g := newDataTable(&TableData{Fetched: 0, Total: -1}, qp.status)
+		g.window = qp.window
+		g.tableName = ""
+		qp.activePin = -1
+		qp.resultSlot.Objects = []fyne.CanvasObject{g}
+		qp.resultSlot.Refresh()
+		qp.bindFind(g)
+		qp.updateResultChrome()
+		state.g = g
+		state.started = true
+	}
+
+	total := state.rows
+	noun := "rows"
+	if res.RowsAffected > 0 && total == 0 {
+		noun = "rows affected"
+	}
+	affected := max64(res.RowsAffected, total)
+	qp.timer.Text = fmt.Sprintf("%d ms · %d %s", res.DurationMS, affected, noun)
+	qp.timer.Color = pal().statusFG
+	qp.timer.Refresh()
+	qp.logQuery("完成：%d %s · %d ms", affected, noun, res.DurationMS)
+	qp.status.setQueryInfo(qp.resultStatusLine(label, len(state.g.data.Cols),
+		fmt.Sprintf("%d %s", total, noun)))
+	if qp.side != nil {
+		qp.side.appendHistory(stmt)
+	}
+	if i+1 < len(all) {
+		qp.runChainAt(all, i+1)
+	} else {
+		qp.finishRun()
+	}
+}
+
 // cancelRun asks the session to kill the in-flight statement (db.Canceller);
 // for sessions without the capability it is a no-op with a notice.
 func (qp *queryPane) cancelRun() {
-	c, ok := qp.session().(db.Canceller)
+	c, ok := db.AsCanceller(qp.session())
 	if !ok {
 		showInfo(qp.window, "Cancel", "This connection does not support cancelling queries.")
 		return

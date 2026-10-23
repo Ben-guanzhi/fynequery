@@ -169,6 +169,26 @@ func (msDialect) BrowseSQL(table string, limit int) string {
 	return fmt.Sprintf("SELECT TOP (%d) * FROM [%s]", limit, quoted)
 }
 
+// QuoteIdent quotes a SQL Server identifier with square brackets (escaping
+// embedded brackets). Used by the shared DML builders in pluginkit.
+func (msDialect) QuoteIdent(name string) string {
+	quoted := strings.ReplaceAll(name, "]", "]]")
+	return "[" + quoted + "]"
+}
+
+// Placeholder renders SQL Server's named parameter (@p1, @p2, ...).
+func (msDialect) Placeholder(i int) string { return fmt.Sprintf("@p%d", i) }
+
+// Metrics returns curated read-only SQL Server metrics.
+func (msDialect) Metrics(db *sql.DB) ([]proto.Metric, error) {
+	const q = `
+		SELECT 'Version', CAST(SERVERPROPERTY('ProductVersion') AS varchar(64))
+		UNION ALL SELECT 'Edition', CAST(SERVERPROPERTY('Edition') AS varchar(64))
+		UNION ALL SELECT 'Active connections', CAST(COUNT(*) AS varchar) FROM sys.dm_exec_sessions WHERE is_user_process = 1
+		UNION ALL SELECT 'Databases', CAST(COUNT(*) AS varchar) FROM sys.databases`
+	return pluginkit.KVMetrics(db, "SQL Server", q)
+}
+
 // CreateDatabase creates a new SQL Server database. CREATE DATABASE cannot run
 // inside a user transaction, so it is issued on a dedicated connection.
 func (msDialect) CreateDatabase(db *sql.DB, name, _, _ string) error {

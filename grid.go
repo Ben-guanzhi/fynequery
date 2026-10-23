@@ -655,13 +655,23 @@ func (h *headerWidget) Dragged(e *fyne.DragEvent) {
 	t := h.t
 	if h.dragCol < 0 {
 		h.dragCol = h.columnAtX(e.Position.X)
-		if h.dragCol < 0 {
+		// The column set can change under an in-flight drag (a reload landing
+		// mid-gesture); drop the drag if the resolved column no longer exists.
+		if h.dragCol < 0 || h.dragCol >= len(t.data.Cols) {
+			h.dragCol = -1
 			return
 		}
-		if !t.frozen {
-			t.colWidths = t.columnWidths(h.Size().Width)
-			t.frozen = true
-		}
+	}
+	// Freeze the current widths, and (re)build the stored slice so it spans
+	// every column. frozen can be true with a stale/short colWidths (e.g. the
+	// column count grew since it was captured); columnWidths() pads to the
+	// current length, so this guarantees the index below is in range.
+	if !t.frozen || len(t.colWidths) < len(t.data.Cols) {
+		t.colWidths = t.columnWidths(h.Size().Width)
+		t.frozen = true
+	}
+	if h.dragCol >= len(t.colWidths) {
+		return // defensive: should be unreachable after the rebuild above
 	}
 	t.colWidths[h.dragCol] += e.Dragged.DX
 	if t.colWidths[h.dragCol] < minColWidth {

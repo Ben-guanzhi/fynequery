@@ -100,6 +100,26 @@ func (sqliteDialect) BrowseSQL(table string, limit int) string {
 	return fmt.Sprintf("SELECT * FROM \"%s\" LIMIT %d", quoted, limit)
 }
 
+// QuoteIdent quotes a SQLite identifier with double quotes (escaping embedded
+// quotes). Used by the shared DML builders in pluginkit.
+func (sqliteDialect) QuoteIdent(name string) string {
+	quoted := strings.ReplaceAll(name, `"`, `""`)
+	return `"` + quoted + `"`
+}
+
+// Placeholder renders SQLite's positional parameter (?).
+func (sqliteDialect) Placeholder(int) string { return "?" }
+
+// Metrics returns a small set of SQLite file-level metrics. SQLite is a
+// file-based embedded engine, so it exposes no server-wide counters.
+func (sqliteDialect) Metrics(db *sql.DB) ([]proto.Metric, error) {
+	const q = `
+		SELECT 'Page count', CAST(page_count AS TEXT) FROM pragma_page_count()
+		UNION ALL SELECT 'Page size', CAST(page_size AS TEXT) FROM pragma_page_size()
+		UNION ALL SELECT 'Freelist pages', CAST(freelist_count AS TEXT) FROM pragma_freelist_count()`
+	return pluginkit.KVMetrics(db, "SQLite", q)
+}
+
 // CreateDatabase for SQLite creates a new database file at the given path.
 // The "name" is treated as a file path; opening with mode=rwc creates the
 // file when absent and is a no-op when it already exists (no clobbering).

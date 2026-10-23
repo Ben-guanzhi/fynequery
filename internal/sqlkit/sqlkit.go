@@ -78,6 +78,107 @@ type Querier interface {
 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
 }
 
+// StreamResult reports the outcome of StreamRun.
+type StreamResult struct {
+	Rows         int64 // rows emitted (row-returning statements)
+	RowsAffected int64 // rows affected (non-row-returning statements)
+	DurationMS   int64
+}
+
+// StreamRun executes a statement and emits its result in batches of up to
+// `batch` rows as they are read from the cursor, so a large result set is
+// fetched incrementally with bounded memory instead of materialised all at
+// once. The column metadata is passed on the first emit only (cols is nil
+// afterwards). Non-row-returning statements are Exec'd and emit no rows; their
+// RowsAffected is returned in the result. If emit returns an error, streaming
+// stops and that error is returned.
+func StreamRun(q Querier, sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]*string) error) (StreamResult, error) {
+	if batch <= 0 {
+		batch = 200
+	}
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	defer cancel()
+
+	if !IsRowReturning(sqlText) {
+		res, err := q.ExecContext(ctx, sqlText)
+		if err != nil {
+			return StreamResult{}, err
+		}
+		n, _ := res.RowsAffected()
+		return StreamResult{RowsAffected: n, DurationMS: msSince(start)}, nil
+	}
+
+	rows, err := q.QueryContext(ctx, sqlText)
+	if err != nil {
+		return StreamResult{}, err
+	}
+	defer rows.Close()
+
+	colNames, err := rows.Columns()
+	if err != nil {
+		return StreamResult{}, err
+	}
+	ctypes, _ := rows.ColumnTypes()
+	cols := make([]proto.ColumnInfo, len(colNames))
+	for i := range colNames {
+		cols[i].Name = colNames[i]
+		if ctypes != nil && i < len(ctypes) {
+			cols[i].Type = strings.ToLower(ctypes[i].DatabaseTypeName())
+			if nullable, ok := ctypes[i].Nullable(); ok {
+				cols[i].Nullable = nullable
+			}
+		}
+	}
+
+	vals := make([]interface{}, len(colNames))
+	ptrs := make([]interface{}, len(colNames))
+	for i := range colNames {
+		ptrs[i] = &vals[i]
+	}
+
+	var total int64
+	var buf [][]*string
+	sentCols := false
+	flush := func() error {
+		if len(buf) == 0 {
+			return nil
+		}
+		chunk := make([][]*string, len(buf))
+		copy(chunk, buf)
+		send := []proto.ColumnInfo(nil)
+		if !sentCols {
+			send = cols
+			sentCols = true
+		}
+		buf = buf[:0]
+		return emit(send, chunk)
+	}
+	for rows.Next() {
+		if err := rows.Scan(ptrs...); err != nil {
+			return StreamResult{}, err
+		}
+		row := make([]*string, len(colNames))
+		for i, v := range vals {
+			row[i] = FormatValue(v)
+		}
+		buf = append(buf, row)
+		total++
+		if len(buf) >= batch {
+			if err := flush(); err != nil {
+				return StreamResult{Rows: total, DurationMS: msSince(start)}, err
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return StreamResult{}, err
+	}
+	if err := flush(); err != nil {
+		return StreamResult{Rows: total, DurationMS: msSince(start)}, err
+	}
+	return StreamResult{Rows: total, DurationMS: msSince(start)}, nil
+}
+
 // ReadRows drains rows into a QueryResult. It is exported because metadata
 // queries in drivers reuse the same formatting.
 func ReadRows(rows *sql.Rows, maxRows int, start time.Time) (proto.QueryResult, error) {

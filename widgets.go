@@ -390,6 +390,7 @@ type clickableIcon struct {
 	bordered bool
 	hover    bool
 	selected bool
+	disabled bool // taps are ignored and the icon is dimmed
 }
 
 func newToolButton(icon fyne.Resource, onTap func()) *clickableIcon {
@@ -419,7 +420,18 @@ func (c *clickableIcon) setSelected(v bool) {
 	}
 }
 
+// setDisabled greys out the button and makes it ignore taps.
+func (c *clickableIcon) setDisabled(v bool) {
+	if c.disabled != v {
+		c.disabled = v
+		c.Refresh()
+	}
+}
+
 func (c *clickableIcon) Tapped(_ *fyne.PointEvent) {
+	if c.disabled {
+		return
+	}
 	if c.onTap != nil {
 		c.onTap()
 	}
@@ -553,6 +565,12 @@ func (r *clickableIconRenderer) Refresh() {
 	}
 	r.bg.FillColor = fill
 	r.border.StrokeColor = stroke
+	if r.b.disabled {
+		r.icon.Resource = theme.NewDisabledResource(r.b.icon)
+	} else {
+		r.icon.Resource = r.b.icon
+	}
+	r.icon.Refresh()
 	r.bg.Refresh()
 	r.border.Refresh()
 }

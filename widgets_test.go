@@ -41,3 +41,19 @@ func TestAccentSplitResize(t *testing.T) {
 		t.Fatalf("trailing width after hide = %v, want 1000", got)
 	}
 }
+
+// TestSideModeButtonStableWidth guards the tab-shift regression: the active
+// state toggles bold, which is wider, so the button must reserve the bold width
+// up front — otherwise switching tabs re-lays-out the row and the sibling
+// labels visibly shift.
+func TestSideModeButtonStableWidth(t *testing.T) {
+	test.NewApp()
+	for _, label := range []string{"JSON Tree", "Text", "Hex", "项目"} {
+		b := newSideModeButton(label, nil)
+		inactive := b.MinSize().Width
+		b.setActive(true)
+		if active := b.MinSize().Width; active != inactive {
+			t.Fatalf("%q: active width %v != inactive %v — labels would shift on switch", label, active, inactive)
+		}
+	}
+}

@@ -120,3 +120,151 @@ func TestDiscoverySkipsMissingDirs(t *testing.T) {
 		t.Fatal("mysql driver missing after discovery")
 	}
 }
+
+func TestRemoteSessionTransactions(t *testing.T) {
+	exe := buildFakePlugin(t)
+	p, err := spawnPlugin(exe)
+	if err != nil {
+		t.Fatalf("spawnPlugin: %v", err)
+	}
+	defer p.kill()
+
+	sess, err := p.Connect(proto.ConnectParams{Name: "tx", Host: "localhost", Database: "db"})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	rs, ok := sess.(*remoteSession)
+	if !ok {
+		t.Fatalf("Connect returned %T, want *remoteSession", sess)
+	}
+
+	tx, ok := AsTransactional(sess)
+	if !ok {
+		t.Fatal("remoteSession should satisfy Transactional via AsTransactional")
+	}
+	if tx.InTransaction() {
+		t.Fatal("session should not start in a transaction")
+	}
+
+	if err := tx.Begin(); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if !tx.InTransaction() {
+		t.Fatal("InTransaction should be true after Begin")
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if tx.InTransaction() {
+		t.Fatal("InTransaction should be false after Commit")
+	}
+
+	if err := tx.Begin(); err != nil {
+		t.Fatalf("Begin (2): %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if tx.InTransaction() {
+		t.Fatal("InTransaction should be false after Rollback")
+	}
+
+	// Closing with a transaction open must not error (it rolls back internally).
+	if err := tx.Begin(); err != nil {
+		t.Fatalf("Begin (3): %v", err)
+	}
+	rs.Close()
+	if tx.InTransaction() {
+		t.Fatal("Close should roll back and clear the transaction flag")
+	}
+}
+
+func TestRemoteSessionQueryStream(t *testing.T) {
+	exe := buildFakePlugin(t)
+	p, err := spawnPlugin(exe)
+	if err != nil {
+		t.Fatalf("spawnPlugin: %v", err)
+	}
+	defer p.kill()
+
+	sess, err := p.Connect(proto.ConnectParams{Name: "stream", Host: "localhost", Database: "db"})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer sess.Close()
+
+	st, ok := AsStreamer(sess)
+	if !ok {
+		t.Fatal("remoteSession should satisfy Streamer via AsStreamer")
+	}
+
+	var cols []proto.ColumnInfo
+	var got []string
+	frames := 0
+	final, err := st.QueryStream("SELECT n", 2, func(c []proto.ColumnInfo, rows [][]*string) (bool, error) {
+		frames++
+		if len(c) > 0 {
+			cols = c
+		}
+		for _, r := range rows {
+			got = append(got, *r[0])
+		}
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("QueryStream: %v", err)
+	}
+	if frames != 2 {
+		t.Fatalf("got %d frames, want 2", frames)
+	}
+	if len(cols) != 1 || cols[0].Name != "n" {
+		t.Fatalf("columns = %+v", cols)
+	}
+	if strings.Join(got, ",") != "1,2,3" {
+		t.Fatalf("rows = %v, want 1,2,3", got)
+	}
+	if final.DurationMS != 1 {
+		t.Fatalf("terminal duration = %d, want 1", final.DurationMS)
+	}
+
+	// Early stop: emit returning keep=false must end the stream without error.
+	n := 0
+	_, err = st.QueryStream("SELECT n", 2, func(c []proto.ColumnInfo, rows [][]*string) (bool, error) {
+		n += len(rows)
+		return false, nil // stop after the first frame
+	})
+	if err != nil {
+		t.Fatalf("early-stop QueryStream: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("early stop consumed %d rows, want 2", n)
+	}
+}
+
+func TestRemoteSessionMetrics(t *testing.T) {
+	exe := buildFakePlugin(t)
+	p, err := spawnPlugin(exe)
+	if err != nil {
+		t.Fatalf("spawnPlugin: %v", err)
+	}
+	defer p.kill()
+
+	sess, err := p.Connect(proto.ConnectParams{Name: "metrics", Host: "localhost", Database: "db"})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer sess.Close()
+
+	m, ok := AsMetricser(sess)
+	if !ok {
+		t.Fatal("remoteSession should satisfy Metricser via AsMetricser")
+	}
+	ms, err := m.Metrics()
+	if err != nil {
+		t.Fatalf("Metrics: %v", err)
+	}
+	if len(ms) != 2 || ms[0].Label != "Connections" || ms[0].Value != "7" {
+		t.Fatalf("metrics = %+v", ms)
+	}
+}

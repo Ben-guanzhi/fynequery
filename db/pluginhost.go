@@ -82,8 +82,10 @@ func isPluginFile(name string) bool {
 	return !strings.Contains(name, ".")
 }
 
-// Shutdown kills every spawned plugin process. Called on app exit.
+// Shutdown kills every spawned plugin process and flushes the session pool.
+// Called on app exit.
 func Shutdown() {
+	DefaultPool.CloseAll()
 	procsMu.Lock()
 	list := append([]*pluginProc(nil), procs...)
 	procs = nil
@@ -117,6 +119,7 @@ type pluginProc struct {
 	mu      sync.Mutex
 	nextID  int64
 	pending map[int64]chan proto.Response
+	streams map[int64]chan proto.Response // in-flight streaming calls (multi-frame)
 	dead    error
 }
 
@@ -145,6 +148,7 @@ func spawnPlugin(exe string) (*pluginProc, error) {
 		stdin:   stdin,
 		reader:  bufio.NewReader(stdout),
 		pending: map[int64]chan proto.Response{},
+		streams: map[int64]chan proto.Response{},
 	}
 
 	// Plugin diagnostics (stderr) go to the host log, prefixed.
@@ -228,6 +232,16 @@ func (p *pluginProc) readLoop() {
 			var resp proto.Response
 			if jerr := json.Unmarshal(line, &resp); jerr == nil {
 				p.mu.Lock()
+				if sc, ok := p.streams[resp.ID]; ok {
+					// Streaming frame: keep the channel open until the terminal
+					// (Done) frame, then retire it.
+					if resp.Done {
+						delete(p.streams, resp.ID)
+					}
+					p.mu.Unlock()
+					sc <- resp
+					continue
+				}
 				ch := p.pending[resp.ID]
 				delete(p.pending, resp.ID)
 				p.mu.Unlock()
@@ -258,9 +272,17 @@ func (p *pluginProc) failAll(err error) {
 		waiters = append(waiters, ch)
 		delete(p.pending, id)
 	}
+	streams := make([]chan proto.Response, 0, len(p.streams))
+	for id, ch := range p.streams {
+		streams = append(streams, ch)
+		delete(p.streams, id)
+	}
 	p.mu.Unlock()
 	for _, ch := range waiters {
 		ch <- proto.Response{Error: fmt.Sprintf("plugin: %v", err)}
+	}
+	for _, ch := range streams {
+		ch <- proto.Response{Error: fmt.Sprintf("plugin: %v", err), Done: true}
 	}
 }
 
@@ -270,6 +292,8 @@ func (p *pluginProc) kill() {
 	p.dead = errors.New("shut down")
 	pending := p.pending
 	p.pending = map[int64]chan proto.Response{}
+	streams := p.streams
+	p.streams = map[int64]chan proto.Response{}
 	p.mu.Unlock()
 	if dead != nil {
 		return // already exited or killed
@@ -282,6 +306,9 @@ func (p *pluginProc) kill() {
 	}
 	for _, ch := range pending {
 		ch <- proto.Response{Error: "plugin: shut down"}
+	}
+	for _, ch := range streams {
+		ch <- proto.Response{Error: "plugin: shut down", Done: true}
 	}
 }
 
@@ -337,7 +364,85 @@ func (p *pluginProc) call(ctx context.Context, method string, params, result int
 	}
 }
 
-// ---- Dialer / Session implementation ----
+// callStream performs a streaming request/response exchange. It registers the
+// request as a stream, sends it, then delivers every frame to onFrame until the
+// terminal (Done) frame, whose Result is decoded into final. onFrame must not
+// block indefinitely; a false return stops early (the stream is retired).
+func (p *pluginProc) callStream(ctx context.Context, method string, params interface{}, onFrame func(proto.StreamFrame) (bool, error), final interface{}) error {
+	p.mu.Lock()
+	if p.dead != nil {
+		err := fmt.Errorf("plugin: %w", p.dead)
+		p.mu.Unlock()
+		return err
+	}
+	id := p.nextID
+	p.nextID++
+	req := proto.Request{ID: id, Method: method}
+	if params != nil {
+		raw, err := json.Marshal(params)
+		if err != nil {
+			p.mu.Unlock()
+			return err
+		}
+		req.Params = raw
+	}
+	line, err := json.Marshal(req)
+	if err != nil {
+		p.mu.Unlock()
+		return err
+	}
+	ch := make(chan proto.Response, 8)
+	p.streams[id] = ch
+	_, werr := p.stdin.Write(append(line, '\n'))
+	p.mu.Unlock()
+	if werr != nil {
+		p.mu.Lock()
+		delete(p.streams, id)
+		p.mu.Unlock()
+		return fmt.Errorf("write to plugin: %w", werr)
+	}
+
+	stop := func() {
+		p.mu.Lock()
+		delete(p.streams, id)
+		p.mu.Unlock()
+	}
+	for {
+		select {
+		case resp := <-ch:
+			if resp.Error != "" {
+				stop()
+				return errors.New(resp.Error)
+			}
+			var f proto.StreamFrame
+			if len(resp.Result) > 0 {
+				if jerr := json.Unmarshal(resp.Result, &f); jerr != nil {
+					stop()
+					return jerr
+				}
+			}
+			keep := true
+			if !resp.Done && onFrame != nil {
+				var e error
+				keep, e = onFrame(f)
+				if e != nil {
+					stop()
+					return e
+				}
+			}
+			if resp.Done || !keep {
+				stop()
+				if resp.Done && final != nil && len(resp.Result) > 0 {
+					return json.Unmarshal(resp.Result, final)
+				}
+				return nil
+			}
+		case <-ctx.Done():
+			stop()
+			return ctx.Err()
+		}
+	}
+}
 
 func (p *pluginProc) Info() DriverInfo { return p.info }
 
@@ -356,6 +461,13 @@ type remoteSession struct {
 	p      *pluginProc
 	connID string
 	server string
+
+	// txMu guards inTx, the client-side view of the manual transaction the
+	// plugin holds. The plugin is the source of truth for BEGIN/COMMIT/
+	// ROLLBACK; this flag mirrors it so the UI can show state and so a
+	// transaction left open on disconnect can be rolled back.
+	txMu sync.Mutex
+	inTx bool
 }
 
 func (s *remoteSession) Server() string { return s.server }
@@ -395,8 +507,149 @@ func (s *remoteSession) Browse(table string, limit int) (proto.QueryResult, erro
 func (s *remoteSession) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// Roll back any transaction left open so the connection goes back to a
+	// clean state before it is dropped or returned to the pool.
+	s.txMu.Lock()
+	inTx := s.inTx
+	s.txMu.Unlock()
+	if inTx {
+		_ = s.p.call(ctx, proto.MethodRollback, proto.TxParams{ConnID: s.connID}, nil)
+		s.txMu.Lock()
+		s.inTx = false
+		s.txMu.Unlock()
+	}
 	// Best effort: a failed close just leaves the conn to die with the process.
 	_ = s.p.call(ctx, proto.MethodClose, proto.CloseParams{ConnID: s.connID}, nil)
+}
+
+// ---- manual transactions (implements db.Transactional) ---------------------
+
+// Begin starts a transaction on the plugin connection. The plugin generates the
+// BEGIN; this flag mirrors it for the UI and disconnect rollback.
+func (s *remoteSession) Begin() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := s.p.call(ctx, proto.MethodBegin, proto.TxParams{ConnID: s.connID}, nil); err != nil {
+		return err
+	}
+	s.txMu.Lock()
+	s.inTx = true
+	s.txMu.Unlock()
+	return nil
+}
+
+// Commit commits the active transaction.
+func (s *remoteSession) Commit() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := s.p.call(ctx, proto.MethodCommit, proto.TxParams{ConnID: s.connID}, nil); err != nil {
+		return err
+	}
+	s.txMu.Lock()
+	s.inTx = false
+	s.txMu.Unlock()
+	return nil
+}
+
+// Rollback rolls back the active transaction.
+func (s *remoteSession) Rollback() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := s.p.call(ctx, proto.MethodRollback, proto.TxParams{ConnID: s.connID}, nil); err != nil {
+		return err
+	}
+	s.txMu.Lock()
+	s.inTx = false
+	s.txMu.Unlock()
+	return nil
+}
+
+// InTransaction reports the client-side view of the plugin's transaction state.
+func (s *remoteSession) InTransaction() bool {
+	s.txMu.Lock()
+	defer s.txMu.Unlock()
+	return s.inTx
+}
+
+// Metrics forwards a server-metrics request to the plugin, reusing the already
+// opened connection.
+func (s *remoteSession) Metrics() ([]proto.Metric, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	var res proto.MetricsResult
+	if err := s.p.call(ctx, proto.MethodMetrics, proto.MetricsParams{ConnID: s.connID}, &res); err != nil {
+		return nil, err
+	}
+	return res.Metrics, nil
+}
+
+// QueryStream streams a statement's result from the plugin in batches over the
+// multi-frame protocol, emitting each batch to the caller. Statements run
+// inside an active manual transaction when one is open (the plugin routes them
+// through the transaction).
+func (s *remoteSession) QueryStream(sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]*string) (bool, error)) (proto.QueryResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), pluginQueryTimeout)
+	defer cancel()
+	var final proto.QueryResult
+	err := s.p.callStream(ctx, proto.MethodQueryStream,
+		proto.QueryStreamParams{ConnID: s.connID, SQL: sqlText, Batch: batch},
+		func(f proto.StreamFrame) (bool, error) {
+			return emit(f.Columns, f.Rows)
+		}, &final)
+	if err != nil {
+		return proto.QueryResult{}, err
+	}
+	return final, nil
+}
+
+// ---- row-level DML (implements db.Updater / db.BatchUpdater) ----------------
+//
+// Plugin connections were historically read-only because the protocol had no
+// DML methods. They now forward edits to the plugin process (which generates
+// dialect-correct SQL centrally), so every engine the app can browse it can
+// also edit — closing the gap with the built-in MySQL driver.
+
+// UpdateRow/InsertRow/DeleteRow forward single-row edits to the plugin. The
+// batch path (ApplyChanges) is preferred by the UI, but the one-at-a-time
+// fallback also works for sessions without transaction support.
+func (s *remoteSession) UpdateRow(table string, pk, changes map[string]*string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	return s.p.call(ctx, proto.MethodUpdate, proto.DMLSingleParams{
+		ConnID: s.connID, Table: table, PK: pk, Changes: changes,
+	}, nil)
+}
+
+func (s *remoteSession) InsertRow(table string, values map[string]*string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	return s.p.call(ctx, proto.MethodInsert, proto.DMLSingleParams{
+		ConnID: s.connID, Table: table, Values: values,
+	}, nil)
+}
+
+func (s *remoteSession) DeleteRow(table string, pk map[string]*string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	return s.p.call(ctx, proto.MethodDelete, proto.DMLSingleParams{
+		ConnID: s.connID, Table: table, PK: pk,
+	}, nil)
+}
+
+// ApplyChanges forwards the whole commit to the plugin, which runs it inside
+// one transaction with the same affect-exactly-one-row guarantee as the
+// built-in driver.
+func (s *remoteSession) ApplyChanges(table string, updates []RowEdit, deletes []map[string]*string, inserts []map[string]*string, ddl []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	up := make([]proto.DMLRow, 0, len(updates))
+	for _, u := range updates {
+		up = append(up, proto.DMLRow{PK: u.PK, Changes: u.Changes})
+	}
+	err := s.p.call(ctx, proto.MethodApplyBatch, proto.DMLBatchParams{
+		ConnID: s.connID, Table: table, Updates: up, Deletes: deletes, Inserts: inserts, DDL: ddl,
+	}, nil)
+	return err
 }
 
 // CreateDatabase forwards the request to the plugin process, reusing the already

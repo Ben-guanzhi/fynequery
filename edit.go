@@ -468,16 +468,37 @@ func (ws *workspace) showQueryRow(data *TableData, row int) {
 	ws.details.setRow(fields)
 }
 
-// editRowField opens the cell editor for one field in the selected row.
+// editRowField opens the cell editor for one field in the selected row. When
+// the table has no primary key (rows can't be identified for editing) it falls
+// back to a read-only value viewer, so a JSON / long-text field can still be
+// inspected instead of dead-ending on the "no primary key" notice.
 func (ws *workspace) editRowField(col int) {
 	g := ws.grid
 	if g == nil || g.data == nil || g.selRow < 0 {
+		return
+	}
+	if !ws.editMode && !g.hasPK() {
+		ws.viewRowField(col)
 		return
 	}
 	if !ws.ensureEditable() {
 		return
 	}
 	g.beginEdit(g.selRow, col)
+}
+
+// viewRowField opens the full-value viewer for one field of the selected row
+// (read-only), pretty-printing JSON. Used when a cell cannot be edited.
+func (ws *workspace) viewRowField(col int) {
+	g := ws.grid
+	if g == nil || g.data == nil || g.selRow < 0 || col < 0 || col >= len(g.data.Cols) {
+		return
+	}
+	raw := ""
+	if vals := g.rowValues(g.selRow); col < len(vals) && vals[col] != nil {
+		raw = *vals[col]
+	}
+	showFullValueDialog(ws.window, g.data.Cols[col].Name, raw)
 }
 
 // setRowField applies a quick value (e.g. NULL) to one field of the row.
@@ -523,7 +544,7 @@ func (ws *workspace) commitEdits() {
 	if g == nil || (g.changeCount() == 0 && len(ws.pendingDDL) == 0) {
 		return
 	}
-	up, ok := ws.sess.(db.Updater)
+	up, ok := db.AsUpdater(ws.sess)
 	updates, deletes, inserts := g.pending()
 	if !ok && len(updates)+len(deletes)+len(inserts) > 0 {
 		showInfo(ws.window, "Commit", "This connection does not support editing.")
@@ -551,7 +572,7 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 	progress.Show()
 	safeGo("commit", func() {
 		var ferr error
-		if batcher, batched := ws.sess.(db.BatchUpdater); batched && ok {
+		if batcher, batched := db.AsBatchUpdater(ws.sess); batched && ok {
 			// Atomic path: all row edits + DDL run in one transaction, so a
 			// mid-batch error rolls back everything instead of leaving a partial
 			// commit.
@@ -656,7 +677,7 @@ func (ws *workspace) showInsertRowDialog() {
 		showInfo(ws.window, "Add Row", "Enable edit mode first.")
 		return
 	}
-	if _, ok := ws.sess.(db.Updater); !ok {
+	if _, ok := db.AsUpdater(ws.sess); !ok {
 		showInfo(ws.window, "Add Row", "This connection does not support editing.")
 		return
 	}

@@ -262,7 +262,7 @@ func showCreateDatabaseDialog(w fyne.Window, sess db.Session, driver string, onC
 				opts["collation"] = c
 			}
 		}
-		creator, ok := sess.(db.DatabaseCreator)
+		creator, ok := db.AsDatabaseCreator(sess)
 		if !ok {
 			showInfo(w, "新建数据库", "当前连接不支持在应用内创建数据库。")
 			return

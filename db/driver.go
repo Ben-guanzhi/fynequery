@@ -97,6 +97,39 @@ type Canceller interface {
 	KillQuery() error
 }
 
+// Transactional is optionally implemented by Session types that support a
+// manual transaction (TablePlus "Begin Transaction" mode). Begin starts a
+// transaction; subsequent Query/Browse/DML run inside it until Commit or
+// Rollback. InTransaction reports the current state so the UI can show the
+// right controls and auto-rollback a transaction left open on disconnect.
+type Transactional interface {
+	Begin() error
+	Commit() error
+	Rollback() error
+	InTransaction() bool
+}
+
+// Streamer is optionally implemented by Session types that can fetch a
+// statement's result incrementally, emitting batches of up to `batch` rows as
+// they are read from the server. This keeps memory bounded and lets the grid
+// paint a large result progressively instead of blocking on one giant result
+// set. The built-in MySQL driver streams from the cursor; plugin connections
+// stream over a multi-frame protocol extension. emit receives the column
+// metadata on the first call only (cols is nil afterwards); returning
+// (false, err) stops the stream early. The returned QueryResult carries the
+// aggregate rows affected (non-SELECT) and duration.
+type Streamer interface {
+	QueryStream(sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]*string) (bool, error)) (proto.QueryResult, error)
+}
+
+// Metricser is optionally implemented by Session types that can report a
+// curated set of read-only server metrics (connections, uptime, cache hit
+// ratio, ...). It backs the in-app server-metrics panel; sessions without it
+// simply report no metrics.
+type Metricser interface {
+	Metrics() ([]proto.Metric, error)
+}
+
 // ErrQueryCancelled is returned by Query implementations whose in-flight
 // statement was terminated by KillQuery (as opposed to a server error).
 var ErrQueryCancelled = errors.New("query cancelled")

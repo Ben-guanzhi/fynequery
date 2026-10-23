@@ -9,8 +9,8 @@ import "fyne.io/fyne/v2"
 
 const chromeEnabled = false
 
-func enableCustomChrome(fyne.Window) {}
+func enableCustomChrome(fyne.Window)              {}
 func chromeFitWindow(fyne.Window, fyne.Size) bool { return false }
-func chromeMinimize()                {}
-func chromeToggleMax()               {}
-func chromeStartDrag()               {}
+func chromeMinimize()                             {}
+func chromeToggleMax()                            {}
+func chromeStartDrag()                            {}

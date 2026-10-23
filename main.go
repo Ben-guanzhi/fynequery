@@ -14,11 +14,23 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/lang"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"fynequery/db"
 )
+
+// Fyne's widget.Select default placeholder "(Select one)" has no zh-Hans
+// translation, so on a Chinese system every Select logs a "Translation
+// failure" the moment it is constructed (NewSelect looks the key up in its
+// constructor). Register the missing key at package init — before any Select
+// exists, and independently of a running app — so the lookup succeeds and empty
+// selects show a Chinese placeholder. This also silences the warning in tests,
+// which build their own app.
+func init() {
+	_ = lang.AddTranslationsForLocale([]byte(`{"(Select one)":"（请选择）"}`), fyne.Locale("zh-Hans"))
+}
 
 // spacerW is a fixed-width horizontal spacer.
 func spacerW(w float32) fyne.CanvasObject {

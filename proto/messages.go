@@ -36,6 +36,9 @@ type Response struct {
 	ID     int64           `json:"id"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
+	// Done marks the terminal frame of a streaming reply (MethodQueryStream).
+	// Every non-streaming reply is a single frame and leaves it false.
+	Done bool `json:"done,omitempty"`
 }
 
 // Method names.
@@ -48,7 +51,44 @@ const (
 	MethodQuery    = "query"
 	MethodBrowse   = "browse"
 	MethodCreateDB = "createDatabase"
+
+	// DML methods let the host edit rows through a plugin the same way the
+	// built-in MySQL driver can. They are additive: deployed plugins that
+	// predate them simply answer "unknown method", so older binaries keep
+	// working (the grid just stays read-only for those connections).
+	MethodUpdate     = "update"
+	MethodInsert     = "insert"
+	MethodDelete     = "delete"
+	MethodApplyBatch = "applyBatch"
+
+	// Transaction methods drive a manual transaction on a connection
+	// (TablePlus "Begin Transaction" mode). They are additive: deployed
+	// plugins that predate them simply answer "unknown method", so older
+	// binaries keep working (those connections just report no transaction
+	// support).
+	MethodBegin    = "begin"
+	MethodCommit   = "commit"
+	MethodRollback = "rollback"
+
+	// MethodQueryStream streams a statement's result in batches so a large
+	// result set is fetched (and can be drawn) incrementally with bounded
+	// memory, instead of materialising every row in one frame. Additive like
+	// the rest: an older plugin answers "unknown method" and the host falls
+	// back to the non-streaming Query.
+	MethodQueryStream = "queryStream"
+
+	// MethodMetrics asks the plugin for a curated set of read-only server
+	// metrics (connections, uptime, cache hit ratio, ...). Additive: an older
+	// plugin answers "unknown method" and the connection simply reports no
+	// metrics.
+	MethodMetrics = "metrics"
 )
+
+// DefaultMarker is the sentinel *string value meaning "write the SQL keyword
+// DEFAULT" rather than a literal (TablePlus "Set Value → DEFAULT"). It must
+// match the host-side constant in db/mysql.go so the value round-trips
+// unchanged through the protocol.
+const DefaultMarker = "\x00DEFAULT"
 
 // ConnectParams carries everything needed to open one database connection.
 type ConnectParams struct {
@@ -148,4 +188,80 @@ type CreateDBParams struct {
 	Name      string `json:"name"`
 	Charset   string `json:"charset,omitempty"`
 	Collation string `json:"collation,omitempty"`
+}
+
+// DMLRow pairs a primary key with the changed columns for one UPDATE.
+type DMLRow struct {
+	PK      map[string]*string `json:"pk"`
+	Changes map[string]*string `json:"changes"`
+}
+
+// DMLSingleParams carries one UPDATE/INSERT/DELETE operation. Exactly one of
+// Changes (update) or Values (insert) is populated; PK identifies the target
+// row for update/delete. nil values mean SQL NULL; the DefaultMarker sentinel
+// means the SQL keyword DEFAULT.
+type DMLSingleParams struct {
+	ConnID  string             `json:"connId"`
+	Table   string             `json:"table"`
+	PK      map[string]*string `json:"pk,omitempty"`
+	Changes map[string]*string `json:"changes,omitempty"`
+	Values  map[string]*string `json:"values,omitempty"`
+}
+
+// DMLBatchParams carries a whole commit: row edits, deletions, inserts and an
+// optional list of structural DDL. The plugin applies them atomically in one
+// transaction.
+type DMLBatchParams struct {
+	ConnID  string               `json:"connId"`
+	Table   string               `json:"table"`
+	Updates []DMLRow             `json:"updates,omitempty"`
+	Deletes []map[string]*string `json:"deletes,omitempty"`
+	Inserts []map[string]*string `json:"inserts,omitempty"`
+	DDL     []string             `json:"ddl,omitempty"`
+}
+
+// DMLResult reports how many rows a DML operation touched.
+type DMLResult struct {
+	RowsAffected int64 `json:"rowsAffected"`
+}
+
+// TxParams identifies the connection for a begin/commit/rollback call.
+type TxParams struct {
+	ConnID string `json:"connId"`
+}
+
+// QueryStreamParams asks the plugin to stream a statement's result in batches.
+// Batch is the maximum number of rows per frame (0 → a sensible default).
+type QueryStreamParams struct {
+	ConnID string `json:"connId"`
+	SQL    string `json:"sql"`
+	Batch  int    `json:"batch,omitempty"`
+}
+
+// StreamFrame is one frame of a streaming reply. Data frames carry the column
+// metadata on the first frame (Columns) and up to Batch rows (Rows); the
+// terminal frame carries the aggregate RowsAffected and DurationMS. All frames
+// of a stream share the request ID; the terminal one sets Response.Done.
+type StreamFrame struct {
+	Columns      []ColumnInfo `json:"columns,omitempty"`
+	Rows         [][]*string  `json:"rows,omitempty"`
+	RowsAffected int64        `json:"rowsAffected,omitempty"`
+	DurationMS   int64        `json:"durationMs,omitempty"`
+}
+
+// MetricsParams asks for a connection's server metrics.
+type MetricsParams struct {
+	ConnID string `json:"connId"`
+}
+
+// Metric is one labelled server metric value (already formatted for display).
+type Metric struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+	Group string `json:"group,omitempty"` // optional section heading
+}
+
+// MetricsResult answers MethodMetrics.
+type MetricsResult struct {
+	Metrics []Metric `json:"metrics"`
 }

@@ -6,6 +6,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -71,6 +72,10 @@ type mysqlSession struct {
 	mu        sync.Mutex
 	activeID  int64 // CONNECTION_ID of the in-flight statement (0 = none)
 	killAsked bool  // KillQuery was called for the in-flight statement
+
+	// tx is the active manual transaction, if one has been started. While set,
+	// Query/Browse/DML run inside it rather than autocommitting.
+	tx *sql.Tx
 }
 
 func (s *mysqlSession) Server() string { return s.server }
@@ -204,6 +209,30 @@ func (s *mysqlSession) Columns(table string) ([]proto.ColumnInfo, error) {
 }
 
 func (s *mysqlSession) Query(sqlText string, maxRows int) (proto.QueryResult, error) {
+	// When a manual transaction is active, run inside it so the user can see
+	// uncommitted changes; the transaction owns its own dedicated connection.
+	s.mu.Lock()
+	tx := s.tx
+	s.mu.Unlock()
+	if tx != nil {
+		var id int64
+		if err := tx.QueryRowContext(context.Background(), "SELECT CONNECTION_ID()").Scan(&id); err == nil {
+			s.mu.Lock()
+			s.activeID = id
+			s.killAsked = false
+			s.mu.Unlock()
+		}
+		res, err := sqlkit.Run(tx, sqlText, maxRows)
+		s.mu.Lock()
+		s.activeID = 0
+		killed := s.killAsked
+		s.mu.Unlock()
+		if err != nil && killed {
+			return proto.QueryResult{}, ErrQueryCancelled
+		}
+		return res, err
+	}
+
 	// Run the statement on a dedicated pooled connection and remember its
 	// server-side thread id, so KillQuery can target it precisely without
 	// disturbing other pooled connections (TablePlus process-list "Kill").
@@ -257,10 +286,165 @@ func (s *mysqlSession) KillQuery() error {
 
 // Browse returns the first rows of a table for the sidebar data tab.
 func (s *mysqlSession) Browse(table string, limit int) (proto.QueryResult, error) {
-	return sqlkit.Run(s.db, fmt.Sprintf("SELECT * FROM %s LIMIT %d", quoteMySQL(table), limit), limit)
+	q := fmt.Sprintf("SELECT * FROM %s LIMIT %d", quoteMySQL(table), limit)
+	s.mu.Lock()
+	tx := s.tx
+	s.mu.Unlock()
+	if tx != nil {
+		return sqlkit.Run(tx, q, limit)
+	}
+	return sqlkit.Run(s.db, q, limit)
 }
 
-func (s *mysqlSession) Close() { s.db.Close() }
+// Metrics returns curated read-only MySQL server metrics from SHOW GLOBAL STATUS.
+func (s *mysqlSession) Metrics() ([]proto.Metric, error) {
+	rows, err := s.db.Query("SHOW GLOBAL STATUS WHERE Variable_name IN (" +
+		"'Threads_connected','Threads_running','Uptime','Questions','Queries'," +
+		"'Slow_queries','Bytes_received','Bytes_sent','Innodb_buffer_pool_read_requests'," +
+		"'Innodb_buffer_pool_reads','Max_used_connections')")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byName := map[string]string{}
+	for rows.Next() {
+		var name, val string
+		if err := rows.Scan(&name, &val); err != nil {
+			return nil, err
+		}
+		byName[name] = val
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	human := map[string]string{
+		"Bytes_received": "Bytes received", "Bytes_sent": "Bytes sent",
+		"Innodb_buffer_pool_read_requests": "InnoDB buffer reads (req)",
+		"Innodb_buffer_pool_reads":         "InnoDB disk reads",
+		"Max_used_connections":             "Peak connections",
+	}
+	label := func(k string) string {
+		if h, ok := human[k]; ok {
+			return h
+		}
+		return k
+	}
+	order := []string{
+		"Uptime", "Threads_connected", "Threads_running", "Max_used_connections",
+		"Questions", "Queries", "Slow_queries",
+		"Innodb_buffer_pool_read_requests", "Innodb_buffer_pool_reads",
+		"Bytes_received", "Bytes_sent",
+	}
+	out := make([]proto.Metric, 0, len(order))
+	for _, k := range order {
+		if v, ok := byName[k]; ok {
+			out = append(out, proto.Metric{Label: label(k), Value: v, Group: "MySQL"})
+		}
+	}
+	return out, nil
+}
+
+func (s *mysqlSession) Close() {
+	// Roll back any transaction left open so the pooled connection goes back to
+	// a clean state instead of holding a dangling transaction.
+	s.mu.Lock()
+	tx := s.tx
+	s.tx = nil
+	s.mu.Unlock()
+	if tx != nil {
+		_ = tx.Rollback()
+	}
+	s.db.Close()
+}
+
+// activeExecer returns the active manual transaction when one is open,
+// otherwise the pooled handle, so row DML runs inside the transaction without
+// autocommitting.
+func (s *mysqlSession) activeExecer() execer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tx != nil {
+		return s.tx
+	}
+	return s.db
+}
+
+// Begin starts a manual transaction on this session.
+func (s *mysqlSession) Begin() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tx != nil {
+		return fmt.Errorf("mysql: transaction already active")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	s.tx = tx
+	return nil
+}
+
+// Commit commits the active transaction, if any.
+func (s *mysqlSession) Commit() error {
+	s.mu.Lock()
+	tx := s.tx
+	s.tx = nil
+	s.mu.Unlock()
+	if tx == nil {
+		return fmt.Errorf("mysql: no active transaction")
+	}
+	return tx.Commit()
+}
+
+// Rollback rolls back the active transaction, if any.
+func (s *mysqlSession) Rollback() error {
+	s.mu.Lock()
+	tx := s.tx
+	s.tx = nil
+	s.mu.Unlock()
+	if tx == nil {
+		return fmt.Errorf("mysql: no active transaction")
+	}
+	return tx.Rollback()
+}
+
+// InTransaction reports whether a manual transaction is currently open.
+func (s *mysqlSession) InTransaction() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tx != nil
+}
+
+// QueryStream runs a statement and emits its result in batches as rows are read
+// from the cursor, so a large result is fetched incrementally with bounded
+// memory. It runs inside an active manual transaction when one is open.
+func (s *mysqlSession) QueryStream(sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]*string) (bool, error)) (proto.QueryResult, error) {
+	s.mu.Lock()
+	tx := s.tx
+	s.mu.Unlock()
+	var q sqlkit.Querier = s.db
+	if tx != nil {
+		q = tx
+	}
+	res, err := sqlkit.StreamRun(q, sqlText, batch, func(cols []proto.ColumnInfo, rows [][]*string) error {
+		keep, e := emit(cols, rows)
+		if e != nil {
+			return e
+		}
+		if !keep {
+			return errStreamStopped
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errStreamStopped) {
+		return proto.QueryResult{}, err
+	}
+	return proto.QueryResult{RowsAffected: res.RowsAffected, DurationMS: res.DurationMS}, nil
+}
+
+// errStreamStopped is an internal sentinel meaning the consumer asked to stop
+// early (emit returned keep=false). It is not surfaced to the caller.
+var errStreamStopped = errors.New("stream stopped")
 
 // ---- row-level DML (implements db.Updater for the editable grid) ----------
 
@@ -294,7 +478,7 @@ func (s *mysqlSession) UpdateRow(table string, pk, changes map[string]*string) e
 		return fmt.Errorf("update %s: no primary key", table)
 	}
 	q, args := buildUpdate(table, pk, changes)
-	_, err := s.db.Exec(q, args...)
+	_, err := s.activeExecer().Exec(q, args...)
 	return err
 }
 
@@ -303,7 +487,7 @@ func (s *mysqlSession) DeleteRow(table string, pk map[string]*string) error {
 		return fmt.Errorf("delete %s: no primary key", table)
 	}
 	q, args := buildDelete(table, pk)
-	_, err := s.db.Exec(q, args...)
+	_, err := s.activeExecer().Exec(q, args...)
 	return err
 }
 
@@ -315,19 +499,41 @@ func (s *mysqlSession) InsertRow(table string, values map[string]*string) error 
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(q, args...)
+	_, err = s.activeExecer().Exec(q, args...)
 	return err
 }
 
 // ApplyChanges applies a whole commit batch inside one transaction so an error
-// mid-way rolls back everything instead of leaving a partial commit.
+// mid-way rolls back everything instead of leaving a partial commit. Each DML
+// statement must affect exactly one row (RowsAffected == 1); anything else —
+// a lost update, a row deleted underneath us, or an unexpected match — aborts
+// and rolls back, mirroring the reference editor's "safe edit" guarantee. DDL
+// statements are exempt from the row-count check.
 func (s *mysqlSession) ApplyChanges(table string, updates []RowEdit, deletes []map[string]*string, inserts []map[string]*string, ddl []string) error {
-	tx, err := s.db.Begin()
+	// If a manual transaction is active, apply inside it and leave the commit
+	// to the transaction's own lifecycle (no nested BEGIN).
+	s.mu.Lock()
+	tx := s.tx
+	s.mu.Unlock()
+	if tx != nil {
+		return applyWithin(tx, table, updates, deletes, inserts, ddl)
+	}
+
+	t, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
-	defer tx.Rollback() // no-op once Commit succeeds
+	defer t.Rollback() // no-op once Commit succeeds
+	if err := applyWithin(t, table, updates, deletes, inserts, ddl); err != nil {
+		return err
+	}
+	return t.Commit()
+}
 
+// applyWithin runs one commit batch on an already-open transaction. Each DML
+// statement must affect exactly one row (RowsAffected == 1); a mismatch aborts
+// so the caller can roll back. DDL statements are exempt from the row check.
+func applyWithin(x execer, table string, updates []RowEdit, deletes []map[string]*string, inserts []map[string]*string, ddl []string) error {
 	for _, u := range updates {
 		if len(u.Changes) == 0 {
 			continue
@@ -336,8 +542,12 @@ func (s *mysqlSession) ApplyChanges(table string, updates []RowEdit, deletes []m
 			return fmt.Errorf("update %s: no primary key", table)
 		}
 		q, args := buildUpdate(table, u.PK, u.Changes)
-		if _, err := tx.Exec(q, args...); err != nil {
+		res, err := x.Exec(q, args...)
+		if err != nil {
 			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return ErrRowMismatch
 		}
 	}
 	for _, pk := range deletes {
@@ -345,8 +555,12 @@ func (s *mysqlSession) ApplyChanges(table string, updates []RowEdit, deletes []m
 			return fmt.Errorf("delete %s: no primary key", table)
 		}
 		q, args := buildDelete(table, pk)
-		if _, err := tx.Exec(q, args...); err != nil {
+		res, err := x.Exec(q, args...)
+		if err != nil {
 			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return ErrRowMismatch
 		}
 	}
 	for _, vals := range inserts {
@@ -354,17 +568,25 @@ func (s *mysqlSession) ApplyChanges(table string, updates []RowEdit, deletes []m
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(q, args...); err != nil {
+		res, err := x.Exec(q, args...)
+		if err != nil {
 			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return ErrRowMismatch
 		}
 	}
 	for _, stmt := range ddl {
-		if _, err := tx.Exec(stmt); err != nil {
+		if _, err := x.Exec(stmt); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
+
+// ErrRowMismatch is returned when a DML statement did not affect exactly one
+// row, indicating the target row was concurrently changed or no longer exists.
+var ErrRowMismatch = errors.New("row mismatch: expected to affect exactly 1 row")
 
 // buildUpdate renders the UPDATE statement and args shared by UpdateRow and
 // ApplyChanges.

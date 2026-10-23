@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"fynequery/db"
 )
@@ -17,18 +19,19 @@ import (
 // lives in the OS keyring instead (Windows Credential Manager) and the JSON
 // copy is left empty.
 type Connection struct {
-	Name        string   `json:"name"`
-	Driver      string   `json:"driver"` // driver code: mysql, postgres, mssql, oracle...
-	Host        string   `json:"host"`
-	Port        string   `json:"port"`
-	User        string   `json:"user"`
-	Password    string   `json:"password"`
-	Database    string   `json:"database"`
-	Group       string   `json:"group"`
-	Tags        []string `json:"tags,omitempty"`
-	StatusColor string   `json:"statusColor,omitempty"` // preset name (TablePlus Status Color)
-	SafeMode    int      `json:"safeMode"`              // 0-4, see safe_gate.go (0 = silent)
-	UseKeyring  bool     `json:"keyring,omitempty"`     // store the password in the OS keyring
+	Name        string       `json:"name"`
+	Driver      string       `json:"driver"` // driver code: mysql, postgres, mssql, oracle...
+	Host        string       `json:"host"`
+	Port        string       `json:"port"`
+	User        string       `json:"user"`
+	Password    string       `json:"password"`
+	Database    string       `json:"database"`
+	Group       string       `json:"group"`
+	Tags        []string     `json:"tags,omitempty"`
+	StatusColor string       `json:"statusColor,omitempty"` // preset name (TablePlus Status Color)
+	SafeMode    int          `json:"safeMode"`              // 0-4, see safe_gate.go (0 = silent)
+	UseKeyring  bool         `json:"keyring,omitempty"`     // store the password in the OS keyring
+	SSH         db.SSHConfig `json:"ssh,omitempty"`         // optional SSH bastion tunnel
 }
 
 // resolvePassword fills Password from the OS keyring when the JSON copy is
@@ -54,15 +57,64 @@ func (c *Connection) Params() db.ConnectParams {
 	}
 }
 
+// fingerprint identifies a connection for the session pool: same engine,
+// host/port/user/database, credentials, and SSH settings map to the same
+// cached session. Two distinct connections (or a changed password) never share
+// a session.
+func (c Connection) fingerprint() string {
+	s := c.SSH
+	return strings.Join([]string{
+		"v1",
+		c.Driver,
+		c.Host,
+		c.Port,
+		c.User,
+		c.Database,
+		c.Password,
+		"ssh",
+		strconv.FormatBool(s.Enabled),
+		s.Host,
+		s.Port,
+		s.User,
+		s.AuthMode,
+	}, "|")
+}
+
 // dialConn opens a live session for a saved connection using the driver
-// registry (built-in MySQL or a discovered plugin).
+// registry (built-in MySQL or a discovered plugin). When the connection
+// enables an SSH tunnel, the session is opened through a host-side local
+// forward so the database driver connects to 127.0.0.1:<localPort>.
+//
+// Sessions are returned through the global session pool, so re-opening a
+// recently used connection reuses the underlying (plugin/SSH) session instead
+// of reconnecting; Close() on the returned session releases it back to the
+// pool rather than disconnecting.
 func dialConn(c Connection) (db.Session, error) {
 	c.resolvePassword()
 	d, ok := db.Driver(c.Driver)
 	if !ok {
 		return nil, fmt.Errorf("no driver registered for %q (plugin missing?)", c.Driver)
 	}
-	return d.Connect(c.Params())
+	cp := c.Params()
+	fp := c.fingerprint()
+	open := func() (db.Session, error) {
+		if c.SSH.Enabled {
+			t, err := db.OpenTunnel(c.SSH, c.Host, c.Port)
+			if err != nil {
+				return nil, err
+			}
+			cp.Host = "127.0.0.1"
+			cp.Port = strconv.Itoa(t.LocalPort())
+			sess, err := d.Connect(cp)
+			if err != nil {
+				t.Close()
+				return nil, err
+			}
+			return db.NewTunneledSession(sess, t), nil
+		}
+		return d.Connect(cp)
+	}
+	return db.DefaultPool.Get(fp, open)
 }
 
 func configDir() string {

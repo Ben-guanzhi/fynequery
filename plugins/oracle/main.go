@@ -126,6 +126,24 @@ func (oraDialect) BrowseSQL(table string, limit int) string {
 	return fmt.Sprintf("SELECT * FROM %s FETCH FIRST %d ROWS ONLY", quoteOra(table), limit)
 }
 
+// QuoteIdent quotes an Oracle identifier with double quotes (escaping embedded
+// quotes). Used by the shared DML builders in pluginkit.
+func (oraDialect) QuoteIdent(name string) string { return quoteOra(name) }
+
+// Placeholder renders Oracle's positional parameter (:1, :2, ...).
+func (oraDialect) Placeholder(i int) string { return fmt.Sprintf(":%d", i) }
+
+// Metrics returns curated read-only Oracle server metrics.
+func (oraDialect) Metrics(db *sql.DB) ([]proto.Metric, error) {
+	const q = `
+		SELECT 'Version', banner FROM v$version WHERE ROWNUM = 1
+		UNION ALL SELECT 'Sessions', TO_CHAR(value) FROM v$sysstat WHERE name = 'session count'
+		UNION ALL SELECT 'User commits', TO_CHAR(value) FROM v$sysstat WHERE name = 'user commits'
+		UNION ALL SELECT 'User rollbacks', TO_CHAR(value) FROM v$sysstat WHERE name = 'user rollbacks'
+		UNION ALL SELECT 'Physical reads', TO_CHAR(value) FROM v$sysstat WHERE name = 'physical reads'`
+	return pluginkit.KVMetrics(db, "Oracle", q)
+}
+
 // CreateDatabase is intentionally unsupported: Oracle databases are created via
 // DBCA or DBA tooling, not from an ordinary client session. We report this
 // clearly so the UI can surface a helpful message rather than a confusing

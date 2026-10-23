@@ -112,6 +112,10 @@ type workspace struct {
 	sideBtn       *clickableIcon    // toolbar sidebar toggle (selected state)
 	detailBtn     *clickableIcon    // toolbar details toggle
 	consoleBtn    *clickableIcon    // toolbar console toggle
+	txGroup       fyne.CanvasObject // manual-transaction toolbar group (hidden if unsupported)
+	txBegin       *clickableIcon    // Begin Transaction (selected while a transaction is open)
+	txCommit      *clickableIcon    // Commit the open transaction
+	txRollback    *clickableIcon    // Roll back the open transaction
 	sideWrap      fyne.CanvasObject // left sidebar wrapper (toggled by the toolbar)
 	body          fyne.CanvasObject // root container (refreshed after panel toggles)
 	welcomeReturn func()            // brings the welcome window back after close
@@ -339,6 +343,8 @@ func (ws *workspace) openMoreMenu() {
 		}),
 		fyne.NewMenuItem(privacyLabel, func() { ws.togglePrivacy() }),
 		fyne.NewMenuItem("ER Diagram", func() { ws.openERDiagram() }),
+		fyne.NewMenuItem("Server Metrics", func() { ws.openServerMetrics() }),
+		fyne.NewMenuItem("Import Data…", func() { ws.importData() }),
 		fyne.NewMenuItem("User Management", func() { ws.openUserManagement() }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("侧边栏 显示/隐藏", func() { ws.toggleSidebar() }),
@@ -489,8 +495,9 @@ func (ws *workspace) liveSession() db.Session {
 
 func (ws *workspace) setSession(s db.Session) {
 	ws.loadingMu.Lock()
-	defer ws.loadingMu.Unlock()
 	ws.sess = s
+	ws.loadingMu.Unlock()
+	safeDo(ws.syncTxControls)
 }
 
 // startKeepAlive pings the session every 30s in the background. It reads the
@@ -539,6 +546,97 @@ func (ws *workspace) reconnect() db.Session {
 	ws.conn = newConn
 	ws.loadTLS()
 	return sess
+}
+
+// ---- manual transactions (TablePlus "Begin Transaction" mode) --------------
+
+// txSession returns the current session if it supports manual transactions.
+func (ws *workspace) txSession() (db.Transactional, bool) {
+	sess := ws.liveSession()
+	if sess == nil {
+		return nil, false
+	}
+	return db.AsTransactional(sess)
+}
+
+// syncTxControls shows the transaction toolbar group only when the session
+// supports transactions, and reflects the open/closed state in the buttons:
+// Begin is selected while a transaction is open; Commit/Rollback are disabled
+// otherwise.
+func (ws *workspace) syncTxControls() {
+	if ws.txGroup == nil {
+		return
+	}
+	tx, ok := ws.txSession()
+	if !ok {
+		ws.txGroup.Hide()
+		return
+	}
+	ws.txGroup.Show()
+	inTx := tx.InTransaction()
+	ws.txBegin.setSelected(inTx)
+	ws.txBegin.setDisabled(inTx)     // already in a transaction
+	ws.txCommit.setDisabled(!inTx)   // only meaningful inside a transaction
+	ws.txRollback.setDisabled(!inTx) // only meaningful inside a transaction
+	ws.updateBanner()
+}
+
+// beginTransaction opens a transaction on the session and refreshes controls.
+func (ws *workspace) beginTransaction() {
+	tx, ok := ws.txSession()
+	if !ok {
+		showInfo(ws.window, "Transaction", "This connection does not support transactions.")
+		return
+	}
+	if tx.InTransaction() {
+		return
+	}
+	safeGo("tx.begin", func() {
+		if err := tx.Begin(); err != nil {
+			safeDo(func() { dialog.ShowError(err, ws.window) })
+			return
+		}
+		safeDo(func() {
+			ws.syncTxControls()
+			ws.logf("BEGIN — transaction started")
+		})
+	})
+}
+
+// commitTransaction commits the open transaction and refreshes controls.
+func (ws *workspace) commitTransaction() {
+	tx, ok := ws.txSession()
+	if !ok || !tx.InTransaction() {
+		return
+	}
+	safeGo("tx.commit", func() {
+		if err := tx.Commit(); err != nil {
+			safeDo(func() { dialog.ShowError(err, ws.window) })
+			return
+		}
+		safeDo(func() {
+			ws.syncTxControls()
+			ws.logf("COMMIT — transaction committed")
+		})
+	})
+}
+
+// rollbackTransaction rolls back the open transaction and refreshes controls.
+func (ws *workspace) rollbackTransaction() {
+	tx, ok := ws.txSession()
+	if !ok || !tx.InTransaction() {
+		return
+	}
+	safeGo("tx.rollback", func() {
+		if err := tx.Rollback(); err != nil {
+			safeDo(func() { dialog.ShowError(err, ws.window) })
+			return
+		}
+		safeDo(func() {
+			ws.syncTxControls()
+			ws.logf("ROLLBACK — transaction rolled back")
+		})
+	})
 }
 
 func (ws *workspace) build() fyne.CanvasObject {
@@ -874,12 +972,22 @@ func (ws *workspace) buildStrip() fyne.CanvasObject {
 		ws.editBtn,
 		newToolButton(theme.SettingsIcon(), func() { ws.openMoreMenu() }),
 	)
+	// Manual transaction controls (TablePlus "Begin Transaction" mode). Shown
+	// only when the session supports transactions; Commit/Rollback enable only
+	// while a transaction is open (see syncTxControls).
+	ws.txBegin = newToolButton(theme.MediaPlayIcon(), func() { ws.beginTransaction() })
+	ws.txBegin.setTip("Begin Transaction")
+	ws.txCommit = newToolButton(theme.ConfirmIcon(), func() { ws.commitTransaction() })
+	ws.txCommit.setTip("Commit Transaction")
+	ws.txRollback = newToolButton(icons.Cancel, func() { ws.rollbackTransaction() })
+	ws.txRollback.setTip("Rollback Transaction")
+	ws.txGroup = newToolGroup(ws.txBegin, ws.txCommit, ws.txRollback)
 	ws.consoleBtn = newToolButton(icons.Console, func() { ws.toggleConsole() })
 	ws.consoleBtn.setSelected(true)
 	ws.detailBtn = newToolButton(theme.ViewRestoreIcon(), func() { ws.toggleDetails() })
 	ws.detailBtn.setSelected(true)
 	paneGroup := newToolGroup(ws.consoleBtn, ws.detailBtn)
-	right := container.NewHBox(opsGroup, spacerW(4), paneGroup)
+	right := container.NewHBox(opsGroup, spacerW(4), ws.txGroup, spacerW(4), paneGroup)
 	if chromeEnabled {
 		// custom chrome: the window buttons live in the title row
 		winGroup := newToolGroup(
@@ -887,8 +995,9 @@ func (ws *workspace) buildStrip() fyne.CanvasObject {
 			newToolButton(icons.WinMax, chromeToggleMax),
 			newToolButton(icons.Cancel, func() { ws.window.Close() }),
 		)
-		right = container.NewHBox(opsGroup, spacerW(4), paneGroup, spacerW(6), winGroup)
+		right = container.NewHBox(opsGroup, spacerW(4), ws.txGroup, spacerW(4), paneGroup, spacerW(6), winGroup)
 	}
+	ws.syncTxControls()
 
 	// Keep only horizontal breathing room around the ribbon; the old padded
 	// wrapper also added 8px of vertical padding and made the strip too tall.
@@ -946,7 +1055,10 @@ func (ws *workspace) syncTabStrip() {
 	if ws.tabStrip == nil || ws.tabs == nil {
 		return
 	}
-	if len(ws.tabs.tabs) > 1 {
+	// Show the strip whenever at least one document is open, so the open
+	// table/query name is visible in the content area (TablePlus-style). With
+	// no documents the centre stays blank and the strip is hidden.
+	if len(ws.tabs.tabs) > 0 {
 		ws.tabStrip.Show()
 	} else {
 		ws.tabStrip.Hide()

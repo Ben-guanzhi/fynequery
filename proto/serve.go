@@ -21,6 +21,29 @@ type Handler interface {
 	Query(p QueryParams) (QueryResult, error)
 	Browse(p BrowseParams) (QueryResult, error)
 	CreateDatabase(p CreateDBParams) error
+
+	// The four DML methods mirror the editable-grid path of the built-in
+	// driver. Update/Insert/Delete apply a single row op; ApplyBatch applies
+	// a whole commit atomically. They are additive (see messages.go).
+	Update(p DMLSingleParams) (DMLResult, error)
+	Insert(p DMLSingleParams) (DMLResult, error)
+	Delete(p DMLSingleParams) (DMLResult, error)
+	ApplyBatch(p DMLBatchParams) (DMLResult, error)
+
+	// Begin/Commit/Rollback drive a manual transaction on a connection. They
+	// are additive (see messages.go).
+	Begin(p TxParams) error
+	Commit(p TxParams) error
+	Rollback(p TxParams) error
+
+	// QueryStream streams a statement's result in batches via emit and returns
+	// the aggregate (rows affected / duration) sent as the terminal frame. It
+	// is additive (see messages.go).
+	QueryStream(p QueryStreamParams, emit func(StreamFrame) error) (QueryResult, error)
+
+	// Metrics returns a curated set of read-only server metrics. Additive (see
+	// messages.go).
+	Metrics(p MetricsParams) (MetricsResult, error)
 }
 
 var stdoutMu sync.Mutex
@@ -67,6 +90,10 @@ func serve(h Handler, banner Banner, r io.Reader, w io.Writer) error {
 		}
 		go func(req Request) {
 			res := Response{ID: req.ID}
+			if req.Method == MethodQueryStream {
+				serveStream(h, req, w)
+				return
+			}
 			result, err := dispatch(h, req)
 			if err != nil {
 				res.Error = err.Error()
@@ -133,6 +160,83 @@ func dispatch(h Handler, req Request) (interface{}, error) {
 			return nil, fmt.Errorf("bad params: %w", err)
 		}
 		return struct{}{}, h.CreateDatabase(p)
+	case MethodUpdate:
+		var p DMLSingleParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("bad params: %w", err)
+		}
+		return h.Update(p)
+	case MethodInsert:
+		var p DMLSingleParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("bad params: %w", err)
+		}
+		return h.Insert(p)
+	case MethodDelete:
+		var p DMLSingleParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("bad params: %w", err)
+		}
+		return h.Delete(p)
+	case MethodApplyBatch:
+		var p DMLBatchParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("bad params: %w", err)
+		}
+		return h.ApplyBatch(p)
+	case MethodBegin:
+		var p TxParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("bad params: %w", err)
+		}
+		return struct{}{}, h.Begin(p)
+	case MethodCommit:
+		var p TxParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("bad params: %w", err)
+		}
+		return struct{}{}, h.Commit(p)
+	case MethodRollback:
+		var p TxParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("bad params: %w", err)
+		}
+		return struct{}{}, h.Rollback(p)
+	case MethodMetrics:
+		var p MetricsParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("bad params: %w", err)
+		}
+		return h.Metrics(p)
 	}
 	return nil, fmt.Errorf("unknown method %q", req.Method)
+}
+
+// serveStream runs a MethodQueryStream request: it writes one Response frame
+// per batch the handler emits, then a terminal frame (Response.Done) carrying
+// the aggregate result or the error.
+func serveStream(h Handler, req Request, w io.Writer) {
+	var p QueryStreamParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		_ = writeLine(w, Response{ID: req.ID, Error: fmt.Sprintf("bad params: %v", err), Done: true})
+		return
+	}
+	emit := func(f StreamFrame) error {
+		b, err := json.Marshal(f)
+		if err != nil {
+			return err
+		}
+		return writeLine(w, Response{ID: req.ID, Result: b})
+	}
+	final, err := h.QueryStream(p, emit)
+	if err != nil {
+		_ = writeLine(w, Response{ID: req.ID, Error: err.Error(), Done: true})
+		return
+	}
+	b, err := json.Marshal(final)
+	if err != nil {
+		_ = writeLine(w, Response{ID: req.ID, Error: fmt.Sprintf("marshal result: %v", err), Done: true})
+		return
+	}
+	_ = writeLine(w, Response{ID: req.ID, Result: b, Done: true})
 }

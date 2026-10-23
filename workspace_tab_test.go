@@ -223,3 +223,30 @@ func TestMultiTableTabs(t *testing.T) {
 
 // keep fyne imported for the helper types even if a build trims it.
 var _ = fyne.CurrentApp
+
+// TestTabStripVisibleWithSingleDoc pins that the document tab strip appears as
+// soon as one document is open (so the open table/query name is visible in the
+// content area) and hides again when no documents remain (clean blank state).
+func TestTabStripVisibleWithSingleDoc(t *testing.T) {
+	ws := newTestWorkspace()
+	ws.tabStrip = container.NewStack()
+
+	ws.syncTabStrip()
+	if ws.tabStrip.Visible() {
+		t.Fatal("tab strip should be hidden with no documents")
+	}
+
+	ws.addQueryTab() // one document open
+	if len(ws.tabs.tabs) != 1 {
+		t.Fatalf("expected 1 tab, got %d", len(ws.tabs.tabs))
+	}
+	if !ws.tabStrip.Visible() {
+		t.Fatal("tab strip should be visible once a document is open")
+	}
+
+	// Closing the last document hides the strip again.
+	ws.closeTab(ws.tabs.current)
+	if ws.tabStrip.Visible() {
+		t.Fatal("tab strip should hide after the last document closes")
+	}
+}

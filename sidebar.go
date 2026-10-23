@@ -738,7 +738,12 @@ func (r *sideModeBtnRenderer) Objects() []fyne.CanvasObject {
 }
 
 func (r *sideModeBtnRenderer) MinSize() fyne.Size {
-	return fyne.NewSize(r.text.MinSize().Width+20, 24)
+	// Reserve the BOLD text width even when inactive. The active state toggles
+	// TextStyle.Bold (see Refresh); without reserving the wider bold width, the
+	// button's MinSize would grow on activation and re-lay-out the row, making
+	// the sibling tab labels visibly shift on every switch.
+	w := fyne.MeasureText(r.text.Text, r.text.TextSize, fyne.TextStyle{Bold: true}).Width
+	return fyne.NewSize(w+20, 24)
 }
 
 func (r *sideModeBtnRenderer) Destroy() {}

@@ -6,6 +6,7 @@ package pluginkit
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -38,6 +39,18 @@ type Dialect interface {
 	// cannot create databases from an ordinary session (e.g. Oracle) so the UI
 	// can surface a clear message.
 	CreateDatabase(db *sql.DB, name, charset, collation string) error
+	// QuoteIdent quotes a single SQL identifier (table or column name) for the
+	// dialect, escaping any embedded quote characters. Used by the shared DML
+	// builders so UPDATE/INSERT/DELETE are generated in one place.
+	QuoteIdent(name string) string
+	// Placeholder renders the i-th positional parameter (1-based) for the
+	// dialect's driver (?, $1, @p1, :1, ...).
+	Placeholder(i int) string
+	// Metrics returns a curated set of read-only server metrics for the
+	// connected database (connections, uptime, cache hit ratio, ...). Engines
+	// that expose little return a short list; the host treats an empty list as
+	// "no metrics available".
+	Metrics(db *sql.DB) ([]proto.Metric, error)
 }
 
 // Main runs the plugin until the host closes stdin. Never returns.
@@ -107,6 +120,7 @@ type handler struct {
 	dialect Dialect
 	mu      sync.Mutex
 	conns   map[string]*sql.DB
+	txs     map[string]*sql.Tx // active manual transactions, keyed by ConnID
 	server  map[string]string
 	next    int
 }
@@ -117,6 +131,7 @@ func newHandler(d Dialect) *handler {
 	return &handler{
 		dialect: d,
 		conns:   map[string]*sql.DB{},
+		txs:     map[string]*sql.Tx{},
 		server:  map[string]string{},
 	}
 }
@@ -149,6 +164,17 @@ func (h *handler) Close(p proto.CloseParams) error {
 	handle, ok := h.conns[p.ConnID]
 	delete(h.conns, p.ConnID)
 	delete(h.server, p.ConnID)
+	if tx, ok := h.txs[p.ConnID]; ok {
+		delete(h.txs, p.ConnID)
+		// Roll back any transaction left open so the server connection does
+		// not leak a dangling transaction after the host goes away.
+		h.mu.Unlock()
+		_ = tx.Rollback()
+		if handle != nil {
+			return handle.Close()
+		}
+		return nil
+	}
 	h.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown connection %q", p.ConnID)
@@ -159,6 +185,22 @@ func (h *handler) Close(p proto.CloseParams) error {
 func (h *handler) conn(id string) (*sql.DB, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	handle, ok := h.conns[id]
+	if !ok {
+		return nil, fmt.Errorf("unknown connection %q (closed?)", id)
+	}
+	return handle, nil
+}
+
+// querier returns the active transaction for a connection when one is open,
+// otherwise its *sql.DB. Both satisfy sqlkit.Querier so callers can run
+// statements without caring which is in effect.
+func (h *handler) querier(id string) (sqlkit.Querier, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if tx, ok := h.txs[id]; ok {
+		return tx, nil
+	}
 	handle, ok := h.conns[id]
 	if !ok {
 		return nil, fmt.Errorf("unknown connection %q (closed?)", id)
@@ -185,22 +227,22 @@ func (h *handler) Columns(p proto.ColumnsParams) (proto.ColumnsResult, error) {
 }
 
 func (h *handler) Query(p proto.QueryParams) (proto.QueryResult, error) {
-	handle, err := h.conn(p.ConnID)
+	q, err := h.querier(p.ConnID)
 	if err != nil {
 		return proto.QueryResult{}, err
 	}
-	return sqlkit.Run(handle, p.SQL, p.MaxRows)
+	return sqlkit.Run(q, p.SQL, p.MaxRows)
 }
 
 func (h *handler) Browse(p proto.BrowseParams) (proto.QueryResult, error) {
-	handle, err := h.conn(p.ConnID)
+	q, err := h.querier(p.ConnID)
 	if err != nil {
 		return proto.QueryResult{}, err
 	}
 	if p.Limit <= 0 {
 		p.Limit = 1000
 	}
-	return sqlkit.Run(handle, h.dialect.BrowseSQL(p.Table, p.Limit), p.Limit)
+	return sqlkit.Run(q, h.dialect.BrowseSQL(p.Table, p.Limit), p.Limit)
 }
 
 // CreateDatabase looks up the opened connection and delegates to the dialect.
@@ -210,4 +252,209 @@ func (h *handler) CreateDatabase(p proto.CreateDBParams) error {
 		return err
 	}
 	return h.dialect.CreateDatabase(handle, p.Name, p.Charset, p.Collation)
+}
+
+// ---- row-level DML (implements proto.Handler for the editable grid) --------
+//
+// The SQL for UPDATE/INSERT/DELETE is generated centrally here using the
+// dialect's QuoteIdent/Placeholder, so every engine shares one correct
+// implementation instead of each plugin hand-rolling DML. This is the same
+// "single source of truth" idea the reference design uses for its built-in
+// drivers.
+
+// Update applies one UPDATE and reports how many rows it touched.
+func (h *handler) Update(p proto.DMLSingleParams) (proto.DMLResult, error) {
+	q, err := h.querier(p.ConnID)
+	if err != nil {
+		return proto.DMLResult{}, err
+	}
+	stmt, args := buildUpdate(h.dialect, p.Table, p.PK, p.Changes)
+	return runDML(q, stmt, args)
+}
+
+// Insert applies one INSERT and reports how many rows it touched.
+func (h *handler) Insert(p proto.DMLSingleParams) (proto.DMLResult, error) {
+	q, err := h.querier(p.ConnID)
+	if err != nil {
+		return proto.DMLResult{}, err
+	}
+	stmt, args, err := buildInsert(h.dialect, p.Table, p.Values)
+	if err != nil {
+		return proto.DMLResult{}, err
+	}
+	return runDML(q, stmt, args)
+}
+
+// Delete applies one DELETE and reports how many rows it touched.
+func (h *handler) Delete(p proto.DMLSingleParams) (proto.DMLResult, error) {
+	q, err := h.querier(p.ConnID)
+	if err != nil {
+		return proto.DMLResult{}, err
+	}
+	stmt, args := buildDelete(h.dialect, p.Table, p.PK)
+	return runDML(q, stmt, args)
+}
+
+// ApplyBatch applies a whole commit. When a manual transaction is active on the
+// connection the statements run inside it (no commit/rollback here); otherwise
+// they run in a freshly opened, atomically committed transaction. Each DML
+// statement must affect exactly one row (RowsAffected == 1); anything else is
+// treated as a lost-update / collision and the whole batch rolls back,
+// mirroring the reference editor's "safe edit" guarantee. A transient
+// "database is locked"/"busy" condition (notably SQLite under concurrent
+// writers) is retried a few times before giving up.
+func (h *handler) ApplyBatch(p proto.DMLBatchParams) (proto.DMLResult, error) {
+	var stmts []batchStmt
+	for _, u := range p.Updates {
+		q, a := buildUpdate(h.dialect, p.Table, u.PK, u.Changes)
+		stmts = append(stmts, batchStmt{q, a, true})
+	}
+	for _, pk := range p.Deletes {
+		q, a := buildDelete(h.dialect, p.Table, pk)
+		stmts = append(stmts, batchStmt{q, a, true})
+	}
+	for _, vals := range p.Inserts {
+		q, a, err := buildInsert(h.dialect, p.Table, vals)
+		if err != nil {
+			return proto.DMLResult{}, err
+		}
+		stmts = append(stmts, batchStmt{q, a, true})
+	}
+	for _, ddl := range p.DDL {
+		stmts = append(stmts, batchStmt{ddl, nil, false})
+	}
+
+	// If a manual transaction is active, run inside it and let the host's
+	// Commit/Rollback own the lifecycle.
+	h.mu.Lock()
+	if tx, ok := h.txs[p.ConnID]; ok {
+		h.mu.Unlock()
+		total, err := runBatchTx(tx, stmts)
+		return proto.DMLResult{RowsAffected: total}, err
+	}
+	h.mu.Unlock()
+
+	handle, err := h.conn(p.ConnID)
+	if err != nil {
+		return proto.DMLResult{}, err
+	}
+
+	var total int64
+	const maxBusyRetries = 5
+	for attempt := 0; ; attempt++ {
+		total, err = runBatchOpen(handle, stmts)
+		if err == nil {
+			break
+		}
+		if errors.Is(err, errBusy) && attempt < maxBusyRetries {
+			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+			continue
+		}
+		break
+	}
+	return proto.DMLResult{RowsAffected: total}, err
+}
+
+// ---- manual transactions (TablePlus "Begin Transaction" mode) --------------
+
+// Begin starts a transaction on the connection. A second Begin without an
+// intervening Commit/Rollback fails.
+func (h *handler) Begin(p proto.TxParams) error {
+	h.mu.Lock()
+	if _, ok := h.txs[p.ConnID]; ok {
+		h.mu.Unlock()
+		return fmt.Errorf("transaction already active")
+	}
+	handle, ok := h.conns[p.ConnID]
+	if !ok {
+		h.mu.Unlock()
+		return fmt.Errorf("unknown connection %q (closed?)", p.ConnID)
+	}
+	h.mu.Unlock()
+	tx, err := handle.Begin()
+	if err != nil {
+		return err
+	}
+	h.mu.Lock()
+	h.txs[p.ConnID] = tx
+	h.mu.Unlock()
+	return nil
+}
+
+// Commit commits the active transaction, if any.
+func (h *handler) Commit(p proto.TxParams) error {
+	h.mu.Lock()
+	tx, ok := h.txs[p.ConnID]
+	delete(h.txs, p.ConnID)
+	h.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no active transaction")
+	}
+	return tx.Commit()
+}
+
+// Rollback rolls back the active transaction, if any.
+func (h *handler) Rollback(p proto.TxParams) error {
+	h.mu.Lock()
+	tx, ok := h.txs[p.ConnID]
+	delete(h.txs, p.ConnID)
+	h.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no active transaction")
+	}
+	return tx.Rollback()
+}
+
+// ---- streaming results -----------------------------------------------------
+
+// QueryStream runs a statement and emits its result in batches as rows are read
+// from the cursor, so a large result is fetched incrementally with bounded
+// memory. It runs inside an active transaction when one is open.
+func (h *handler) QueryStream(p proto.QueryStreamParams, emit func(proto.StreamFrame) error) (proto.QueryResult, error) {
+	q, err := h.querier(p.ConnID)
+	if err != nil {
+		return proto.QueryResult{}, err
+	}
+	res, err := sqlkit.StreamRun(q, p.SQL, p.Batch, func(cols []proto.ColumnInfo, rows [][]*string) error {
+		return emit(proto.StreamFrame{Columns: cols, Rows: rows})
+	})
+	if err != nil {
+		return proto.QueryResult{}, err
+	}
+	return proto.QueryResult{RowsAffected: res.RowsAffected, DurationMS: res.DurationMS}, nil
+}
+
+// ---- server metrics --------------------------------------------------------
+
+// Metrics returns the dialect's curated server metrics for a connection.
+func (h *handler) Metrics(p proto.MetricsParams) (proto.MetricsResult, error) {
+	handle, err := h.conn(p.ConnID)
+	if err != nil {
+		return proto.MetricsResult{}, err
+	}
+	ms, err := h.dialect.Metrics(handle)
+	if err != nil {
+		return proto.MetricsResult{}, err
+	}
+	return proto.MetricsResult{Metrics: ms}, nil
+}
+
+// KVMetrics runs a two-column (label, value) query and formats the rows as
+// metrics under group. Engines format the value in SQL (so this stays generic);
+// an empty result yields no metrics.
+func KVMetrics(db *sql.DB, group, query string) ([]proto.Metric, error) {
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []proto.Metric
+	for rows.Next() {
+		var label, value sql.NullString
+		if err := rows.Scan(&label, &value); err != nil {
+			return nil, err
+		}
+		out = append(out, proto.Metric{Label: label.String, Value: value.String, Group: group})
+	}
+	return out, rows.Err()
 }

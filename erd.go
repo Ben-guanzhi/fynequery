@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image/color"
 	"sort"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -82,7 +83,11 @@ func (ws *workspace) fetchERModel(sess db.Session) (*erModel, error) {
 	sort.SliceStable(m.Tables, func(i, j int) bool {
 		return m.Tables[i].Name < m.Tables[j].Name
 	})
-	m.FKs = fetchERForeignKeys(sess, ws.conn.Driver)
+	names := make([]string, len(m.Tables))
+	for i, t := range m.Tables {
+		names[i] = t.Name
+	}
+	m.FKs = fetchERForeignKeys(sess, ws.conn.Driver, names)
 	layoutERModel(m)
 	return m, nil
 }
@@ -98,7 +103,8 @@ func layoutERModel(m *erModel) {
 }
 
 // erFKQuery returns the information_schema FK query for a driver, or "" when
-// the driver has no diagram support.
+// the driver has no single-query diagram support (SQLite discovers FKs
+// per-table via PRAGMA, handled in fetchERForeignKeys).
 func erFKQuery(driver string) string {
 	switch driver {
 	case "mysql", "mariadb":
@@ -109,13 +115,49 @@ func erFKQuery(driver string) string {
 		return "SELECT kcu.TABLE_NAME, kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME " +
 			"FROM information_schema.KEY_COLUMN_USAGE kcu " +
 			"WHERE kcu.TABLE_SCHEMA = current_schema() AND kcu.REFERENCED_TABLE_NAME IS NOT NULL"
+	case "mssql", "sqlserver":
+		return "SELECT OBJECT_NAME(fkc.parent_object_id), COL_NAME(fkc.parent_object_id, fkc.parent_column_id), " +
+			"OBJECT_NAME(fkc.referenced_object_id), COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) " +
+			"FROM sys.foreign_key_columns fkc"
+	case "oracle":
+		return "SELECT c.table_name, cc.column_name, rc.table_name, rcc.column_name " +
+			"FROM all_constraints c " +
+			"JOIN all_cons_columns cc ON c.owner = cc.owner AND c.constraint_name = cc.constraint_name " +
+			"JOIN all_constraints rc ON c.r_owner = rc.owner AND c.r_constraint_name = rc.constraint_name " +
+			"JOIN all_cons_columns rcc ON rc.owner = rcc.owner AND rc.constraint_name = rcc.constraint_name AND cc.position = rcc.position " +
+			"WHERE c.constraint_type = 'R'"
 	default:
 		return ""
 	}
 }
 
 // fetchERForeignKeys reads the driver's FK metadata; empty where unavailable.
-func fetchERForeignKeys(sess db.Session, driver string) []erFK {
+// SQLite exposes foreign keys per table via PRAGMA, so it iterates the given
+// table names; every other engine answers a single catalog query.
+func fetchERForeignKeys(sess db.Session, driver string, tables []string) []erFK {
+	get := func(r []*string, i int) string {
+		if i < len(r) && r[i] != nil {
+			return *r[i]
+		}
+		return ""
+	}
+	if driver == "sqlite" {
+		var out []erFK
+		for _, t := range tables {
+			res, err := sess.Query("PRAGMA foreign_key_list("+sqlitePragmaArg(t)+")", 200)
+			if err != nil {
+				continue
+			}
+			for _, r := range res.Rows {
+				// PRAGMA foreign_key_list columns: id, seq, table, from, to, ...
+				if refTable := get(r, 2); refTable != "" {
+					out = append(out, erFK{From: t, FromCol: get(r, 3), To: refTable, ToCol: get(r, 4)})
+				}
+			}
+		}
+		return out
+	}
+
 	q := erFKQuery(driver)
 	if q == "" {
 		return nil
@@ -126,17 +168,17 @@ func fetchERForeignKeys(sess db.Session, driver string) []erFK {
 	}
 	var out []erFK
 	for _, r := range res.Rows {
-		get := func(i int) string {
-			if i < len(r) && r[i] != nil {
-				return *r[i]
-			}
-			return ""
-		}
-		if f, fc, t, tc := get(0), get(1), get(2), get(3); f != "" && t != "" {
+		if f, fc, t, tc := get(r, 0), get(r, 1), get(r, 2), get(r, 3); f != "" && t != "" {
 			out = append(out, erFK{From: f, FromCol: fc, To: t, ToCol: tc})
 		}
 	}
 	return out
+}
+
+// sqlitePragmaArg single-quotes a table name for PRAGMA foreign_key_list(...),
+// escaping embedded quotes.
+func sqlitePragmaArg(name string) string {
+	return "'" + strings.ReplaceAll(name, "'", "''") + "'"
 }
 
 // openERDiagram fetches the model in the background and opens its window.
