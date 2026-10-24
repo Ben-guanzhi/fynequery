@@ -92,7 +92,7 @@ type StreamResult struct {
 // afterwards). Non-row-returning statements are Exec'd and emit no rows; their
 // RowsAffected is returned in the result. If emit returns an error, streaming
 // stops and that error is returned.
-func StreamRun(q Querier, sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]*string) error) (StreamResult, error) {
+func StreamRun(q Querier, sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]proto.CellPayload) error) (StreamResult, error) {
 	if batch <= 0 {
 		batch = 200
 	}
@@ -138,13 +138,13 @@ func StreamRun(q Querier, sqlText string, batch int, emit func(cols []proto.Colu
 	}
 
 	var total int64
-	var buf [][]*string
+	var buf [][]proto.CellPayload
 	sentCols := false
 	flush := func() error {
 		if len(buf) == 0 {
 			return nil
 		}
-		chunk := make([][]*string, len(buf))
+		chunk := make([][]proto.CellPayload, len(buf))
 		copy(chunk, buf)
 		send := []proto.ColumnInfo(nil)
 		if !sentCols {
@@ -158,9 +158,9 @@ func StreamRun(q Querier, sqlText string, batch int, emit func(cols []proto.Colu
 		if err := rows.Scan(ptrs...); err != nil {
 			return StreamResult{}, err
 		}
-		row := make([]*string, len(colNames))
+		row := make([]proto.CellPayload, len(colNames))
 		for i, v := range vals {
-			row[i] = FormatValue(v)
+			row[i] = FormatCell(v)
 		}
 		buf = append(buf, row)
 		total++
@@ -206,9 +206,9 @@ func ReadRows(rows *sql.Rows, maxRows int, start time.Time) (proto.QueryResult, 
 		if err := rows.Scan(ptrs...); err != nil {
 			return proto.QueryResult{}, err
 		}
-		row := make([]*string, len(colNames))
+		row := make([]proto.CellPayload, len(colNames))
 		for i, v := range vals {
-			row[i] = FormatValue(v)
+			row[i] = FormatCell(v)
 		}
 		res.Rows = append(res.Rows, row)
 		if len(res.Rows) >= maxRows {

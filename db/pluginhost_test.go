@@ -69,6 +69,23 @@ func TestPluginEndToEnd(t *testing.T) {
 	if res.DurationMS < 0 {
 		t.Fatalf("unexpected negative duration %d", res.DurationMS)
 	}
+	// The NULL must survive the pipe as a NULL and the empty string as an
+	// empty string: on the old all-string wire the two were the same value,
+	// which is exactly what the tagged cell form fixes. Asserted end to end
+	// through the spawned plugin process, the wire, and the host's conversion.
+	if len(res.Rows) != 3 || res.Rows[1][0].Kind != "null" {
+		t.Fatalf("NULL did not survive the wire: %+v", res.Rows)
+	}
+	if res.Rows[2][0].Kind != "text" || res.Rows[2][0].Text != "" {
+		t.Fatalf("empty string did not survive the wire: %+v", res.Rows[2])
+	}
+	ui := res.StringRows()
+	if ui[1][0] != nil {
+		t.Fatalf("NULL rendered as %q, want nil", *ui[1][0])
+	}
+	if ui[2][0] == nil || *ui[2][0] != "" {
+		t.Fatalf("empty string rendered as %v, want an empty string", ui[2][0])
+	}
 
 	// Browse reaches the dialect BrowseSQL path through the same pipeline.
 	if _, err := sess.Browse("alpha", 5); err != nil {

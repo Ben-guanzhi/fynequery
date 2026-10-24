@@ -6,6 +6,8 @@ package main
 // db.Session.Query path, so no driver-protocol change is needed.
 
 import (
+	"fynequery/proto"
+
 	"fmt"
 	"io"
 	"strconv"
@@ -196,7 +198,7 @@ func dumpDatabase(sess db.Session, driver, database string, includeData bool) (s
 	}
 
 	var tables []string
-	for _, row := range res.Rows {
+	for _, row := range res.StringRows() {
 		if len(row) == 0 || row[0] == nil {
 			continue
 		}
@@ -213,9 +215,9 @@ func dumpDatabase(sess db.Session, driver, database string, includeData bool) (s
 		}
 
 		if cr, err := sess.Query("SHOW CREATE TABLE "+full, 10); err == nil &&
-			len(cr.Rows) > 0 && len(cr.Rows[0]) > 1 && cr.Rows[0][1] != nil {
+			len(cr.Rows) > 0 && len(cr.Rows[0]) > 1 && cr.Rows[0][1].Kind != "null" {
 			b.WriteString("DROP TABLE IF EXISTS " + quoteIdent(driver, t) + ";\n")
-			b.WriteString(*cr.Rows[0][1] + ";\n\n")
+			b.WriteString(proto.CellText(cr.Rows[0][1]) + ";\n\n")
 		}
 
 		if !includeData {
@@ -246,7 +248,7 @@ func dumpDatabase(sess db.Session, driver, database string, includeData bool) (s
 			}
 			b.WriteString("INSERT INTO " + quoteIdent(driver, t) + " " + colList + " VALUES\n")
 			for i := start; i < end; i++ {
-				b.WriteString("  (" + joinMySQLValues(data.Rows[i]) + ")")
+				b.WriteString("  (" + joinMySQLValues(proto.QueryResult{Rows: [][]proto.CellPayload{data.Rows[i]}}.StringRows()[0]) + ")")
 				if i == end-1 {
 					b.WriteString(";\n")
 				} else {

@@ -46,12 +46,12 @@ func (testHandler) Columns(p ColumnsParams) (ColumnsResult, error) {
 func (testHandler) Query(p QueryParams) (QueryResult, error) {
 	return QueryResult{
 		Columns: []ColumnInfo{{Name: "id"}},
-		Rows:    [][]*string{{ptr("1")}, {nil}, {ptr("3")}},
+		Rows:    [][]CellPayload{{TextCell("1")}, {NullCell()}, {TextCell("3")}},
 	}, nil
 }
 
 func (testHandler) Browse(p BrowseParams) (QueryResult, error) {
-	return QueryResult{Columns: []ColumnInfo{{Name: "id"}}, Rows: [][]*string{{ptr("1")}}}, nil
+	return QueryResult{Columns: []ColumnInfo{{Name: "id"}}, Rows: [][]CellPayload{{TextCell("1")}}}, nil
 }
 
 func (testHandler) CreateDatabase(p CreateDBParams) error {
@@ -160,7 +160,9 @@ func TestServeRoundTrip(t *testing.T) {
 	}
 	var qr QueryResult
 	_ = json.Unmarshal(resp.Result, &qr)
-	if len(qr.Rows) != 3 || qr.Rows[1][0] != nil {
+	// The NULL cell must survive the round trip as a NULL, not as an empty
+	// string: the two are different values.
+	if len(qr.Rows) != 3 || qr.Rows[1][0].Kind != "null" {
 		t.Fatalf("query result rows (NULL round trip): %+v", qr.Rows)
 	}
 
@@ -195,13 +197,13 @@ func (streamTestHandler) Metrics(MetricsParams) (MetricsResult, error) { return 
 func (streamTestHandler) QueryStream(p QueryStreamParams, emit func(StreamFrame) error) (QueryResult, error) {
 	if p.SQL == "boom" {
 		// Emit one frame, then fail: the host must see the error as terminal.
-		_ = emit(StreamFrame{Columns: []ColumnInfo{{Name: "n"}}, Rows: [][]*string{{ptr("1")}}})
+		_ = emit(StreamFrame{Columns: []ColumnInfo{{Name: "n"}}, Rows: [][]CellPayload{{TextCell("1")}}})
 		return QueryResult{}, errors.New("stream blew up")
 	}
-	if err := emit(StreamFrame{Columns: []ColumnInfo{{Name: "n"}}, Rows: [][]*string{{ptr("1")}, {ptr("2")}}}); err != nil {
+	if err := emit(StreamFrame{Columns: []ColumnInfo{{Name: "n"}}, Rows: [][]CellPayload{{TextCell("1")}, {TextCell("2")}}}); err != nil {
 		return QueryResult{}, err
 	}
-	if err := emit(StreamFrame{Rows: [][]*string{{ptr("3")}}}); err != nil {
+	if err := emit(StreamFrame{Rows: [][]CellPayload{{TextCell("3")}}}); err != nil {
 		return QueryResult{}, err
 	}
 	return QueryResult{RowsAffected: 0, DurationMS: 7}, nil
@@ -244,7 +246,7 @@ func TestServeStreamRoundTrip(t *testing.T) {
 			cols = f.Columns
 		}
 		for _, r := range f.Rows {
-			gotRows = append(gotRows, *r[0])
+			gotRows = append(gotRows, r[0].Text)
 		}
 		frames++
 		if resp.Done {

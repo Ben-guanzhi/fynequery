@@ -8,6 +8,8 @@ package pluginkit
 // drifting apart.
 
 import (
+	"strconv"
+
 	"context"
 	"database/sql"
 	"errors"
@@ -22,6 +24,41 @@ var errBusy = errors.New("database is busy/locked")
 
 // isDefault reports whether v carries the DEFAULT sentinel (proto.DefaultMarker).
 func isDefault(v *string) bool { return v != nil && *v == proto.DefaultMarker }
+
+// cellStrings renders tagged cells as the nullable strings the SQL builders take.
+// A NULL stays nil, so "no value" and "the empty string" stay apart.
+func cellStrings(cells map[string]proto.CellPayload) map[string]*string {
+	out := make(map[string]*string, len(cells))
+	for name, cell := range cells {
+		if cell.Kind == "null" || cell.Kind == "" {
+			out[name] = nil
+			continue
+		}
+		text := cellText(cell)
+		out[name] = &text
+	}
+	return out
+}
+
+// cellText is the text of one tagged cell.
+func cellText(cell proto.CellPayload) string {
+	switch cell.Kind {
+	case "int":
+		return strconv.FormatInt(cell.Int, 10)
+	case "float":
+		return strconv.FormatFloat(cell.Flt, 'g', -1, 64)
+	case "text":
+		return cell.Text
+	case "bool":
+		return strconv.FormatBool(cell.Bool)
+	case "blob":
+		return string(cell.Blob)
+	case "time":
+		return cell.Time
+	default:
+		return ""
+	}
+}
 
 // argOf converts a *string cell into a driver argument: nil → NULL, the DEFAULT
 // sentinel is handled by the callers (they emit the keyword instead of a

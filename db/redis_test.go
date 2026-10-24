@@ -127,7 +127,7 @@ func TestRedisSessionEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := rowStrings(res.Rows); !reflect.DeepEqual(got, [][]string{{"name", "Ada"}, {"role", "admin"}}) {
+	if got := rowStrings(res.StringRows()); !reflect.DeepEqual(got, [][]string{{"name", "Ada"}, {"role", "admin"}}) {
 		t.Errorf("hash rows = %v", got)
 	}
 
@@ -135,7 +135,7 @@ func TestRedisSessionEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := rowStrings(res.Rows); !reflect.DeepEqual(got, [][]string{{"greeting", "hello"}}) {
+	if got := rowStrings(res.StringRows()); !reflect.DeepEqual(got, [][]string{{"greeting", "hello"}}) {
 		t.Errorf("string rows = %v", got)
 	}
 
@@ -143,7 +143,7 @@ func TestRedisSessionEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := rowStrings(res.Rows); !reflect.DeepEqual(got, [][]string{{"0", "first"}}) {
+	if got := rowStrings(res.StringRows()); !reflect.DeepEqual(got, [][]string{{"0", "first"}}) {
 		t.Errorf("list rows with limit = %v", got)
 	}
 
@@ -151,7 +151,7 @@ func TestRedisSessionEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := rowStrings(res.Rows); !reflect.DeepEqual(got, [][]string{{"alice", "1.5"}}) {
+	if got := rowStrings(res.StringRows()); !reflect.DeepEqual(got, [][]string{{"alice", "1.5"}}) {
 		t.Errorf("zset rows = %v", got)
 	}
 
@@ -164,7 +164,7 @@ func TestRedisSessionEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := rowStrings(res.Rows); !reflect.DeepEqual(got, [][]string{{"OK"}, {"hello world"}}) {
+	if got := rowStrings(res.StringRows()); !reflect.DeepEqual(got, [][]string{{"OK"}, {"hello world"}}) {
 		t.Errorf("command reply = %v", got)
 	}
 	if err := mr.Set("added-outside", "1"); err != nil {
@@ -387,7 +387,7 @@ func TestRedisSetValue(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Browse(%s): %v", tc.key, err)
 		}
-		if got := rowStrings(res.Rows); !reflect.DeepEqual(got, tc.want) {
+		if got := rowStrings(res.StringRows()); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s rows = %v, want %v", tc.key, got, tc.want)
 		}
 	}
@@ -584,7 +584,7 @@ func TestRedisDeleteValue(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Browse(%s): %v", tc.key, err)
 		}
-		if got := rowStrings(res.Rows); !reflect.DeepEqual(got, tc.want) {
+		if got := rowStrings(res.StringRows()); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s rows = %v, want %v", tc.key, got, tc.want)
 		}
 	}
@@ -593,7 +593,7 @@ func TestRedisDeleteValue(t *testing.T) {
 	}
 	res, err := sess.Browse("events", 10)
 	if err != nil || len(res.Rows) != 0 {
-		t.Errorf("stream rows after delete = %v, %v; want empty", rowStrings(res.Rows), err)
+		t.Errorf("stream rows after delete = %v, %v; want empty", rowStrings(res.StringRows()), err)
 	}
 
 	// Deleting the last field drops the key; the cached inventory must notice.

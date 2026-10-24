@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	dbcoremysql "github.com/dbcore/dbcore/mysql"
 	"github.com/dbcore/dbcore"
+	dbcoremysql "github.com/dbcore/dbcore/mysql"
 	"github.com/dbcore/dbcore/sqltext"
 
 	"fynequery/internal/sqlkit"
@@ -416,8 +416,8 @@ func (s *mysqlSession) QueryStream(sqlText string, batch int, emit func(cols []p
 	if tx != nil {
 		q = tx
 	}
-	res, err := sqlkit.StreamRun(q, sqlText, batch, func(cols []proto.ColumnInfo, rows [][]*string) error {
-		keep, e := emit(cols, rows)
+	res, err := sqlkit.StreamRun(q, sqlText, batch, func(cols []proto.ColumnInfo, rows [][]proto.CellPayload) error {
+		keep, e := emit(cols, taggedRowsToStrings(rows))
 		if e != nil {
 			return e
 		}

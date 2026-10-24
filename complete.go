@@ -550,7 +550,7 @@ func (qp *queryPane) scheduleAutoComplete() {
 //     time.AfterFunc fires while a test is mid-UI-cascade, and such timers
 //     outlive the test that scheduled them), see TestMain.
 var (
-	autoCompleteSettled   func()
+	autoCompleteSettled    func()
 	delayedFocusSuppressed bool
 )
 
@@ -584,21 +584,21 @@ func (qp *queryPane) autoComplete() {
 	safeGo("query.autocomplete", func() {
 		cols := qp.columnCandidates(refs)
 		sug := matchSuggestions(buildSuggestions(tables, cols, qp.currentDB(), qp.tableKinds()), seg, autoCompleteLimit)
-	safeDo(func() {
-		defer func() {
-			if autoCompleteSettled != nil {
-				autoCompleteSettled()
+		safeDo(func() {
+			defer func() {
+				if autoCompleteSettled != nil {
+					autoCompleteSettled()
+				}
+			}()
+			if gen != qp.autoGen {
+				return // a newer keystroke superseded this lookup
 			}
-		}()
-		if gen != qp.autoGen {
-			return // a newer keystroke superseded this lookup
-		}
-		if len(sug) == 0 {
-			qp.hideAuto()
-			return
-		}
-		qp.showAutoSuggestions(start+dot, len([]rune(seg)), sug)
-	})
+			if len(sug) == 0 {
+				qp.hideAuto()
+				return
+			}
+			qp.showAutoSuggestions(start+dot, len([]rune(seg)), sug)
+		})
 	})
 }
 

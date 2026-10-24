@@ -61,12 +61,15 @@ func (f fakeERDSession) Query(sql string, _ int) (proto.QueryResult, error) {
 	return proto.QueryResult{}, nil
 }
 
+// ct is a text cell for the tests.
+func ct(v string) proto.CellPayload { return proto.CellPayload{Kind: "text", Text: v} }
+
 func TestFetchERForeignKeysSQLite(t *testing.T) {
 	// PRAGMA foreign_key_list columns: id, seq, table, from, to, on_update, on_delete, match.
 	pragmaSQL := "PRAGMA foreign_key_list('orders')"
 	sess := fakeERDSession{queries: map[string]proto.QueryResult{
-		pragmaSQL: {Rows: [][]*string{
-			{strp("0"), strp("0"), strp("customers"), strp("customer_id"), strp("id"), strp("NO ACTION"), strp("NO ACTION"), strp("NONE")},
+		pragmaSQL: {Rows: [][]proto.CellPayload{
+			{ct("0"), ct("0"), ct("customers"), ct("customer_id"), ct("id"), ct("NO ACTION"), ct("NO ACTION"), ct("NONE")},
 		}},
 	}}
 	fks := fetchERForeignKeys(sess, "sqlite", []string{"orders", "products"})

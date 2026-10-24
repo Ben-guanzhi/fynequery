@@ -197,7 +197,13 @@ func (p *pluginProc) handshake() error {
 	case <-time.After(5 * time.Second):
 		return errors.New("banner timeout")
 	}
-	if banner.Proto != proto.ProtocolName || banner.Version != proto.ProtocolVersion {
+	// Both protocol names are accepted: the kernel's and the legacy fynequery one
+	// the deployed plugin binaries still announce. The version must match either
+	// way — a different version means a different framing.
+	if err := proto.AcceptsBanner(banner); err != nil {
+		return err
+	}
+	if banner.Version != proto.ProtocolVersion {
 		return fmt.Errorf("unsupported protocol %q v%d", banner.Proto, banner.Version)
 	}
 
@@ -594,12 +600,69 @@ func (s *remoteSession) QueryStream(sqlText string, batch int, emit func(cols []
 	err := s.p.callStream(ctx, proto.MethodQueryStream,
 		proto.QueryStreamParams{ConnID: s.connID, SQL: sqlText, Batch: batch},
 		func(f proto.StreamFrame) (bool, error) {
-			return emit(f.Columns, f.Rows)
+			return emit(f.Columns, taggedRowsToStrings(f.Rows))
 		}, &final)
 	if err != nil {
 		return proto.QueryResult{}, err
 	}
 	return final, nil
+}
+
+// taggedRowsToStrings renders the wire's tagged rows as the UI's nullable strings.
+func taggedRowsToStrings(rows [][]proto.CellPayload) [][]*string {
+	out := make([][]*string, len(rows))
+	for i, row := range rows {
+		cells := make([]*string, len(row))
+		for j, cell := range row {
+			if cell.Kind == "null" || cell.Kind == "" {
+				continue
+			}
+			text := proto.CellText(cell)
+			cells[j] = &text
+		}
+		out[i] = cells
+	}
+	return out
+}
+
+// taggedRowsOf converts the UI's rows into the tagged cells the wire carries.
+func taggedRowsOf(rows [][]*string) [][]proto.CellPayload {
+	out := make([][]proto.CellPayload, len(rows))
+	for i, row := range rows {
+		cells := make([]proto.CellPayload, len(row))
+		for j, value := range row {
+			if value == nil {
+				cells[j] = proto.CellPayload{Kind: "null"}
+				continue
+			}
+			cells[j] = proto.CellPayload{Kind: "text", Text: *value}
+		}
+		out[i] = cells
+	}
+	return out
+}
+
+// taggedRows converts a list of the UI's row maps into tagged cells.
+func taggedRows(rows []map[string]*string) []map[string]proto.CellPayload {
+	out := make([]map[string]proto.CellPayload, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, cellsToTagged(row))
+	}
+	return out
+}
+
+// cellsToTagged renders the UI's nullable strings as the tagged cells the wire
+// carries. A nil pointer is a NULL; an empty string is an empty string.
+func cellsToTagged(cells map[string]*string) map[string]proto.CellPayload {
+	out := make(map[string]proto.CellPayload, len(cells))
+	for name, value := range cells {
+		if value == nil {
+			out[name] = proto.CellPayload{Kind: "null"}
+			continue
+		}
+		out[name] = proto.CellPayload{Kind: "text", Text: *value}
+	}
+	return out
 }
 
 // ---- row-level DML (implements db.Updater / db.BatchUpdater) ----------------
@@ -616,7 +679,7 @@ func (s *remoteSession) UpdateRow(table string, pk, changes map[string]*string) 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	return s.p.call(ctx, proto.MethodUpdate, proto.DMLSingleParams{
-		ConnID: s.connID, Table: table, PK: pk, Changes: changes,
+		ConnID: s.connID, Table: table, PK: cellsToTagged(pk), Changes: cellsToTagged(changes),
 	}, nil)
 }
 
@@ -624,7 +687,7 @@ func (s *remoteSession) InsertRow(table string, values map[string]*string) error
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	return s.p.call(ctx, proto.MethodInsert, proto.DMLSingleParams{
-		ConnID: s.connID, Table: table, Values: values,
+		ConnID: s.connID, Table: table, Values: cellsToTagged(values),
 	}, nil)
 }
 
@@ -632,7 +695,7 @@ func (s *remoteSession) DeleteRow(table string, pk map[string]*string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	return s.p.call(ctx, proto.MethodDelete, proto.DMLSingleParams{
-		ConnID: s.connID, Table: table, PK: pk,
+		ConnID: s.connID, Table: table, PK: cellsToTagged(pk),
 	}, nil)
 }
 
@@ -644,10 +707,10 @@ func (s *remoteSession) ApplyChanges(table string, updates []RowEdit, deletes []
 	defer cancel()
 	up := make([]proto.DMLRow, 0, len(updates))
 	for _, u := range updates {
-		up = append(up, proto.DMLRow{PK: u.PK, Changes: u.Changes})
+		up = append(up, proto.DMLRow{PK: cellsToTagged(u.PK), Changes: cellsToTagged(u.Changes)})
 	}
 	err := s.p.call(ctx, proto.MethodApplyBatch, proto.DMLBatchParams{
-		ConnID: s.connID, Table: table, Updates: up, Deletes: deletes, Inserts: inserts, DDL: ddl,
+		ConnID: s.connID, Table: table, Updates: up, Deletes: taggedRows(deletes), Inserts: taggedRows(inserts), DDL: ddl,
 	}, nil)
 	return err
 }

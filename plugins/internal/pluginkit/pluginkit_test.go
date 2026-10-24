@@ -142,10 +142,10 @@ func countRows(t *testing.T, h *handler, connID string) string {
 	if err != nil {
 		t.Fatalf("count query: %v", err)
 	}
-	if len(res.Rows) != 1 || len(res.Rows[0]) != 1 || res.Rows[0][0] == nil {
+	if len(res.Rows) != 1 || len(res.Rows[0]) != 1 || res.Rows[0][0].Kind == "null" {
 		t.Fatalf("count rows = %+v", res.Rows)
 	}
-	return *res.Rows[0][0]
+	return proto.CellText(res.Rows[0][0])
 }
 
 // TestHandlerTransactionRouting verifies that while a manual transaction is
@@ -173,7 +173,7 @@ func TestHandlerTransactionRouting(t *testing.T) {
 	}
 
 	// Insert inside the transaction, then roll it back: the row must vanish.
-	if _, err := h.Insert(proto.DMLSingleParams{ConnID: id, Table: "t", Values: map[string]*string{"v": sp("a")}}); err != nil {
+	if _, err := h.Insert(proto.DMLSingleParams{ConnID: id, Table: "t", Values: map[string]proto.CellPayload{"v": {Kind: "text", Text: "a"}}}); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	if got := countRows(t, h, id); got != "1" {
@@ -190,7 +190,7 @@ func TestHandlerTransactionRouting(t *testing.T) {
 	if err := h.Begin(tx); err != nil {
 		t.Fatalf("Begin (2): %v", err)
 	}
-	if _, err := h.Insert(proto.DMLSingleParams{ConnID: id, Table: "t", Values: map[string]*string{"v": sp("b")}}); err != nil {
+	if _, err := h.Insert(proto.DMLSingleParams{ConnID: id, Table: "t", Values: map[string]proto.CellPayload{"v": {Kind: "text", Text: "b"}}}); err != nil {
 		t.Fatalf("Insert (2): %v", err)
 	}
 	if err := h.Commit(tx); err != nil {
@@ -221,7 +221,7 @@ func TestHandlerQueryStream(t *testing.T) {
 
 	// Seed 5 rows (autocommit).
 	for i := 0; i < 5; i++ {
-		if _, err := h.Insert(proto.DMLSingleParams{ConnID: id, Table: "t", Values: map[string]*string{"v": sp("x")}}); err != nil {
+		if _, err := h.Insert(proto.DMLSingleParams{ConnID: id, Table: "t", Values: map[string]proto.CellPayload{"v": {Kind: "text", Text: "x"}}}); err != nil {
 			t.Fatalf("Insert: %v", err)
 		}
 	}
@@ -259,7 +259,7 @@ func TestHandlerQueryStream(t *testing.T) {
 	if err := h.Begin(proto.TxParams{ConnID: id}); err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := h.Insert(proto.DMLSingleParams{ConnID: id, Table: "t", Values: map[string]*string{"v": sp("y")}}); err != nil {
+	if _, err := h.Insert(proto.DMLSingleParams{ConnID: id, Table: "t", Values: map[string]proto.CellPayload{"v": {Kind: "text", Text: "y"}}}); err != nil {
 		t.Fatalf("Insert in tx: %v", err)
 	}
 	var inTx int64

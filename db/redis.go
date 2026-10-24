@@ -431,7 +431,7 @@ func (s *redisSession) Browse(table string, limit int) (proto.QueryResult, error
 	if limit > 0 && len(rows) > limit {
 		rows = rows[:limit]
 	}
-	return proto.QueryResult{Columns: cols, Rows: rows, DurationMS: time.Since(start).Milliseconds()}, nil
+	return proto.QueryResult{Columns: cols, Rows: taggedRowsOf(rows), DurationMS: time.Since(start).Milliseconds()}, nil
 }
 
 func redisValueRows(key string, v dbcore.RedisValue) [][]*string {
@@ -525,7 +525,7 @@ func (s *redisSession) Query(text string, maxRows int) (proto.QueryResult, error
 	}
 	return proto.QueryResult{
 		Columns:    []proto.ColumnInfo{{Name: "reply", Type: "text"}},
-		Rows:       rows,
+		Rows:       taggedRowsOf(rows),
 		DurationMS: time.Since(start).Milliseconds(),
 	}, nil
 }

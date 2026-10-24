@@ -783,7 +783,7 @@ func (ws *workspace) fetchFunctions() []TableInfo {
 		return nil
 	}
 	var out []TableInfo
-	for _, row := range res.Rows {
+	for _, row := range res.StringRows() {
 		if len(row) > 0 && row[0] != nil {
 			out = append(out, TableInfo{Name: *row[0], Kind: "function"})
 		}
@@ -991,7 +991,7 @@ func (ws *workspace) fetchTLS(sess db.Session) string {
 	if err != nil || len(res.Rows) == 0 {
 		return ""
 	}
-	p := val(res.Rows[0])
+	p := val(res.StringRows()[0])
 	if p == nil {
 		return ""
 	}

@@ -21,16 +21,16 @@ func (f *fakeSession) Close() {}
 
 func (f *fakeSession) Query(sql string, _ int) (proto.QueryResult, error) {
 	f.ran = append(f.ran, sql)
-	s := func(v string) *string { return &v }
+	s := func(v string) proto.CellPayload { return proto.CellPayload{Kind: "text", Text: v} }
 	switch {
 	case strings.HasPrefix(sql, "SHOW FULL TABLES"):
-		return proto.QueryResult{Rows: [][]*string{{s("users"), s("BASE TABLE")}, {s("v"), s("VIEW")}}}, nil
+		return proto.QueryResult{Rows: [][]proto.CellPayload{{s("users"), s("BASE TABLE")}, {s("v"), s("VIEW")}}}, nil
 	case strings.HasPrefix(sql, "SHOW CREATE TABLE"):
-		return proto.QueryResult{Rows: [][]*string{{s("users"), s("CREATE TABLE `users` (`id` int, `name` varchar(20))")}}}, nil
+		return proto.QueryResult{Rows: [][]proto.CellPayload{{s("users"), s("CREATE TABLE `users` (`id` int, `name` varchar(20))")}}}, nil
 	case strings.HasPrefix(sql, "SELECT * FROM"):
 		return proto.QueryResult{
 			Columns: []proto.ColumnInfo{{Name: "id", Type: "int"}, {Name: "name", Type: "varchar"}},
-			Rows:    [][]*string{{s("1"), s("a'b")}, {s("2"), nil}},
+			Rows:    [][]proto.CellPayload{{s("1"), s("a'b")}, {s("2"), {Kind: "null"}}},
 		}, nil
 	}
 	return proto.QueryResult{}, nil

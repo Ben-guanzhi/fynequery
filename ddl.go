@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"fynequery/db"
+	"fynequery/proto"
 )
 
 // fetchObjectDDL returns the DDL text for a database object. kind is "table",
@@ -49,10 +50,10 @@ func viewDDL(sess db.Session, driver, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(res.Rows) == 0 || res.Rows[0][0] == nil {
+	if len(res.Rows) == 0 || res.Rows[0][0].Kind == "null" {
 		return "", fmt.Errorf("no view definition found for %s", name)
 	}
-	return strings.TrimSpace(*res.Rows[0][0]), nil
+	return strings.TrimSpace(proto.CellText(res.Rows[0][0])), nil
 }
 
 // functionDDL returns the routine body for a function/procedure.
@@ -74,10 +75,10 @@ func functionDDL(sess db.Session, driver, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(res.Rows) == 0 || res.Rows[0][0] == nil {
+	if len(res.Rows) == 0 || res.Rows[0][0].Kind == "null" {
 		return "", fmt.Errorf("no routine definition found for %s", name)
 	}
-	body := strings.TrimSpace(*res.Rows[0][0])
+	body := strings.TrimSpace(proto.CellText(res.Rows[0][0]))
 	return fmt.Sprintf("-- definition of %s (editable; re-run to apply)\n%s;\n", name, body), nil
 }
 

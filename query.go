@@ -668,7 +668,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 			if end > total {
 				end = total
 			}
-			chunk := res.Rows[off:end]
+			chunk := res.StringRows()[off:end]
 			// yield so the UI thread can paint the previous batch rather
 			// than freezing on one giant rebuild.
 			if off > 0 {

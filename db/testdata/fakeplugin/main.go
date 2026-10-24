@@ -40,7 +40,13 @@ func (fakeHandler) Columns(p proto.ColumnsParams) (proto.ColumnsResult, error) {
 }
 
 func (fakeHandler) Query(p proto.QueryParams) (proto.QueryResult, error) {
-	return proto.QueryResult{Columns: []proto.ColumnInfo{{Name: "?1"}}, Rows: [][]*string{}}, nil
+	// Row 2 is a SQL NULL and row 3 an empty string. On the old all-string
+	// wire the two were the same value; the tagged form keeps them apart, and
+	// TestPluginEndToEnd asserts they arrive that way through the real pipe.
+	return proto.QueryResult{
+		Columns: []proto.ColumnInfo{{Name: "?1"}},
+		Rows:    [][]proto.CellPayload{{proto.TextCell("1")}, {proto.NullCell()}, {proto.TextCell("")}},
+	}, nil
 }
 
 func (fakeHandler) Browse(p proto.BrowseParams) (proto.QueryResult, error) {
@@ -82,17 +88,18 @@ func (fakeHandler) Rollback(p proto.TxParams) error { return nil }
 func (fakeHandler) QueryStream(p proto.QueryStreamParams, emit func(proto.StreamFrame) error) (proto.QueryResult, error) {
 	if err := emit(proto.StreamFrame{
 		Columns: []proto.ColumnInfo{{Name: "n"}},
-		Rows:    [][]*string{{ptrS("1")}, {ptrS("2")}},
+		Rows:    [][]proto.CellPayload{{ptrS("1")}, {ptrS("2")}},
 	}); err != nil {
 		return proto.QueryResult{}, err
 	}
-	if err := emit(proto.StreamFrame{Rows: [][]*string{{ptrS("3")}}}); err != nil {
+	if err := emit(proto.StreamFrame{Rows: [][]proto.CellPayload{{ptrS("3")}}}); err != nil {
 		return proto.QueryResult{}, err
 	}
 	return proto.QueryResult{RowsAffected: 0, DurationMS: 1}, nil
 }
 
-func ptrS(s string) *string { return &s }
+// ptrS is a text cell for the fake plugin.
+func ptrS(s string) proto.CellPayload { return proto.CellPayload{Kind: "text", Text: s} }
 
 // Metrics returns a small fixed set so the host metrics path can be tested.
 func (fakeHandler) Metrics(p proto.MetricsParams) (proto.MetricsResult, error) {

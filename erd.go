@@ -148,7 +148,7 @@ func fetchERForeignKeys(sess db.Session, driver string, tables []string) []erFK 
 			if err != nil {
 				continue
 			}
-			for _, r := range res.Rows {
+			for _, r := range res.StringRows() {
 				// PRAGMA foreign_key_list columns: id, seq, table, from, to, ...
 				if refTable := get(r, 2); refTable != "" {
 					out = append(out, erFK{From: t, FromCol: get(r, 3), To: refTable, ToCol: get(r, 4)})
@@ -167,7 +167,7 @@ func fetchERForeignKeys(sess db.Session, driver string, tables []string) []erFK 
 		return nil
 	}
 	var out []erFK
-	for _, r := range res.Rows {
+	for _, r := range res.StringRows() {
 		if f, fc, t, tc := get(r, 0), get(r, 1), get(r, 2), get(r, 3); f != "" && t != "" {
 			out = append(out, erFK{From: f, FromCol: fc, To: t, ToCol: tc})
 		}

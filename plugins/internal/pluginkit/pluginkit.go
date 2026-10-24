@@ -54,11 +54,14 @@ type Dialect interface {
 // Main runs the plugin until the host closes stdin. Never returns.
 func Main(d Dialect) {
 	h := newHandler(d)
+	// The banner names the engine in both vocabularies: "code" for the fynequery
+	// host, "kind" for a kernel host. One plugin, either client.
 	banner := proto.Banner{
 		Proto:   proto.ProtocolName,
 		Version: proto.ProtocolVersion,
 		Code:    d.Code(),
 		Name:    d.Name(),
+		Kernel:  d.Code(),
 	}
 	if err := proto.Serve(h, banner); err != nil {
 		log.Fatalf("serve: %v", err)
@@ -246,7 +249,7 @@ func (h *handler) Update(p proto.DMLSingleParams) (proto.DMLResult, error) {
 	if err != nil {
 		return proto.DMLResult{}, err
 	}
-	stmt, args := buildUpdate(h.dialect, p.Table, p.PK, p.Changes)
+	stmt, args := buildUpdate(h.dialect, p.Table, cellStrings(p.PK), cellStrings(p.Changes))
 	return runDML(q, stmt, args)
 }
 
@@ -256,7 +259,7 @@ func (h *handler) Insert(p proto.DMLSingleParams) (proto.DMLResult, error) {
 	if err != nil {
 		return proto.DMLResult{}, err
 	}
-	stmt, args, err := buildInsert(h.dialect, p.Table, p.Values)
+	stmt, args, err := buildInsert(h.dialect, p.Table, cellStrings(p.Values))
 	if err != nil {
 		return proto.DMLResult{}, err
 	}
@@ -269,7 +272,7 @@ func (h *handler) Delete(p proto.DMLSingleParams) (proto.DMLResult, error) {
 	if err != nil {
 		return proto.DMLResult{}, err
 	}
-	stmt, args := buildDelete(h.dialect, p.Table, p.PK)
+	stmt, args := buildDelete(h.dialect, p.Table, cellStrings(p.PK))
 	return runDML(q, stmt, args)
 }
 
@@ -284,15 +287,15 @@ func (h *handler) Delete(p proto.DMLSingleParams) (proto.DMLResult, error) {
 func (h *handler) ApplyBatch(p proto.DMLBatchParams) (proto.DMLResult, error) {
 	var stmts []batchStmt
 	for _, u := range p.Updates {
-		q, a := buildUpdate(h.dialect, p.Table, u.PK, u.Changes)
+		q, a := buildUpdate(h.dialect, p.Table, cellStrings(u.PK), cellStrings(u.Changes))
 		stmts = append(stmts, batchStmt{q, a, true})
 	}
 	for _, pk := range p.Deletes {
-		q, a := buildDelete(h.dialect, p.Table, pk)
+		q, a := buildDelete(h.dialect, p.Table, cellStrings(pk))
 		stmts = append(stmts, batchStmt{q, a, true})
 	}
 	for _, vals := range p.Inserts {
-		q, a, err := buildInsert(h.dialect, p.Table, vals)
+		q, a, err := buildInsert(h.dialect, p.Table, cellStrings(vals))
 		if err != nil {
 			return proto.DMLResult{}, err
 		}
@@ -393,7 +396,7 @@ func (h *handler) QueryStream(p proto.QueryStreamParams, emit func(proto.StreamF
 	if err != nil {
 		return proto.QueryResult{}, err
 	}
-	res, err := sqlkit.StreamRun(q, p.SQL, p.Batch, func(cols []proto.ColumnInfo, rows [][]*string) error {
+	res, err := sqlkit.StreamRun(q, p.SQL, p.Batch, func(cols []proto.ColumnInfo, rows [][]proto.CellPayload) error {
 		return emit(proto.StreamFrame{Columns: cols, Rows: rows})
 	})
 	if err != nil {

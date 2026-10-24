@@ -39,7 +39,7 @@ func str(s string) *string { return &s }
 // totalRows/-1: unknown total; approx marks it as an estimate.
 func tableDataFromResult(res proto.QueryResult, totalRows int, approx bool) *TableData {
 	td := &TableData{
-		Rows:    res.Rows,
+		Rows:    res.StringRows(),
 		Fetched: len(res.Rows),
 		Total:   totalRows,
 		Approx:  approx,

@@ -60,7 +60,7 @@ func listDatabases(sess db.Session, driver string) []string {
 		return nil
 	}
 	var out []string
-	for _, row := range res.Rows {
+	for _, row := range res.StringRows() {
 		if len(row) > 0 && row[0] != nil {
 			name := *row[0]
 			if isSystemSchema(name) {

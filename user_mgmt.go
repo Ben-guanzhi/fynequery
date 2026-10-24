@@ -86,7 +86,7 @@ func (ws *workspace) fetchUserRows(sess db.Session) ([]userRow, error) {
 		return nil, err
 	}
 	var out []userRow
-	for _, r := range res.Rows {
+	for _, r := range res.StringRows() {
 		if u := pick(r); u.user != "" {
 			out = append(out, u)
 		}
