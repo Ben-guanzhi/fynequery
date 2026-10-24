@@ -66,8 +66,12 @@ func (pgDialect) ListTables(db *sql.DB) ([]proto.ObjectInfo, error) {
 	}
 	out := make([]proto.ObjectInfo, 0, len(found))
 	for _, t := range found {
+		kind := "table"
+		if strings.Contains(strings.ToUpper(t.Type), "VIEW") {
+			kind = "view" // fold "materialized_view" too: the sidebar only knows table/view
+		}
 		out = append(out, proto.ObjectInfo{
-			Name: t.Name, Kind: t.Type, Rows: t.Rows, ApproxRows: t.ApproxRows,
+			Name: t.Name, Kind: kind, Rows: t.Rows, ApproxRows: t.ApproxRows,
 		})
 	}
 	return out, nil
