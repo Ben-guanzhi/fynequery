@@ -55,9 +55,12 @@ type dataTable struct {
 	onRowSelect func(row int) // fired when the selected row changes
 	editable    bool
 	pkCols      []int
-	dirty       map[int]map[int]*string // row -> col -> new value (nil = NULL)
-	deleted     map[int]bool            // rows marked for deletion
-	inserted    map[int]bool            // rows staged for insert (pending new rows)
+	// kvEdit handles a double-click on a key/value grid and reports whether it
+	// opened the element editor; nil for SQL sessions (see edit.go).
+	kvEdit   func(row, col int) bool
+	dirty    map[int]map[int]*string // row -> col -> new value (nil = NULL)
+	deleted  map[int]bool            // rows marked for deletion
+	inserted map[int]bool            // rows staged for insert (pending new rows)
 
 	// column sort state (TablePlus HeaderSort / HeaderSortDirection)
 	sortCol int
@@ -1373,6 +1376,9 @@ func (cv *cellView) Tapped(e *fyne.PointEvent) {
 // read-only mode it opens the value viewer (Quick Look) so a JSON/text/blob
 // cell can be inspected and copied without first entering edit mode.
 func (cv *cellView) DoubleTapped(*fyne.PointEvent) {
+	if cv.t.kvEdit != nil && cv.t.kvEdit(cv.row, cv.col) {
+		return
+	}
 	if cv.t.editable {
 		cv.t.beginEdit(cv.row, cv.col)
 		return

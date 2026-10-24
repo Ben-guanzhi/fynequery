@@ -3,23 +3,14 @@ module fynequery
 go 1.27
 
 require (
-	fyne.io/fyne/v2 v2.8.2
-	github.com/go-sql-driver/mysql v1.10.1
-	github.com/jackc/pgx/v5 v5.11.0
-	github.com/microsoft/go-mssqldb v1.11.2
-	github.com/sijms/go-ora/v2 v2.9.0
-	golang.org/x/crypto v0.55.0
-	golang.org/x/sys v0.48.0
-	modernc.org/sqlite v1.60.1
-)
-
-require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	fyne.io/systray v1.12.3-0.20260810170012-af4e8e793ec4 // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/FyshOS/fancyfs v0.0.1 // indirect
 	github.com/anthonynsimon/bild v0.14.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fyne-io/gl-js v0.2.1-0.20260315212741-029c47fd27e8 // indirect
@@ -53,6 +44,7 @@ require (
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/yuin/goldmark v1.8.2 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/image v0.24.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
@@ -62,3 +54,19 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
+
+require (
+	fyne.io/fyne/v2 v2.8.2
+	github.com/alicebob/miniredis/v2 v2.40.0
+	github.com/dbcore/dbcore v0.1.0
+	github.com/go-sql-driver/mysql v1.10.1
+	github.com/jackc/pgx/v5 v5.11.0
+	github.com/microsoft/go-mssqldb v1.11.2
+	github.com/redis/go-redis/v9 v9.17.3
+	github.com/sijms/go-ora/v2 v2.9.0
+	golang.org/x/crypto v0.55.0
+	golang.org/x/sys v0.48.0
+	modernc.org/sqlite v1.60.1
+)
+
+replace github.com/dbcore/dbcore => ../dbcore

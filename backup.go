@@ -18,6 +18,8 @@ import (
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/dbcore/dbcore/sqltext"
+
 	"fynequery/db"
 )
 
@@ -438,12 +440,10 @@ func splitStatements(script string) []string {
 
 // quoteIdent quotes an identifier for the driver.
 func quoteIdent(driver, name string) string {
-	switch driver {
-	case "mysql", "mariadb":
-		return "`" + strings.ReplaceAll(name, "`", "``") + "`"
-	default:
-		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	if q, err := sqltext.QuoteIdent(driver, name); err == nil {
+		return q
 	}
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 // joinMySQLValues renders one row as a MySQL VALUES tuple.

@@ -11,6 +11,8 @@ import (
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 
+	"github.com/dbcore/dbcore/sqltext"
+
 	"fynequery/plugins/internal/pluginkit"
 	"fynequery/proto"
 )
@@ -103,6 +105,9 @@ func (sqliteDialect) BrowseSQL(table string, limit int) string {
 // QuoteIdent quotes a SQLite identifier with double quotes (escaping embedded
 // quotes). Used by the shared DML builders in pluginkit.
 func (sqliteDialect) QuoteIdent(name string) string {
+	if q, err := sqltext.QuoteIdent("sqlite", name); err == nil {
+		return q
+	}
 	quoted := strings.ReplaceAll(name, `"`, `""`)
 	return `"` + quoted + `"`
 }

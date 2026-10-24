@@ -8,6 +8,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 
 	"fynequery/proto"
 )
@@ -128,6 +129,80 @@ type Streamer interface {
 // simply report no metrics.
 type Metricser interface {
 	Metrics() ([]proto.Metric, error)
+}
+
+// Pinger is optionally implemented by sessions that can check liveness with a
+// native ping. The keepalive uses it instead of the SQL-only "SELECT 1", which
+// would be an invalid (or worse, state-changing) command on a KV session.
+type Pinger interface {
+	Ping() error
+}
+
+// KeyFilter is optionally implemented by KV sessions that can narrow the key
+// inventory on the server. SetKeyFilter("") clears the filter. The filter
+// syntax is driver-specific: Redis treats glob metacharacters as a MATCH
+// pattern and plain text as a substring.
+type KeyFilter interface {
+	SetKeyFilter(filter string)
+}
+
+// ValueEdit identifies one element-level write in a key/value store. Identity
+// is the element's identity column as reported by Columns ("key" for a string's
+// single row, otherwise "field", "index" or "member"), ID is that cell's value,
+// Column is the writable value column ("value" or "score") and Value the new
+// text.
+type ValueEdit struct {
+	Key      string
+	Identity string
+	ID       string
+	Column   string
+	Value    string
+}
+
+// ValueWriter is optionally implemented by KV sessions whose elements can be
+// overwritten in place (Redis SET/HSET/LSET/ZADD). Unlike Updater there is no
+// transaction, no NULL and no batch commit: the write reaches the server as
+// soon as it is issued, and identity columns are never writable.
+type ValueWriter interface {
+	SetValue(edit ValueEdit) error
+}
+
+// KeyMeta describes a KV key's type and, when it expires, the remaining
+// lifetime. Kind is the driver's key-type name (e.g. "string", "hash").
+type KeyMeta struct {
+	Kind   string
+	TTL    time.Duration // meaningful only when HasTTL
+	HasTTL bool
+}
+
+// KeyAdmin is optionally implemented by KV sessions that can inspect and
+// delete/rename keys, and change their expiry. RenameKey must refuse to
+// overwrite an existing target, so a typo cannot destroy another key's value;
+// SetKeyTTL with ttl <= 0 removes the expiry.
+type KeyAdmin interface {
+	KeyMeta(key string) (KeyMeta, error)
+	DeleteKey(key string) error
+	RenameKey(oldKey, newKey string) error
+	SetKeyTTL(key string, ttl time.Duration) error
+}
+
+// ValueDeleter is optionally implemented by KV sessions that can remove one
+// element in place (Redis HDEL/SREM/ZREM/XDEL). Identity "index" (lists are
+// index-addressed) and "key" (a string's element is the key itself) are not
+// deletable this way; use KeyAdmin.DeleteKey for the latter. Column and Value
+// in the edit are unused: the element is identified by Key/Identity/ID.
+type ValueDeleter interface {
+	DeleteValue(edit ValueEdit) error
+}
+
+// KeyPager is optionally implemented by KV sessions whose key inventory is
+// loaded a page at a time. The first page comes from Tables(); LoadMoreKeys
+// appends the next page to that cached inventory and reports how many keys
+// were added and whether another page remains. MoreKeys reports the latter
+// without scanning, so the sidebar can show or hide a "load more" row.
+type KeyPager interface {
+	MoreKeys() bool
+	LoadMoreKeys() (added int, more bool, err error)
 }
 
 // ErrQueryCancelled is returned by Query implementations whose in-flight

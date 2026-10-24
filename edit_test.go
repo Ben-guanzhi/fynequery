@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2/test"
+
+	"fynequery/db"
 )
 
 func TestEditableGrid(t *testing.T) {
@@ -97,5 +99,89 @@ func TestStageInsert(t *testing.T) {
 	}
 	if got := g.changeCount(); got != 0 {
 		t.Fatalf("changeCount after clearDirty = %d, want 0", got)
+	}
+}
+
+// TestKVEditFor checks the element write the UI builds for a KV cell: the
+// identity column supplies the element ID and identity cells are never
+// writable.
+func TestKVEditFor(t *testing.T) {
+	s := func(v string) *string { return &v }
+	g := newDataTable(&TableData{
+		Cols: []ColumnInfo{
+			{Name: "field", Type: "text", Key: "PK"},
+			{Name: "value", Type: "text"},
+		},
+		Rows:    [][]*string{{s("name"), s("Ada")}},
+		Fetched: 1, Total: 1,
+	}, nil)
+
+	edit, ok := kvEditFor("user:1", g, 0, 1, "Grace")
+	if !ok {
+		t.Fatal("value cell should be writable")
+	}
+	want := db.ValueEdit{Key: "user:1", Identity: "field", ID: "name", Column: "value", Value: "Grace"}
+	if edit != want {
+		t.Fatalf("edit = %+v, want %+v", edit, want)
+	}
+	if _, ok := kvEditFor("user:1", g, 0, 0, "x"); ok {
+		t.Fatal("identity cell must not be writable")
+	}
+	if _, ok := kvEditFor("user:1", g, 3, 1, "x"); ok {
+		t.Fatal("out-of-range row must not be writable")
+	}
+
+	// A set (single identity column) has nothing writable.
+	g = newDataTable(&TableData{
+		Cols: []ColumnInfo{{Name: "member", Type: "text", Key: "PK"}},
+		Rows: [][]*string{{s("x")}}, Fetched: 1, Total: 1,
+	}, nil)
+	if _, ok := kvEditFor("tags", g, 0, 0, "y"); ok {
+		t.Fatal("set member must not be writable")
+	}
+}
+
+// TestKVDeleteFor checks which KV rows the UI can delete by identity: hash
+// fields, set/zset members and stream entries; list indexes and a string's
+// key element have no addressable identity.
+func TestKVDeleteFor(t *testing.T) {
+	s := func(v string) *string { return &v }
+	cases := []struct {
+		col    string
+		id     string
+		ok     bool
+		wantID string
+	}{
+		{"field", "name", true, "name"},
+		{"member", "alice", true, "alice"},
+		{"entry", "1-1", true, "1-1"},
+		{"index", "0", false, ""},
+		{"key", "greeting", false, ""},
+	}
+	for _, tc := range cases {
+		g := newDataTable(&TableData{
+			Cols: []ColumnInfo{
+				{Name: tc.col, Type: "text", Key: "PK"},
+				{Name: "value", Type: "text"},
+			},
+			Rows:    [][]*string{{s(tc.id), s("v")}},
+			Fetched: 1, Total: 1,
+		}, nil)
+		edit, ok := kvDeleteFor("k", g, 0)
+		if ok != tc.ok {
+			t.Errorf("kvDeleteFor(%s) ok = %v, want %v", tc.col, ok, tc.ok)
+			continue
+		}
+		if ok && (edit.Identity != tc.col || edit.ID != tc.wantID) {
+			t.Errorf("kvDeleteFor(%s) = %+v", tc.col, edit)
+		}
+	}
+
+	g := newDataTable(&TableData{
+		Cols: []ColumnInfo{{Name: "member", Type: "text", Key: "PK"}},
+		Rows: [][]*string{{s("x")}}, Fetched: 1, Total: 1,
+	}, nil)
+	if _, ok := kvDeleteFor("tags", g, 3); ok {
+		t.Error("out-of-range row must not be deletable")
 	}
 }

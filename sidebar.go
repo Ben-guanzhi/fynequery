@@ -31,9 +31,11 @@ type sidebar struct {
 	mode       sidebarMode
 	onSelect   func(string) // table/view picked
 	onNewQuery func()
+	onSearch   func(string)                // search text changed (KV: server-side filter)
 	onDBPick   func(string)                // database chosen in the bottom selector
 	onNewDB    func()                      // "+" next to the bottom selector
 	onItemMenu func(string, fyne.Position) // right-click on an item
+	onMoreKeys func()                      // "load more keys" row (KV, paged inventory)
 	// saved-query panel (查询 tab)
 	onQueryRun  func(q SavedQuery) // open + run a saved query
 	onQueryOpen func(q SavedQuery) // open a saved query in the editor
@@ -56,8 +58,12 @@ type sidebar struct {
 	loaded      bool
 	loadErr     string            // last inventory load error ("" = none)
 	noDB        bool              // true until a database is selected (shows the prompt)
+	kv          bool              // key/value store: inventory entries are keys, not tables
+	moreKeys    bool              // KV: the session has a further key page
 	pinned      map[string]bool   // table names pinned to the top of the tree
 	searchClear fyne.CanvasObject // "x" clears the search box (shown when non-empty)
+	// suppressSearch silences OnChanged while the box is reset programmatically.
+	suppressSearch bool
 }
 
 func newSidebar(onSelect func(string), onNewQuery func()) *sidebar {
@@ -105,19 +111,41 @@ const (
 	nodeFunctions = "::functions"
 	nodeTables    = "::tables"
 	nodeViews     = "::views"
+	// nodeMore is a KV-only pseudo row: its id starts with "::" so it can never
+	// collide with a key name and the item menu ignores it.
+	nodeMore = "::more"
 )
 
 // branchLabel maps a tree group ID to its display name.
-func branchLabel(id string) string {
+func (s *sidebar) branchLabel(id string) string {
 	switch id {
 	case nodeFunctions:
 		return "函数"
 	case nodeTables:
+		if s.kv {
+			return "键"
+		}
 		return "表格"
 	case nodeViews:
 		return "视图"
+	case nodeMore:
+		return "加载更多键…"
 	}
 	return id
+}
+
+// rootGroups lists the top-level tree groups. A key/value store has no
+// functions and no views — every entry is a key.
+func (s *sidebar) rootGroups() []string {
+	var out []string
+	if !s.kv {
+		out = append(out, nodeFunctions)
+	}
+	out = append(out, nodeTables) // always shown, like TablePlus
+	if s.hasViews() {
+		out = append(out, nodeViews)
+	}
+	return out
 }
 
 // setInventory swaps the object list from the session and rebuilds the tree.
@@ -168,6 +196,7 @@ func (s *sidebar) setNoDatabase() {
 	s.loadErr = ""
 	s.objects = nil
 	s.filtered = nil
+	s.moreKeys = false
 	s.database = ""
 	if s.searchWrap != nil {
 		s.searchWrap.Hide()
@@ -192,6 +221,20 @@ func (s *sidebar) setLoadError(msg string) {
 	s.Refresh()
 }
 
+// resetSearch clears the search box without notifying the workspace. Used when
+// the session is replaced and its server-side key filter is already gone.
+func (s *sidebar) resetSearch() {
+	if s.search == nil || s.search.Text == "" {
+		return
+	}
+	s.suppressSearch = true
+	s.search.SetText("")
+	s.suppressSearch = false
+	if s.searchClear != nil {
+		s.searchClear.Hide()
+	}
+}
+
 // treeStatusText returns the overlay text (and whether to show it) for the
 // items tree in place of a bare empty group list: a load error, loading, an
 // empty database, or a no-match search.
@@ -210,6 +253,9 @@ func (s *sidebar) treeStatusText() (string, bool) {
 		return "无匹配「" + q + "」", true
 	}
 	if len(s.objects) == 0 {
+		if s.kv {
+			return "此数据库暂无键", true
+		}
 		return "此数据库暂无表", true
 	}
 	return "", false
@@ -243,7 +289,9 @@ func (s *sidebar) togglePin(name string) {
 
 func (s *sidebar) applyFilter() {
 	q := ""
-	if s.search != nil {
+	// A KV session filters keys on the server (the search text may be a glob),
+	// so re-applying substring matching here would drop valid hits.
+	if s.search != nil && !s.kv {
 		q = strings.ToLower(strings.TrimSpace(s.search.Text))
 	}
 	s.filtered = s.filtered[:0]
@@ -263,6 +311,54 @@ func (s *sidebar) applyFilter() {
 		}
 		return s.filtered[i].Name < s.filtered[j].Name
 	})
+}
+
+// childIDs lists the tree rows under id. KV inventories append a "load more"
+// row while the session holds a further key page.
+func (s *sidebar) childIDs(id string) []string {
+	switch id {
+	case "":
+		return s.rootGroups()
+	case nodeFunctions, nodeTables, nodeViews:
+		kind := "table"
+		if id == nodeViews {
+			kind = "view"
+		} else if id == nodeFunctions {
+			kind = "function"
+		}
+		var out []string
+		for _, o := range s.filtered {
+			if o.Kind == kind {
+				out = append(out, o.Name)
+			}
+		}
+		if id == nodeTables && s.kv && s.moreKeys {
+			out = append(out, nodeMore)
+		}
+		return out
+	}
+	return nil
+}
+
+// itemSecondary routes a right-click to the item menu. Group headers and the
+// KV "load more" pseudo row have "::" ids and are not objects.
+func (s *sidebar) itemSecondary(id string, pos fyne.Position) {
+	if s.onItemMenu == nil || id == "" || strings.HasPrefix(id, "::") {
+		return
+	}
+	s.onItemMenu(id, pos)
+}
+
+// setMoreKeys shows or hides the KV "load more" row.
+func (s *sidebar) setMoreKeys(more bool) {
+	if s.moreKeys == more {
+		return
+	}
+	s.moreKeys = more
+	if s.tree != nil {
+		s.tree.Refresh()
+	}
+	s.Refresh()
 }
 
 // leafIcon picks a light, type-specific glyph so tables, views and functions
@@ -302,11 +398,17 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 
 	s.search = widget.NewEntry()
 	s.search.PlaceHolder = "搜索表..."
+	if s.kv {
+		s.search.PlaceHolder = "搜索键（支持 * ? [）..."
+	}
 	sc := newToolButton(icons.Cancel, func() { s.search.SetText("") })
 	sc.small = true
 	s.searchClear = sc
 	s.searchClear.Hide()
-	s.search.OnChanged = func(string) {
+	s.search.OnChanged = func(text string) {
+		if s.suppressSearch {
+			return
+		}
 		if s.searchClear != nil {
 			if s.search.Text != "" {
 				s.searchClear.Show()
@@ -314,7 +416,10 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 				s.searchClear.Hide()
 			}
 		}
-		if s.loaded {
+		if s.onSearch != nil {
+			s.onSearch(text)
+		}
+		if s.loaded && !s.kv {
 			s.applyFilter()
 			s.tree.Refresh()
 		}
@@ -333,38 +438,13 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 	isBranch := func(id string) bool {
 		return id == "" || id == nodeFunctions || id == nodeTables || id == nodeViews
 	}
-	childUIDs := func(id string) []string {
-		switch id {
-		case "":
-			var out []string
-			out = append(out, nodeFunctions, nodeTables) // always shown, like TablePlus
-			if s.hasViews() {
-				out = append(out, nodeViews)
-			}
-			return out
-		case nodeFunctions, nodeTables, nodeViews:
-			kind := "table"
-			if id == nodeViews {
-				kind = "view"
-			} else if id == nodeFunctions {
-				kind = "function"
-			}
-			var out []string
-			for _, o := range s.filtered {
-				if o.Kind == kind {
-					out = append(out, o.Name)
-				}
-			}
-			return out
-		}
-		return nil
-	}
+	childUIDs := s.childIDs
 	s.tree = widget.NewTree(
 		childUIDs,
 		isBranch,
 		func(branch bool) fyne.CanvasObject {
 			it := newTreeItem()
-			it.onSecondary = s.onItemMenu
+			it.onSecondary = s.itemSecondary
 			// A row paints white text when it carries the current selection.
 			it.isSel = func() bool { return s.selID == it.id && it.id != "" }
 			// treeItem is the deepest object under the pointer and implements
@@ -386,7 +466,10 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 			it.id = id
 			if isBranch(id) {
 				it.icon.Resource = icons.Folder
-				it.setText(branchLabel(id))
+				it.setText(s.branchLabel(id))
+			} else if id == nodeMore {
+				it.icon.Resource = icons.Folder
+				it.setText(s.branchLabel(id))
 			} else {
 				it.icon.Resource = s.leafIcon(id)
 				it.setText(id)
@@ -396,6 +479,17 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 		},
 	)
 	s.tree.OnSelected = func(id string) {
+		if id == nodeMore {
+			// A pseudo row, not a selectable object: fire the load and drop
+			// the selection so it can be tapped again while paging.
+			s.selID = ""
+			s.tree.UnselectAll()
+			s.tree.Refresh()
+			if s.onMoreKeys != nil {
+				s.onMoreKeys()
+			}
+			return
+		}
 		s.selID = id
 		s.tree.Refresh() // repaint so the row's white-on-blue text follows
 		if !isBranch(id) && s.onSelect != nil {

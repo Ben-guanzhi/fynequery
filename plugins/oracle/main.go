@@ -4,11 +4,16 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 
 	goora "github.com/sijms/go-ora/v2"
+
+	"github.com/dbcore/dbcore/oracle"
+	"github.com/dbcore/dbcore/sqltext"
 
 	"fynequery/plugins/internal/pluginkit"
 	"fynequery/proto"
@@ -43,81 +48,34 @@ func (d oraDialect) Open(p proto.ConnectParams) (*sql.DB, string, error) {
 }
 
 func (oraDialect) ListTables(db *sql.DB) ([]proto.ObjectInfo, error) {
-	rows, err := db.Query(`
-		SELECT t.table_name, NVL(t.num_rows, -1)
-		FROM user_tables t
-		ORDER BY t.table_name`)
+	// An empty schema makes the dbcore reader use the session's current schema;
+	// row estimates come from ALL_TABLES.NUM_ROWS.
+	found, err := oracle.NewFromDB(db).ListTables(context.Background(), "")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []proto.ObjectInfo
-	for rows.Next() {
-		var name string
-		var n interface{}
-		if err := rows.Scan(&name, &n); err != nil {
-			return nil, err
-		}
-		out = append(out, proto.ObjectInfo{Name: name, Kind: "table",
-			Rows: pluginkit.Atoi64(n), ApproxRows: true})
+	out := make([]proto.ObjectInfo, 0, len(found))
+	for _, t := range found {
+		out = append(out, proto.ObjectInfo{
+			Name: t.Name, Kind: t.Type, Rows: t.Rows, ApproxRows: t.ApproxRows,
+		})
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	views, err := db.Query(`SELECT view_name FROM user_views ORDER BY view_name`)
-	if err != nil {
-		return out, nil // views are best effort
-	}
-	defer views.Close()
-	for views.Next() {
-		var name string
-		if err := views.Scan(&name); err != nil {
-			return out, nil
-		}
-		out = append(out, proto.ObjectInfo{Name: name, Kind: "view", Rows: -1})
-	}
-	return out, views.Err()
+	return out, nil
 }
 
 func (oraDialect) ListColumns(db *sql.DB, table string) ([]proto.ColumnInfo, error) {
-	rows, err := db.Query(`
-		SELECT column_name, data_type, nullable = 'Y'
-		FROM user_tab_columns
-		WHERE table_name = :1
-		ORDER BY column_id`, table)
+	// An empty schema makes the dbcore reader use the session's current schema.
+	found, err := oracle.NewFromDB(db).ListColumns(context.Background(), "", table)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []proto.ColumnInfo
-	for rows.Next() {
-		var c proto.ColumnInfo
-		if err := rows.Scan(&c.Name, &c.Type, &c.Nullable); err != nil {
-			return nil, err
+	out := make([]proto.ColumnInfo, 0, len(found))
+	for _, c := range found {
+		col := proto.ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable}
+		if c.IsPrimaryKey {
+			col.Key = "PK"
 		}
-		out = append(out, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	pks, err := scanStrings(db, `
-		SELECT cc.column_name
-		FROM user_constraints c
-		JOIN user_cons_columns cc ON cc.constraint_name = c.constraint_name
-		WHERE c.constraint_type = 'P' AND c.table_name = :1`, table)
-	if err != nil {
-		return out, nil // PK info is best effort
-	}
-	for _, pk := range pks {
-		for i := range out {
-			if out[i].Name == pk {
-				out[i].Key = "PK"
-			}
-		}
+		out = append(out, col)
 	}
 	return out, nil
 }
@@ -153,31 +111,10 @@ func (oraDialect) CreateDatabase(db *sql.DB, name, charset, collation string) er
 }
 
 func quoteOra(name string) string {
-	escaped := ""
-	for _, r := range name {
-		if r == '"' {
-			escaped += `"`
-		}
-		escaped += string(r)
+	if q, err := sqltext.QuoteIdent("oracle", name); err == nil {
+		return q
 	}
-	return `"` + escaped + `"`
-}
-
-func scanStrings(db *sql.DB, query string, args ...interface{}) ([]string, error) {
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, err
-		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 func main() { pluginkit.Main(oraDialect{}) }

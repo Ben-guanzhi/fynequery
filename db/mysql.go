@@ -8,13 +8,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
+	dbcoremysql "github.com/dbcore/dbcore/mysql"
+	"github.com/dbcore/dbcore"
+	"github.com/dbcore/dbcore/sqltext"
 
 	"fynequery/internal/sqlkit"
 	"fynequery/proto"
@@ -33,18 +34,31 @@ func (mysqlDialer) Connect(p proto.ConnectParams) (Session, error) {
 	if port == "" {
 		port = "3306"
 	}
-	cfg := mysql.NewConfig()
-	cfg.User = p.User
-	cfg.Passwd = p.Password
-	cfg.Net = "tcp"
-	cfg.Addr = net.JoinHostPort(p.Host, port)
-	cfg.DBName = p.Database
-	cfg.Timeout = 10 * time.Second
-	cfg.ReadTimeout = sqlkit.Timeout
-	cfg.Collation = "utf8mb4_general_ci"
-	cfg.Params = map[string]string{"charset": "utf8mb4"}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		return nil, fmt.Errorf("mysql: bad port %q: %w", port, err)
+	}
+	// The DSN comes from the shared kernel so this client and TableProGo cannot
+	// drift on quoting, TLS mapping or timeout parameters. The values below are
+	// fynequery's own session policy (statement timeout, utf8mb4, no cert
+	// verification for "required" TLS), passed as a ConnSpec.
+	spec := dbcore.ConnSpec{
+		Kind:           dbcore.KindMySQL,
+		Host:           p.Host,
+		Port:           portNum,
+		User:           p.User,
+		Password:       p.Password,
+		Database:       p.Database,
+		SSLMode:        p.Options["sslmode"],
+		ConnectTimeout: 10 * time.Second,
+		Params: map[string]string{
+			"charset":     "utf8mb4",
+			"collation":   "utf8mb4_general_ci",
+			"readTimeout": sqlkit.Timeout.String(),
+		},
+	}
 
-	handle, err := sql.Open("mysql", cfg.FormatDSN())
+	handle, err := sql.Open(dbcoremysql.DriverName, dbcoremysql.DSN(spec))
 	if err != nil {
 		return nil, fmt.Errorf("mysql: %w", err)
 	}
@@ -53,7 +67,7 @@ func (mysqlDialer) Connect(p proto.ConnectParams) (Session, error) {
 	defer cancel()
 	if err := handle.PingContext(ctx); err != nil {
 		handle.Close()
-		return nil, fmt.Errorf("mysql %s: %w", cfg.Addr, err)
+		return nil, fmt.Errorf("mysql %s: %w", spec.Addr(), err)
 	}
 
 	s := &mysqlSession{db: handle}
@@ -122,6 +136,9 @@ func buildCreateDatabaseSQL(name string, opts map[string]string) (string, error)
 
 // quoteIdent backtick-quotes a SQL identifier, escaping embedded backticks.
 func quoteIdent(name string) string {
+	if q, err := sqltext.QuoteIdent("mysql", name); err == nil {
+		return q
+	}
 	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
 }
 
@@ -150,62 +167,35 @@ func (s *mysqlSession) scalar(q string, args ...interface{}) (*string, error) {
 }
 
 func (s *mysqlSession) Tables() ([]proto.ObjectInfo, error) {
-	rows, err := s.db.Query(`
-		SELECT table_name,
-		       IFNULL(table_rows, -1),
-		       IF(table_type = 'VIEW', 1, 0)
-		FROM information_schema.tables
-		WHERE table_schema = DATABASE()
-		ORDER BY table_type, table_name`)
+	// An empty schema resolves to DATABASE(), which is what the session is bound to.
+	found, err := dbcoremysql.NewFromDB(s.db).ListTables(context.Background(), "")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []proto.ObjectInfo
-	for rows.Next() {
-		var name string
-		var n sql.NullInt64
-		var isView bool
-		if err := rows.Scan(&name, &n, &isView); err != nil {
-			return nil, err
-		}
-		obj := proto.ObjectInfo{Name: name, Rows: n.Int64, ApproxRows: true}
-		if isView {
-			obj.Kind = "view"
-			obj.Rows = -1
-		} else {
-			obj.Kind = "table"
-		}
-		out = append(out, obj)
+	out := make([]proto.ObjectInfo, 0, len(found))
+	for _, t := range found {
+		out = append(out, proto.ObjectInfo{
+			Name: t.Name, Kind: t.Type, Rows: t.Rows, ApproxRows: t.ApproxRows,
+		})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *mysqlSession) Columns(table string) ([]proto.ColumnInfo, error) {
-	rows, err := s.db.Query(`
-		SELECT column_name, data_type, is_nullable = 'YES', IFNULL(column_key, '')
-		FROM information_schema.columns
-		WHERE table_schema = DATABASE() AND table_name = ?
-		ORDER BY ordinal_position`, table)
+	// DATABASE() is the schema, so an empty schema resolves to the connected DB.
+	found, err := dbcoremysql.NewFromDB(s.db).ListColumns(context.Background(), "", table)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []proto.ColumnInfo
-	for rows.Next() {
-		var c proto.ColumnInfo
-		var key string
-		if err := rows.Scan(&c.Name, &c.Type, &c.Nullable, &key); err != nil {
-			return nil, err
+	out := make([]proto.ColumnInfo, 0, len(found))
+	for _, c := range found {
+		col := proto.ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable}
+		if c.IsPrimaryKey {
+			col.Key = "PK"
 		}
-		if key == "PRI" {
-			c.Key = "PK"
-		}
-		out = append(out, c)
+		out = append(out, col)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *mysqlSession) Query(sqlText string, maxRows int) (proto.QueryResult, error) {
@@ -645,5 +635,16 @@ func buildInsert(table string, values map[string]*string) (string, []interface{}
 }
 
 func quoteMySQL(name string) string {
-	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+	return quoteIdent(name)
+}
+
+// ListIndexes implements IndexLister through the shared kernel driver, so the
+// Indexes pane never has to know information_schema.STATISTICS' layout (nor its
+// inline-literal quoting rules).
+func (s *mysqlSession) ListIndexes(schema, table string) ([]dbcore.IndexInfo, error) {
+	drv, ok := dbcoremysql.NewFromDB(s.db).AsSQL()
+	if !ok {
+		return nil, dbcore.ErrNotSupported
+	}
+	return drv.ListIndexes(context.Background(), schema, table)
 }

@@ -12,6 +12,9 @@ import (
 
 	_ "github.com/microsoft/go-mssqldb" // registers the "sqlserver" driver
 
+	"github.com/dbcore/dbcore/mssql"
+	"github.com/dbcore/dbcore/sqltext"
+
 	"fynequery/plugins/internal/pluginkit"
 	"fynequery/proto"
 )
@@ -84,81 +87,34 @@ func isLegacyTLSErr(err error) bool {
 }
 
 func (msDialect) ListTables(db *sql.DB) ([]proto.ObjectInfo, error) {
-	rows, err := db.Query(`
-		SELECT name, row_count, is_view FROM (
-			SELECT t.name AS name,
-			       CAST(SUM(p.rows) AS bigint) AS row_count,
-			       0 AS is_view
-			FROM sys.tables t
-			JOIN sys.partitions p ON p.[object_id] = t.[object_id] AND p.index_id IN (0, 1)
-			GROUP BY t.name
-			UNION ALL
-			SELECT v.name, CAST(-1 AS bigint), 1 FROM sys.views v
-		) x
-		ORDER BY is_view, name`)
+	// An empty schema makes the dbcore reader use the login's default schema;
+	// row counts come from sys.partitions.
+	found, err := mssql.NewFromDB(db).ListTables(context.Background(), "")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []proto.ObjectInfo
-	for rows.Next() {
-		var name string
-		var n interface{}
-		var isView bool
-		if err := rows.Scan(&name, &n, &isView); err != nil {
-			return nil, err
-		}
-		obj := proto.ObjectInfo{Name: name, Rows: pluginkit.Atoi64(n), ApproxRows: true}
-		if isView {
-			obj.Kind, obj.Rows = "view", -1
-		} else {
-			obj.Kind = "table"
-		}
-		out = append(out, obj)
+	out := make([]proto.ObjectInfo, 0, len(found))
+	for _, t := range found {
+		out = append(out, proto.ObjectInfo{
+			Name: t.Name, Kind: t.Type, Rows: t.Rows, ApproxRows: t.ApproxRows,
+		})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (msDialect) ListColumns(db *sql.DB, table string) ([]proto.ColumnInfo, error) {
-	rows, err := db.Query(`
-		SELECT c.name, tp.name, c.is_nullable
-		FROM sys.columns c
-		JOIN sys.types tp ON tp.user_type_id = c.user_type_id
-		WHERE c.[object_id] = OBJECT_ID(@p1)
-		ORDER BY c.column_id`, table)
+	// An empty schema makes the dbcore reader use the login's default schema.
+	found, err := mssql.NewFromDB(db).ListColumns(context.Background(), "", table)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []proto.ColumnInfo
-	for rows.Next() {
-		var c proto.ColumnInfo
-		if err := rows.Scan(&c.Name, &c.Type, &c.Nullable); err != nil {
-			return nil, err
+	out := make([]proto.ColumnInfo, 0, len(found))
+	for _, c := range found {
+		col := proto.ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable}
+		if c.IsPrimaryKey {
+			col.Key = "PK"
 		}
-		out = append(out, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	pks, err := scanStrings(db, `
-		SELECT c.name
-		FROM sys.indexes i
-		JOIN sys.index_columns ic ON ic.[object_id] = i.[object_id] AND ic.index_id = i.index_id
-		JOIN sys.columns c ON c.[object_id] = ic.[object_id] AND c.column_id = ic.column_id
-		WHERE i.is_primary_key = 1 AND i.[object_id] = OBJECT_ID(@p1)`, table)
-	if err != nil {
-		return out, nil // PK info is best effort
-	}
-	for _, pk := range pks {
-		for i := range out {
-			if strings.EqualFold(out[i].Name, pk) {
-				out[i].Key = "PK"
-			}
-		}
+		out = append(out, col)
 	}
 	return out, nil
 }
@@ -172,6 +128,9 @@ func (msDialect) BrowseSQL(table string, limit int) string {
 // QuoteIdent quotes a SQL Server identifier with square brackets (escaping
 // embedded brackets). Used by the shared DML builders in pluginkit.
 func (msDialect) QuoteIdent(name string) string {
+	if q, err := sqltext.QuoteIdent("mssql", name); err == nil {
+		return q
+	}
 	quoted := strings.ReplaceAll(name, "]", "]]")
 	return "[" + quoted + "]"
 }
@@ -203,23 +162,6 @@ func (msDialect) CreateDatabase(db *sql.DB, name, _, _ string) error {
 		return fmt.Errorf("sqlserver create database %q: %w", name, err)
 	}
 	return nil
-}
-
-func scanStrings(db *sql.DB, query string, args ...interface{}) ([]string, error) {
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, err
-		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
 }
 
 func main() { pluginkit.Main(msDialect{}) }

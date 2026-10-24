@@ -96,7 +96,7 @@ func startSSHServer(t *testing.T, hostSigner ssh.Signer, clientPub ssh.PublicKey
 						_ = ch.Reject(ssh.ConnectionFailed, "bad payload")
 						continue
 					}
-					remote, err := net.Dial("tcp", fmt.Sprintf("%s:%d", req.HostToConnect, req.PortToConnect))
+					remote, err := net.Dial("tcp", net.JoinHostPort(req.HostToConnect, strconv.Itoa(int(req.PortToConnect))))
 					if err != nil {
 						_ = ch.Reject(ssh.ConnectionFailed, err.Error())
 						continue

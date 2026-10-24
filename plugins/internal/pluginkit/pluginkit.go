@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -94,26 +92,6 @@ func OpenVerify(driverName, dsn, versionQuery string) (*sql.DB, string, error) {
 		return handle, *s, nil
 	}
 	return handle, "", nil
-}
-
-// Atoi64 converts a scanned numeric-ish value (int64, float64, string, []byte)
-// to int64; -1 when nil or unparseable (drivers disagree on NUMBER types).
-func Atoi64(v interface{}) int64 {
-	switch x := v.(type) {
-	case int64:
-		return x
-	case float64:
-		return int64(x)
-	case []byte:
-		if n, err := strconv.ParseInt(strings.TrimSpace(string(x)), 10, 64); err == nil {
-			return n
-		}
-	case string:
-		if n, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64); err == nil {
-			return n
-		}
-	}
-	return -1
 }
 
 type handler struct {

@@ -104,7 +104,9 @@ type workspace struct {
 	findCounterLabel *widget.Label     // "cur/total" counter for the data-grid find box
 	filterBtn        *flatButton       // bottom-bar Filter button (shows an active-filter dot)
 	loadingMu        sync.Mutex
-	loadingGen       int // generation counter to discard stale async results
+	loadingGen       int         // generation counter to discard stale async results
+	searchTimer      *time.Timer // pending KV key-filter debounce
+	searchSeq        int         // drops a debounced filter overtaken by newer typing
 	// toolbar
 	ribbon        *serverRibbon     // connection ribbon (opens the connection picker)
 	ribbonTLS     string            // TLS version shown in the ribbon ("" = omit)
@@ -142,7 +144,9 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 	// without a default database so the workspace starts in the "未选择数据库"
 	// state; fall back to the given (database-bound) session if that fails
 	// (e.g. drivers that require a database to connect).
-	if conn.Database != "" {
+	// Redis has no server-level connection distinct from DB 0; re-dialing
+	// without the database would silently drop the requested logical DB.
+	if conn.Database != "" && conn.Driver != "redis" {
 		serverConn := conn
 		serverConn.Database = ""
 		if ss, err := dialConn(serverConn); err == nil {
@@ -466,6 +470,11 @@ func (ws *workspace) switchDatabase(name string) {
 	ws.updateBanner()
 	ws.logf("已选择数据库 %s", name)
 	ws.syncChrome() // blank center until a table is opened
+	if ws.conn.Driver == "redis" {
+		// The new session starts with an empty pattern; silently clearing the
+		// box avoids a search text that no longer filters anything.
+		ws.side.resetSearch()
+	}
 	ws.loadInventory()
 	ws.loadDatabases()
 	ws.loadTLS()
@@ -520,8 +529,13 @@ func (ws *workspace) startKeepAlive() {
 				continue
 			}
 			// A successful ping keeps the socket open; errors are swallowed
-			// (the next tick retries). SELECT 1 is universal across drivers.
+			// (the next tick retries). KV sessions answer with their own PING:
+			// "SELECT 1" would mean something else entirely in Redis.
 			safeGo("keepalive", func() {
+				if p, ok := db.AsPinger(sess); ok {
+					_ = p.Ping()
+					return
+				}
 				_, _ = sess.Query("SELECT 1", 1)
 			})
 		}
@@ -544,6 +558,7 @@ func (ws *workspace) reconnect() db.Session {
 	}
 	ws.setSession(sess)
 	ws.conn = newConn
+	ws.applyKeyFilter(sess)
 	ws.loadTLS()
 	return sess
 }
@@ -667,10 +682,13 @@ func (ws *workspace) build() fyne.CanvasObject {
 	ws.side.onDBPick = func(name string) { ws.switchDatabase(name) }
 	ws.side.onNewDB = func() { ws.newDatabase() }
 	ws.side.onItemMenu = func(name string, pos fyne.Position) { ws.showItemMenu(name, pos) }
+	ws.side.onMoreKeys = ws.loadMoreKeys
+	ws.side.onSearch = ws.onSidebarSearch
 	ws.side.onQueryRun = func(q SavedQuery) { ws.openSavedQuery(q, true) }
 	ws.side.onQueryOpen = func(q SavedQuery) { ws.openSavedQuery(q, false) }
 	ws.side.onQuerySave = func() { ws.saveCurrentQuery() }
 	ws.side.onQueryMenu = func(q SavedQuery, pos fyne.Position) { ws.showQueryMenu(q, pos) }
+	ws.side.kv = ws.conn.Driver == "redis"
 	ws.sideWrap = newPanelBackground(ws.side, func() color.Color { return pal().sidebarBG })
 
 	// ---- status bar + grid (empty until a table is opened) ----
@@ -749,6 +767,8 @@ func (ws *workspace) fetchFunctions() []TableInfo {
 	}
 	var q string
 	switch ws.conn.Driver {
+	case "redis":
+		return nil // keyspace, not routines
 	case "postgres", "postgresql":
 		q = "SELECT routine_name FROM information_schema.routines " +
 			"WHERE routine_schema = current_schema() AND routine_type = 'FUNCTION' ORDER BY routine_name"
@@ -796,6 +816,11 @@ func (ws *workspace) loadInventory() {
 			}
 			list = append(list, ws.fetchFunctions()...)
 			ws.side.setInventory(list, ws.currentDB)
+			if kp, ok := db.AsKeyPager(ws.sess); ok {
+				ws.side.setMoreKeys(kp.MoreKeys())
+			} else {
+				ws.side.setMoreKeys(false)
+			}
 			if srv := ws.sess.Server(); srv != "" {
 				ws.window.SetTitle("TablePro — " + ws.conn.Name + " — " + srv)
 			}
@@ -803,6 +828,78 @@ func (ws *workspace) loadInventory() {
 			// Like TablePlus: selecting a database only loads the tree — the
 			// center stays blank until the user opens a table.
 			ws.syncChrome()
+		})
+	})
+}
+
+// sidebarSearchDelay debounces KV key filtering: every keystroke would
+// otherwise trigger a server-side scan over the whole keyspace.
+const sidebarSearchDelay = 250 * time.Millisecond
+
+// onSidebarSearch forwards the sidebar query to sessions that filter their
+// inventory on the server (KV stores). It is a no-op for SQL sessions, whose
+// search stays a local filter over the loaded table list.
+func (ws *workspace) onSidebarSearch(text string) {
+	sess := ws.liveSession()
+	kf, ok := sess.(db.KeyFilter)
+	if !ok {
+		return
+	}
+	ws.loadingMu.Lock()
+	ws.searchSeq++
+	seq := ws.searchSeq
+	if ws.searchTimer != nil {
+		ws.searchTimer.Stop()
+	}
+	ws.searchTimer = time.AfterFunc(sidebarSearchDelay, func() {
+		safeDo(func() {
+			ws.loadingMu.Lock()
+			stale := seq != ws.searchSeq
+			ws.loadingMu.Unlock()
+			// A replaced session (database switch, reconnect) owns a fresh,
+			// unfiltered keyspace; its filter is set at swap time instead.
+			if stale || ws.liveSession() != sess {
+				return
+			}
+			kf.SetKeyFilter(text)
+			ws.loadInventory()
+		})
+	})
+	ws.loadingMu.Unlock()
+}
+
+// applyKeyFilter re-applies the sidebar search to a freshly dialled KV session
+// so a reconnect keeps the key inventory the user was looking at.
+func (ws *workspace) applyKeyFilter(sess db.Session) {
+	kf, ok := sess.(db.KeyFilter)
+	if !ok || ws.side == nil || ws.side.search == nil {
+		return
+	}
+	kf.SetKeyFilter(ws.side.search.Text)
+}
+
+// loadMoreKeys appends the next key page (KV only) and feeds the sidebar. The
+// session keeps the SCAN cursor, so repeated calls walk the whole keyspace
+// without rescanning the keys already shown.
+func (ws *workspace) loadMoreKeys() {
+	sess := ws.liveSession()
+	kp, ok := db.AsKeyPager(sess)
+	if !ok || !kp.MoreKeys() {
+		return
+	}
+	safeGo("loadMoreKeys", func() {
+		_, _, err := kp.LoadMoreKeys()
+		safeDo(func() {
+			if ws.liveSession() != sess {
+				return
+			}
+			if err != nil {
+				showInfo(ws.window, "加载更多键", err.Error())
+				return
+			}
+			// The page is now in the session cache, so this re-render is cheap
+			// (no extra scan) and also refreshes the "load more" row.
+			ws.loadInventory()
 		})
 	})
 }
@@ -1696,6 +1793,17 @@ func (ws *workspace) showTab(i int) {
 	ws.content.Refresh()
 }
 
+// closeDataTabNamed closes the data tab named name (a deleted or renamed key),
+// reporting whether such a tab was open.
+func (ws *workspace) closeDataTabNamed(name string) bool {
+	idx := ws.dataDocIndex(name)
+	if idx < 0 {
+		return false
+	}
+	ws.closeTab(idx)
+	return true
+}
+
 // openTable opens a table (or view) in a document tab. A table that already
 // has a tab is brought to the front with its grid/paging restored; otherwise a
 // new closable tab is created and its first page loaded.
@@ -1902,8 +2010,12 @@ func (ws *workspace) loadStructureTab(t *dataTableTab, sess db.Session) {
 	})
 }
 
-// loadIndexesTab fetches index metadata for a tab's Indexes pane.
+// loadIndexesTab fetches index metadata for a tab's Indexes pane. Key/value
+// sessions have no SQL indexes, and asking would just log a server error.
 func (ws *workspace) loadIndexesTab(t *dataTableTab, sess db.Session) {
+	if _, ok := db.AsKeyAdmin(sess); ok {
+		return
+	}
 	name := t.name
 	gen := t.gen
 	safeGo("indexes "+name, func() {

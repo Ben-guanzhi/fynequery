@@ -343,8 +343,15 @@ func (ws *workspace) prepGrid(g *dataTable) {
 		ws.refreshRowDetails()
 	}
 	g.onRowSelect = func(int) { ws.refreshRowDetails() }
+	if _, ok := db.AsValueWriter(ws.sess); ok {
+		g.kvEdit = func(row, col int) bool { return ws.tryKVEdit(g, row, col) }
+	} else {
+		g.kvEdit = nil
+	}
 	ws.applyHidden(g)
-	if ws.editMode {
+	// KV grids never enter SQL edit mode (writes are immediate, see editKVValue),
+	// even while a previous table left the mode on.
+	if ws.editMode && g.kvEdit == nil {
 		g.setEditable(true)
 	}
 }
@@ -365,6 +372,11 @@ func (ws *workspace) gotoTable(table, column, value string) {
 func (ws *workspace) toggleEditMode() {
 	if ws.tableName == "" || ws.grid == nil {
 		showInfo(ws.window, "Edit", "Open a table first.")
+		return
+	}
+	if _, ok := db.AsValueWriter(ws.sess); ok {
+		showInfo(ws.window, "编辑",
+			"键/值连接不使用编辑模式：双击值单元格，或点击右侧详情里的值，即可直接写入。")
 		return
 	}
 	if !ws.grid.hasPK() {
@@ -434,12 +446,18 @@ func (ws *workspace) refreshRowDetails() {
 	}
 	vals := g.rowValues(g.selRow)
 	fields := make([]detailsField, 0, len(g.data.Cols))
+	// A KV element's identity cell names the element, so it is not writable in
+	// place; the value cell next to it is (straight to the server, no commit).
+	_, kvWrite := db.AsValueWriter(ws.sess)
 	for i, col := range g.data.Cols {
 		var v *string
 		if i < len(vals) {
 			v = vals[i]
 		}
-		fields = append(fields, detailsField{Name: col.Name, Type: col.Type, Value: v, Col: i})
+		fields = append(fields, detailsField{
+			Name: col.Name, Type: col.Type, Value: v, Col: i,
+			ReadOnly: kvWrite && col.Key == "PK",
+		})
 	}
 	ws.details.setRow(fields)
 }
@@ -477,6 +495,10 @@ func (ws *workspace) editRowField(col int) {
 	if g == nil || g.data == nil || g.selRow < 0 {
 		return
 	}
+	if w, ok := db.AsValueWriter(ws.sess); ok {
+		ws.editKVValue(w, g, g.selRow, col)
+		return
+	}
 	if !ws.editMode && !g.hasPK() {
 		ws.viewRowField(col)
 		return
@@ -507,10 +529,137 @@ func (ws *workspace) setRowField(col int, v *string) {
 	if g == nil || g.data == nil || g.selRow < 0 {
 		return
 	}
+	if w, ok := db.AsValueWriter(ws.sess); ok {
+		// KV stores have no NULL/DEFAULT; EMPTY is just the empty string.
+		if v == nil || *v == db.DefaultMarker {
+			showInfo(ws.window, "Quick value", "键/值连接不支持 NULL/DEFAULT；EMPTY 会写入空字符串。")
+			return
+		}
+		if edit, ok := kvEditFor(ws.tableName, g, g.selRow, col, *v); ok {
+			desc := fmt.Sprintf("写入 %s 的 %s（%s=%s）", edit.Key, edit.Column, edit.Identity, edit.ID)
+			gateSafeMode(ws.window, ws.conn, desc, func() {
+				ws.writeKVEdit(w, edit)
+			})
+		}
+		return
+	}
 	if !ws.ensureEditable() {
 		return
 	}
 	g.setCell(g.selRow, col, v)
+}
+
+// kvIdentity returns the identity column name and the row's value for it. KV
+// sessions mark the element identity as PK; a string key's identity is the key.
+func kvIdentity(g *dataTable, row int) (name, value string) {
+	if g == nil || g.data == nil || row < 0 || row >= len(g.data.Rows) {
+		return "", ""
+	}
+	for i, c := range g.data.Cols {
+		if c.Key != "PK" {
+			continue
+		}
+		if i < len(g.data.Rows[row]) && g.data.Rows[row][i] != nil {
+			return c.Name, *g.data.Rows[row][i]
+		}
+		return c.Name, ""
+	}
+	return "", ""
+}
+
+// kvEditFor builds the element write for one cell; ok is false for identity
+// cells (which name the element and cannot be renamed in place).
+func kvEditFor(key string, g *dataTable, row, col int, value string) (db.ValueEdit, bool) {
+	if g == nil || g.data == nil || row < 0 || row >= len(g.data.Rows) || col < 0 || col >= len(g.data.Cols) {
+		return db.ValueEdit{}, false
+	}
+	c := g.data.Cols[col]
+	if c.Key == "PK" {
+		return db.ValueEdit{}, false
+	}
+	idCol, id := kvIdentity(g, row)
+	return db.ValueEdit{Key: key, Identity: idCol, ID: id, Column: c.Name, Value: value}, true
+}
+
+// writeKVEdit sends one element write and reloads the page so the grid shows
+// what the server now stores.
+func (ws *workspace) writeKVEdit(w db.ValueWriter, edit db.ValueEdit) {
+	safeGo("kv write", func() {
+		err := w.SetValue(edit)
+		safeDo(func() {
+			if err != nil {
+				dialog.NewError(err, ws.window).Show()
+				return
+			}
+			ws.logf("已写入 %s（%s）", edit.Key, edit.Column)
+			ws.reloadTable()
+		})
+	})
+}
+
+// editKVValue opens the one-shot editor for a KV element. There is no edit
+// mode, no NULL and no batch: confirming writes to the server immediately,
+// behind the connection's Safe Mode gate.
+func (ws *workspace) editKVValue(w db.ValueWriter, g *dataTable, row, col int) {
+	if g == nil || g.data == nil || row < 0 || row >= len(g.data.Rows) || col < 0 || col >= len(g.data.Cols) {
+		return
+	}
+	cur := ""
+	if vals := g.rowValues(row); col < len(vals) && vals[col] != nil {
+		cur = *vals[col]
+	}
+	edit, ok := kvEditFor(ws.tableName, g, row, col, cur)
+	if !ok {
+		showInfo(ws.window, "Edit", "标识列（行标识）不可直接修改。")
+		return
+	}
+	title := "Edit " + edit.Column + " — " + edit.Key
+	if edit.ID != "" && edit.Identity != "key" {
+		title += "（" + edit.Identity + "=" + edit.ID + "）"
+	}
+	desc := fmt.Sprintf("写入 %s 的 %s（%s=%s）", edit.Key, edit.Column, edit.Identity, edit.ID)
+	showKVValueDialog(ws.window, title, cur, func(v string) {
+		e := edit
+		e.Value = v
+		gateSafeMode(ws.window, ws.conn, desc, func() {
+			ws.writeKVEdit(w, e)
+		})
+	})
+}
+
+// tryKVEdit handles a double-click on a key/value grid. It reports false for
+// identity cells so the caller falls back to Quick Look.
+func (ws *workspace) tryKVEdit(g *dataTable, row, col int) bool {
+	w, ok := db.AsValueWriter(ws.sess)
+	if !ok {
+		return false
+	}
+	if _, ok := kvEditFor(ws.tableName, g, row, col, ""); !ok {
+		return false
+	}
+	ws.editKVValue(w, g, row, col)
+	return true
+}
+
+// showKVValueDialog opens a one-shot element editor (no NULL checkbox: Redis
+// values are always text, the empty string is a valid value).
+func showKVValueDialog(w fyne.Window, title, raw string, onSet func(string)) {
+	entry := widget.NewMultiLineEntry()
+	entry.SetText(raw)
+	entry.TextStyle.Monospace = true
+	var dlg dialog.Dialog
+	setBtn := widget.NewButton("Set", func() {
+		dlg.Hide()
+		onSet(entry.Text)
+	})
+	setBtn.Importance = widget.HighImportance
+	cancelBtn := widget.NewButton("Cancel", func() { dlg.Hide() })
+	body := container.NewBorder(nil,
+		container.NewHBox(layout.NewSpacer(), cancelBtn, setBtn),
+		nil, nil, entry)
+	dlg = dialog.NewCustom(title, "", body, w)
+	dlg.Resize(fyne.NewSize(480, 320))
+	dlg.Show()
 }
 
 // ensureEditable turns on edit mode (auto-enabling it when the table has a
@@ -658,8 +807,17 @@ func (ws *workspace) rollbackEdits() {
 		}, ws.window).Show()
 }
 
-// markRowDeleted flags the selected row for deletion (bottom-bar "− Row").
+// markRowDeleted flags the selected row for deletion (bottom-bar "− Row"). KV
+// sessions have no delete mode: the element is removed on the server at once.
 func (ws *workspace) markRowDeleted() {
+	if _, ok := db.AsValueDeleter(ws.sess); ok {
+		ws.deleteKVRow()
+		return
+	}
+	if _, ok := db.AsValueWriter(ws.sess); ok {
+		showInfo(ws.window, "Delete Row", "键/值连接不支持行删除：请在查询编辑器中执行 DEL/HDEL 等命令。")
+		return
+	}
 	if !ws.editMode || ws.grid == nil {
 		showInfo(ws.window, "Delete Row", "Enable edit mode first.")
 		return
@@ -668,6 +826,80 @@ func (ws *workspace) markRowDeleted() {
 		showInfo(ws.window, "Delete Row", "Select a row first.")
 	}
 	ws.refreshTxnBar()
+}
+
+// deleteKVRow removes the selected element (HDEL/SREM/ZREM/XDEL) after
+// confirmation, behind Safe Mode. Lists are index-addressed and a string's
+// element is the key itself, so both point at the key-level delete instead.
+func (ws *workspace) deleteKVRow() {
+	d, ok := db.AsValueDeleter(ws.sess)
+	if !ok {
+		showInfo(ws.window, "Delete Element", "此连接不支持删除元素。")
+		return
+	}
+	g := ws.grid
+	if g == nil || g.data == nil || g.selRow < 0 || g.selRow >= len(g.data.Rows) {
+		showInfo(ws.window, "Delete Element", "Select a row first.")
+		return
+	}
+	edit, ok := kvDeleteFor(ws.tableName, g, g.selRow)
+	if !ok {
+		if idCol, _ := kvIdentity(g, g.selRow); idCol == "index" {
+			showInfo(ws.window, "Delete Element",
+				"列表元素按索引定位，无法按标识删除；请在查询编辑器中用 LREM 按值删除。")
+		} else {
+			showInfo(ws.window, "Delete Element", "字符串键的元素就是键本身，请使用「删除键…」。")
+		}
+		return
+	}
+	desc := fmt.Sprintf("删除 %s 的 %s=%s", edit.Key, edit.Identity, edit.ID)
+	dialog.NewConfirm("删除元素 — "+edit.Key,
+		fmt.Sprintf("删除 %s 的 %s=%s？此操作不可撤销。", edit.Key, edit.Identity, edit.ID),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			gateSafeMode(ws.window, ws.conn, desc, func() {
+				ws.writeKVDelete(d, edit)
+			})
+		}, ws.window).Show()
+}
+
+// kvDeleteFor builds the element delete for one grid row; ok is false for
+// identities the driver cannot address (list index, string key).
+func kvDeleteFor(key string, g *dataTable, row int) (db.ValueEdit, bool) {
+	if g == nil || g.data == nil || row < 0 || row >= len(g.data.Rows) {
+		return db.ValueEdit{}, false
+	}
+	idCol, id := kvIdentity(g, row)
+	switch idCol {
+	case "field", "member", "entry":
+		return db.ValueEdit{Key: key, Identity: idCol, ID: id}, true
+	default:
+		return db.ValueEdit{}, false
+	}
+}
+
+// writeKVDelete removes one element and reloads the grid. Redis drops a key
+// when its last element goes, so a vanished key closes its tab and refreshes
+// the sidebar instead of reloading an empty grid.
+func (ws *workspace) writeKVDelete(d db.ValueDeleter, edit db.ValueEdit) {
+	safeGo("kv delete", func() {
+		err := d.DeleteValue(edit)
+		safeDo(func() {
+			if err != nil {
+				dialog.NewError(err, ws.window).Show()
+				return
+			}
+			ws.logf("已删除 %s 的 %s=%s", edit.Key, edit.Identity, edit.ID)
+			if _, err := ws.sess.Columns(edit.Key); err != nil {
+				ws.closeDataTabNamed(edit.Key)
+				ws.loadInventory()
+				return
+			}
+			ws.reloadTable()
+		})
+	})
 }
 
 // showInsertRowDialog builds a form of column entries and inserts a row with

@@ -8,8 +8,12 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strings"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver
+
+	"github.com/dbcore/dbcore/postgres"
+	"github.com/dbcore/dbcore/sqltext"
 
 	"fynequery/plugins/internal/pluginkit"
 	"fynequery/proto"
@@ -54,79 +58,35 @@ func (d pgDialect) Open(p proto.ConnectParams) (*sql.DB, string, error) {
 }
 
 func (pgDialect) ListTables(db *sql.DB) ([]proto.ObjectInfo, error) {
-	rows, err := db.Query(`
-		SELECT c.relname,
-		       CASE WHEN c.relkind = 'v' THEN 1 ELSE 0 END,
-		       GREATEST(CAST(c.reltuples AS bigint), -1)
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = current_schema()
-		  AND c.relkind IN ('r', 'p', 'v')
-		ORDER BY 2, c.relname`)
+	// The dbcore reader resolves current_schema() when the schema is empty and
+	// reports row estimates from pg_class.reltuples.
+	found, err := postgres.NewFromDB(db).ListTables(context.Background(), "")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []proto.ObjectInfo
-	for rows.Next() {
-		var name string
-		var isView bool
-		var n interface{}
-		if err := rows.Scan(&name, &isView, &n); err != nil {
-			return nil, err
-		}
-		obj := proto.ObjectInfo{Name: name, Rows: pluginkit.Atoi64(n), ApproxRows: true}
-		if isView {
-			obj.Kind, obj.Rows = "view", -1
-		} else {
-			obj.Kind = "table"
-		}
-		out = append(out, obj)
+	out := make([]proto.ObjectInfo, 0, len(found))
+	for _, t := range found {
+		out = append(out, proto.ObjectInfo{
+			Name: t.Name, Kind: t.Type, Rows: t.Rows, ApproxRows: t.ApproxRows,
+		})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (pgDialect) ListColumns(db *sql.DB, table string) ([]proto.ColumnInfo, error) {
-	rows, err := db.Query(`
-		SELECT c.column_name, c.data_type, c.is_nullable = 'YES'
-		FROM information_schema.columns c
-		WHERE c.table_schema = current_schema() AND c.table_name = $1
-		ORDER BY c.ordinal_position`, table)
+	// The dbcore reader resolves current_schema() itself and returns comments
+	// and primary-key flags in the shared shape.
+	found, err := postgres.NewFromDB(db).ListColumns(context.Background(), "", table)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []proto.ColumnInfo
-	for rows.Next() {
-		var c proto.ColumnInfo
-		if err := rows.Scan(&c.Name, &c.Type, &c.Nullable); err != nil {
-			return nil, err
+	out := make([]proto.ColumnInfo, 0, len(found))
+	for _, c := range found {
+		col := proto.ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable}
+		if c.IsPrimaryKey {
+			col.Key = "PK"
 		}
-		out = append(out, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	pks, err := scanStrings(db, `
-		SELECT kcu.column_name
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu
-		  ON kcu.constraint_name = tc.constraint_name
-		 AND kcu.table_schema = tc.table_schema
-		WHERE tc.constraint_type = 'PRIMARY KEY'
-		  AND tc.table_schema = current_schema() AND tc.table_name = $1`, table)
-	if err != nil {
-		return out, nil // PK info is best effort
-	}
-	for _, pk := range pks {
-		for i := range out {
-			if out[i].Name == pk {
-				out[i].Key = "PK"
-			}
-		}
+		out = append(out, col)
 	}
 	return out, nil
 }
@@ -156,31 +116,10 @@ func (pgDialect) Metrics(db *sql.DB) ([]proto.Metric, error) {
 }
 
 func quotePG(name string) string {
-	escaped := ""
-	for _, r := range name {
-		if r == '"' {
-			escaped += `"`
-		}
-		escaped += string(r)
+	if q, err := sqltext.QuoteIdent("postgres", name); err == nil {
+		return q
 	}
-	return `"` + escaped + `"`
-}
-
-func scanStrings(db *sql.DB, query string, args ...interface{}) ([]string, error) {
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, err
-		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 // CreateDatabase creates a new PostgreSQL database. CREATE DATABASE must not run

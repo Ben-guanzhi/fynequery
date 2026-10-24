@@ -3,6 +3,7 @@ package db
 import (
 	"fmt"
 	"fynequery/proto"
+	"time"
 )
 
 // unwrapper is implemented by every Session decorator (tunnel, pool, …) so the
@@ -40,6 +41,76 @@ func AsBatchUpdater(s Session) (BatchUpdater, bool) {
 			return nil, false
 		}
 		return b, true
+	}
+	return nil, false
+}
+
+// AsValueWriter reports whether s can write KV elements in place.
+func AsValueWriter(s Session) (ValueWriter, bool) {
+	if w, ok := s.(ValueWriter); ok {
+		if u, ok := s.(unwrapper); ok {
+			if inner, ok := AsValueWriter(u.innerSession()); ok {
+				return inner, true
+			}
+			return nil, false
+		}
+		return w, true
+	}
+	return nil, false
+}
+
+// AsKeyAdmin reports whether s can inspect and delete/rename KV keys.
+func AsKeyAdmin(s Session) (KeyAdmin, bool) {
+	if k, ok := s.(KeyAdmin); ok {
+		if w, ok := s.(unwrapper); ok {
+			if inner, ok := AsKeyAdmin(w.innerSession()); ok {
+				return inner, true
+			}
+			return nil, false
+		}
+		return k, true
+	}
+	return nil, false
+}
+
+// AsValueDeleter reports whether s can delete single KV elements.
+func AsValueDeleter(s Session) (ValueDeleter, bool) {
+	if v, ok := s.(ValueDeleter); ok {
+		if w, ok := s.(unwrapper); ok {
+			if inner, ok := AsValueDeleter(w.innerSession()); ok {
+				return inner, true
+			}
+			return nil, false
+		}
+		return v, true
+	}
+	return nil, false
+}
+
+// AsPinger reports whether s can check liveness with a native ping.
+func AsPinger(s Session) (Pinger, bool) {
+	if p, ok := s.(Pinger); ok {
+		if w, ok := s.(unwrapper); ok {
+			if inner, ok := AsPinger(w.innerSession()); ok {
+				return inner, true
+			}
+			return nil, false
+		}
+		return p, true
+	}
+	return nil, false
+}
+
+// AsKeyPager reports whether s can load keys beyond the first inventory page.
+func AsKeyPager(s Session) (KeyPager, bool) {
+	if p, ok := s.(KeyPager); ok {
+		if w, ok := s.(unwrapper); ok {
+			if inner, ok := AsKeyPager(w.innerSession()); ok {
+				return inner, true
+			}
+			return nil, false
+		}
+		return p, true
 	}
 	return nil, false
 }
@@ -173,6 +244,69 @@ func (w *capabilityWrapper) KillQuery() error {
 		return c.KillQuery()
 	}
 	return errUnsupported("kill query")
+}
+
+func (w *capabilityWrapper) SetValue(edit ValueEdit) error {
+	if v, ok := w.Session.(ValueWriter); ok {
+		return v.SetValue(edit)
+	}
+	return errUnsupported("element writes")
+}
+
+func (w *capabilityWrapper) DeleteValue(edit ValueEdit) error {
+	if v, ok := w.Session.(ValueDeleter); ok {
+		return v.DeleteValue(edit)
+	}
+	return errUnsupported("element deletes")
+}
+
+func (w *capabilityWrapper) KeyMeta(key string) (KeyMeta, error) {
+	if k, ok := w.Session.(KeyAdmin); ok {
+		return k.KeyMeta(key)
+	}
+	return KeyMeta{}, errUnsupported("key administration")
+}
+
+func (w *capabilityWrapper) DeleteKey(key string) error {
+	if k, ok := w.Session.(KeyAdmin); ok {
+		return k.DeleteKey(key)
+	}
+	return errUnsupported("key administration")
+}
+
+func (w *capabilityWrapper) RenameKey(oldKey, newKey string) error {
+	if k, ok := w.Session.(KeyAdmin); ok {
+		return k.RenameKey(oldKey, newKey)
+	}
+	return errUnsupported("key administration")
+}
+
+func (w *capabilityWrapper) SetKeyTTL(key string, ttl time.Duration) error {
+	if k, ok := w.Session.(KeyAdmin); ok {
+		return k.SetKeyTTL(key, ttl)
+	}
+	return errUnsupported("key administration")
+}
+
+func (w *capabilityWrapper) Ping() error {
+	if p, ok := w.Session.(Pinger); ok {
+		return p.Ping()
+	}
+	return errUnsupported("ping")
+}
+
+func (w *capabilityWrapper) MoreKeys() bool {
+	if p, ok := w.Session.(KeyPager); ok {
+		return p.MoreKeys()
+	}
+	return false
+}
+
+func (w *capabilityWrapper) LoadMoreKeys() (int, bool, error) {
+	if p, ok := w.Session.(KeyPager); ok {
+		return p.LoadMoreKeys()
+	}
+	return 0, false, errUnsupported("key paging")
 }
 
 func (w *capabilityWrapper) CreateDatabase(name string, opts map[string]string) error {

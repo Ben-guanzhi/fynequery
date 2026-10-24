@@ -232,6 +232,7 @@ var dbTypeStyles = map[string]struct {
 	"mssql":    {Code: "MS", Color: "#5BC0DE", Light: true},
 	"oracle":   {Code: "Or", Color: "#C74634"},
 	"sqlite":   {Code: "SL", Color: "#0F80CC", Light: true},
+	"redis":    {Code: "Rd", Color: "#D82C20"},
 }
 
 var fallbackColors = []string{"#2F7BD9", "#3E8E8E", "#8E44AD", "#E8862E", "#16A085", "#B03A2E"}

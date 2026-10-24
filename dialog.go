@@ -206,6 +206,12 @@ func newConnectionForm(w fyne.Window, seed Connection) *connectionForm {
 			dbname.SetText("")
 			dbname.SetPlaceHolder("C:\\path\\to\\file.db")
 			host.SetPlaceHolder("(unused for SQLite)")
+		case "redis":
+			// Redis "database" is the logical DB number; 0 is the default.
+			user.SetText("")
+			dbname.SetText("0")
+			dbname.SetPlaceHolder("0 (DB index)")
+			host.SetPlaceHolder("localhost")
 		default: // mysql
 			user.SetText("root")
 			dbname.SetText("")

@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"image/color"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,8 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"github.com/dbcore/dbcore"
 
 	"fynequery/db"
 	"fynequery/icons"
@@ -512,22 +515,47 @@ func (p *listPane) CreateRenderer() fyne.WidgetRenderer {
 var sqlQuote = strings.NewReplacer("'", "''")
 
 // fetchIndexes reads index metadata for the 索引 page.
+//
+// The metadata comes from the shared kernel (dbcore.SQLDriver.ListIndexes) via
+// the session's optional IndexLister capability, so this file no longer builds
+// information_schema SQL with inline literals. Sessions without the capability
+// (plugin processes, key/value) simply show an empty page.
 func fetchIndexes(sess db.Session, database, table string) *TableData {
 	if sess == nil || database == "" {
 		return nil
 	}
-	sql := "SELECT INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME, " +
-		"CASE WHEN NON_UNIQUE=0 THEN 'YES' ELSE 'NO' END, INDEX_TYPE " +
-		"FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='" + sqlQuote.Replace(database) +
-		"' AND TABLE_NAME='" + sqlQuote.Replace(table) + "' ORDER BY INDEX_NAME, SEQ_IN_INDEX"
-	res, err := sess.Query(sql, 2000)
+	lister, ok := sess.(db.IndexLister)
+	if !ok {
+		return nil
+	}
+	infos, err := lister.ListIndexes(database, table)
 	if err != nil {
 		return nil
 	}
-	data := &TableData{Fetched: len(res.Rows)}
-	for _, c := range res.Columns {
-		data.Cols = append(data.Cols, ColumnInfo{Name: c.Name})
+	return indexTableData(infos)
+}
+
+// indexTableData flattens kernel index metadata into the page's grid: one row
+// per (index, column) so composite keys stay readable, with the kernel's
+// normalized kind instead of each engine's own spelling.
+func indexTableData(infos []dbcore.IndexInfo) *TableData {
+	data := &TableData{Cols: []ColumnInfo{
+		{Name: "INDEX_NAME"}, {Name: "SEQ_IN_INDEX"}, {Name: "COLUMN_NAME"},
+		{Name: "UNIQUE"}, {Name: "KIND"},
+	}}
+	for _, index := range infos {
+		unique := "NO"
+		if index.Unique {
+			unique = "YES"
+		}
+		for i, column := range index.Columns {
+			data.Rows = append(data.Rows, []*string{
+				str(index.Name), str(strconv.Itoa(i + 1)), str(column), str(unique), str(index.Kind),
+			})
+		}
 	}
-	data.Rows = res.Rows
+	data.Fetched = len(data.Rows)
+	data.Total = len(data.Rows)
+	data.Approx = true
 	return data
 }

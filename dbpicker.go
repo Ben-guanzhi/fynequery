@@ -7,6 +7,7 @@ package main
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -35,6 +36,15 @@ func isSystemSchema(name string) bool {
 func listDatabases(sess db.Session, driver string) []string {
 	if sess == nil {
 		return nil
+	}
+	if driver == "redis" {
+		// Redis exposes numbered logical databases; most servers keep the
+		// default 16, and switching re-dials with the chosen index.
+		out := make([]string, 16)
+		for i := range out {
+			out[i] = strconv.Itoa(i)
+		}
+		return out
 	}
 	var q string
 	switch driver {
