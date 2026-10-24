@@ -444,14 +444,17 @@ func (qp *queryPane) bindEditorShortcuts() {
 	bindEntryShortcut(qp.editor, slash, func(fyne.Shortcut) { qp.toggleComment() })
 
 	// Focus the editor once this SQL tab is on-screen so typing works at once.
+	// Suppressed under test: see delayedFocusSuppressed / TestMain.
 	ed := qp.editor
-	time.AfterFunc(80*time.Millisecond, func() {
-		safeDo(func() {
-			if c := fyne.CurrentApp().Driver().CanvasForObject(ed); c != nil {
-				c.Focus(ed)
-			}
+	if !delayedFocusSuppressed {
+		time.AfterFunc(80*time.Millisecond, func() {
+			safeDo(func() {
+				if c := fyne.CurrentApp().Driver().CanvasForObject(ed); c != nil {
+					c.Focus(ed)
+				}
+			})
 		})
-	})
+	}
 
 	qp.shortcutBound = true
 }
@@ -537,6 +540,20 @@ func (qp *queryPane) scheduleAutoComplete() {
 	})
 }
 
+// Test seams for asynchronous UI settling. Both are inert in production.
+// The fyne test driver executes fyne.Do callbacks inline on the calling
+// goroutine (there is no UI thread), so asynchronous UI work would otherwise
+// race with the test goroutine's own UI calls:
+//   - autoCompleteSettled lets a test wait until the safeGo→safeDo suggestion
+//     lookup has painted before it touches the same state;
+//   - delayedFocusSuppressed disables the delayed editor focus entirely (its
+//     time.AfterFunc fires while a test is mid-UI-cascade, and such timers
+//     outlive the test that scheduled them), see TestMain.
+var (
+	autoCompleteSettled   func()
+	delayedFocusSuppressed bool
+)
+
 // autoComplete refreshes the inline popup for the identifier under the cursor.
 // It is a no-op unless the editor is focused and the word is a plausible
 // identifier prefix outside quoted strings.
@@ -567,16 +584,21 @@ func (qp *queryPane) autoComplete() {
 	safeGo("query.autocomplete", func() {
 		cols := qp.columnCandidates(refs)
 		sug := matchSuggestions(buildSuggestions(tables, cols, qp.currentDB(), qp.tableKinds()), seg, autoCompleteLimit)
-		safeDo(func() {
-			if gen != qp.autoGen {
-				return // a newer keystroke superseded this lookup
+	safeDo(func() {
+		defer func() {
+			if autoCompleteSettled != nil {
+				autoCompleteSettled()
 			}
-			if len(sug) == 0 {
-				qp.hideAuto()
-				return
-			}
-			qp.showAutoSuggestions(start+dot, len([]rune(seg)), sug)
-		})
+		}()
+		if gen != qp.autoGen {
+			return // a newer keystroke superseded this lookup
+		}
+		if len(sug) == 0 {
+			qp.hideAuto()
+			return
+		}
+		qp.showAutoSuggestions(start+dot, len([]rune(seg)), sug)
+	})
 	})
 }
 

@@ -193,10 +193,20 @@ func TestAutoCompleteShowsSuggestions(t *testing.T) {
 	qp.setCursorRune(3)
 	qp.autoGen++
 
+	// The suggestion lookup is asynchronous (safeGo → safeDo). Wait for it to
+	// settle via the test seam instead of polling qp.autoWords: the UI callback
+	// writes that field from its own goroutine, so polling it from the test
+	// goroutine is a data race (the fyne test driver has no UI thread to
+	// serialize against).
+	settled := make(chan struct{})
+	autoCompleteSettled = func() { close(settled) }
+	defer func() { autoCompleteSettled = nil }()
+
 	qp.autoComplete()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(qp.autoWords) == 0 {
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-settled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("autocomplete did not settle")
 	}
 	if len(qp.autoWords) == 0 {
 		t.Fatal("no inline suggestions for prefix \"sel\"")
