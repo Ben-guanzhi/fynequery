@@ -1,18 +1,19 @@
 package db
 
-// Plugin host: discovers plugin executables next to the app, spawns them as
-// hidden child processes and exposes each one as a Dialer over the stdin/
-// stdout JSON protocol defined in fynequery/proto.
+// Plugin host: discovers plugin executables next to the app and exposes each
+// one as a Dialer. The process plumbing — spawn, banner handshake, request
+// framing, streaming, shutdown — lives in the kernel's connection-oriented
+// host (dbcore/plugindriver): ONE plugin process serves many connections, so
+// every tab in the UI shares it. What stays here is the dialer metadata, the
+// fynequery session surface (transactions, DML batches, metrics, streaming
+// queries) through the kernel's raw Call/CallStream, and the Bind view for
+// kernel-shaped consumers.
 
 import (
-	"bufio"
+	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -20,6 +21,9 @@ import (
 	"time"
 
 	"fynequery/proto"
+
+	"github.com/dbcore/dbcore"
+	"github.com/dbcore/dbcore/plugindriver"
 )
 
 const pluginPrefix = "fq-plugin-"
@@ -108,359 +112,140 @@ var (
 	procs   []*pluginProc
 )
 
-// pluginProc is one spawned plugin executable acting as a Dialer.
+// pluginProc is one spawned plugin executable acting as a Dialer: the
+// connection-oriented kernel host underneath owns the process (one process,
+// many connections — the tabs all share it); this type adds the dialer
+// metadata and the session surface.
 type pluginProc struct {
-	info   DriverInfo
-	exe    string
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	reader *bufio.Reader
-
-	mu      sync.Mutex
-	nextID  int64
-	pending map[int64]chan proto.Response
-	streams map[int64]chan proto.Response // in-flight streaming calls (multi-frame)
-	dead    error
+	info DriverInfo
+	exe  string
+	conn *plugindriver.ConnDriver
 }
 
 func spawnPlugin(exe string) (*pluginProc, error) {
-	cmd := exec.Command(exe)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", exe, err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", exe, err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", exe, err)
-	}
-	hideWindow(cmd)
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start %s: %w", exe, err)
-	}
-
-	p := &pluginProc{
-		exe:     exe,
-		cmd:     cmd,
-		stdin:   stdin,
-		reader:  bufio.NewReader(stdout),
-		pending: map[int64]chan proto.Response{},
-		streams: map[int64]chan proto.Response{},
-	}
-
-	// Plugin diagnostics (stderr) go to the host log, prefixed.
-	go func() {
-		sc := bufio.NewScanner(stderr)
-		for sc.Scan() {
-			logf("[%s] %s", filepath.Base(exe), sc.Text())
-		}
-	}()
-
-	if err := p.handshake(); err != nil {
-		p.kill()
-		return nil, fmt.Errorf("%s: %w", exe, err)
-	}
-
-	go func() {
-		err := cmd.Wait()
-		if err == nil {
-			err = errors.New("plugin process exited")
-		}
-		p.failAll(err)
-	}()
-	return p, nil
-}
-
-// handshake reads the startup banner and exchanges meta for driver info.
-func (p *pluginProc) handshake() error {
-	bannerCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		line, err := p.reader.ReadString('\n')
-		if err != nil {
-			errCh <- err
-			return
-		}
-		bannerCh <- line
-	}()
-	var banner proto.Banner
-	select {
-	case line := <-bannerCh:
-		if err := json.Unmarshal([]byte(line), &banner); err != nil {
-			return fmt.Errorf("bad banner: %w", err)
-		}
-	case err := <-errCh:
-		return fmt.Errorf("read banner: %w", err)
-	case <-time.After(5 * time.Second):
-		return errors.New("banner timeout")
-	}
-	// Both protocol names are accepted: the kernel's and the legacy fynequery one
-	// the deployed plugin binaries still announce. The version must match either
-	// way — a different version means a different framing.
-	if err := proto.AcceptsBanner(banner); err != nil {
-		return err
-	}
-	if banner.Version != proto.ProtocolVersion {
-		return fmt.Errorf("unsupported protocol %q v%d", banner.Proto, banner.Version)
-	}
-
-	// The response reader must be running before the first round trip,
-	// otherwise the meta response would sit unread.
-	go p.readLoop()
-
-	var meta proto.MetaResult
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := p.call(ctx, proto.MethodMeta, nil, &meta); err != nil {
-		return fmt.Errorf("meta: %w", err)
+	conn, err := plugindriver.StartConnWithOpts(ctx, exe, nil, plugindriver.StartOpts{
+		// Plugin diagnostics go to the host log, prefixed per line.
+		Stderr:        newPrefixWriter(filepath.Base(exe)),
+		HideWindow:    true,
+		BannerTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", exe, err)
+	}
+
+	// The kernel handshake verified the banner; the dialer metadata (display
+	// name, default port) still comes from the plugin's meta call.
+	metaCtx, metaCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer metaCancel()
+	var meta proto.MetaResult
+	if err := conn.Call(metaCtx, proto.MethodMeta, nil, &meta); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("%s: meta: %w", exe, err)
 	}
 	if meta.Code == "" {
-		return errors.New("plugin reported empty driver code")
+		_ = conn.Close()
+		return nil, fmt.Errorf("%s: plugin reported empty driver code", exe)
 	}
-	p.info = DriverInfo{
-		Code:        meta.Code,
-		Name:        meta.Name,
-		Version:     meta.Version,
-		DefaultPort: meta.DefaultPort,
-		Plugin:      true,
-	}
-	return nil
+	return &pluginProc{
+		info: DriverInfo{
+			Code:        meta.Code,
+			Name:        meta.Name,
+			Version:     meta.Version,
+			DefaultPort: meta.DefaultPort,
+			Plugin:      true,
+		},
+		exe:  exe,
+		conn: conn,
+	}, nil
 }
 
-// readLoop dispatches responses to waiting callers until the pipe breaks.
-func (p *pluginProc) readLoop() {
+// newPrefixWriter renders the plugin's stderr lines in the host log with the
+// executable's name in front, the way the built-in host always did.
+func newPrefixWriter(name string) *prefixWriter {
+	return &prefixWriter{prefix: "[" + name + "] "}
+}
+
+type prefixWriter struct {
+	mu     sync.Mutex
+	prefix string
+	buf    []byte
+}
+
+func (w *prefixWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf = append(w.buf, p...)
 	for {
-		line, err := p.reader.ReadBytes('\n')
-		if len(line) > 0 {
-			var resp proto.Response
-			if jerr := json.Unmarshal(line, &resp); jerr == nil {
-				p.mu.Lock()
-				if sc, ok := p.streams[resp.ID]; ok {
-					// Streaming frame: keep the channel open until the terminal
-					// (Done) frame, then retire it.
-					if resp.Done {
-						delete(p.streams, resp.ID)
-					}
-					p.mu.Unlock()
-					sc <- resp
-					continue
-				}
-				ch := p.pending[resp.ID]
-				delete(p.pending, resp.ID)
-				p.mu.Unlock()
-				if ch != nil {
-					ch <- resp
-				}
-				continue
-			}
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
 		}
-		if err != nil {
-			if err == io.EOF {
-				err = errors.New("plugin process exited")
-			}
-			p.failAll(err)
-			return
+		line := string(w.buf[:i])
+		w.buf = w.buf[i+1:]
+		if strings.TrimSpace(line) != "" {
+			logf("%s%s", w.prefix, line)
 		}
 	}
+	return len(p), nil
 }
 
-// failAll wakes every waiter and marks the process unusable.
-func (p *pluginProc) failAll(err error) {
-	p.mu.Lock()
-	if p.dead == nil {
-		p.dead = err
-	}
-	waiters := make([]chan proto.Response, 0, len(p.pending))
-	for id, ch := range p.pending {
-		waiters = append(waiters, ch)
-		delete(p.pending, id)
-	}
-	streams := make([]chan proto.Response, 0, len(p.streams))
-	for id, ch := range p.streams {
-		streams = append(streams, ch)
-		delete(p.streams, id)
-	}
-	p.mu.Unlock()
-	for _, ch := range waiters {
-		ch <- proto.Response{Error: fmt.Sprintf("plugin: %v", err)}
-	}
-	for _, ch := range streams {
-		ch <- proto.Response{Error: fmt.Sprintf("plugin: %v", err), Done: true}
-	}
-}
-
-func (p *pluginProc) kill() {
-	p.mu.Lock()
-	dead := p.dead
-	p.dead = errors.New("shut down")
-	pending := p.pending
-	p.pending = map[int64]chan proto.Response{}
-	streams := p.streams
-	p.streams = map[int64]chan proto.Response{}
-	p.mu.Unlock()
-	if dead != nil {
-		return // already exited or killed
-	}
-	if p.stdin != nil {
-		p.stdin.Close() // graceful: plugin exits on stdin EOF
-	}
-	if p.cmd != nil && p.cmd.Process != nil {
-		p.cmd.Process.Kill()
-	}
-	for _, ch := range pending {
-		ch <- proto.Response{Error: "plugin: shut down"}
-	}
-	for _, ch := range streams {
-		ch <- proto.Response{Error: "plugin: shut down", Done: true}
-	}
-}
-
-// call performs one request/response round trip. params may be nil.
-func (p *pluginProc) call(ctx context.Context, method string, params, result interface{}) error {
-	p.mu.Lock()
-	if p.dead != nil {
-		err := fmt.Errorf("plugin: %w", p.dead)
-		p.mu.Unlock()
-		return err
-	}
-	id := p.nextID
-	p.nextID++
-	req := proto.Request{ID: id, Method: method}
-	if params != nil {
-		raw, err := json.Marshal(params)
-		if err != nil {
-			p.mu.Unlock()
-			return err
-		}
-		req.Params = raw
-	}
-	line, err := json.Marshal(req)
-	if err != nil {
-		p.mu.Unlock()
-		return err
-	}
-	ch := make(chan proto.Response, 1)
-	p.pending[id] = ch
-	_, werr := p.stdin.Write(append(line, '\n'))
-	p.mu.Unlock()
-	if werr != nil {
-		p.mu.Lock()
-		delete(p.pending, id)
-		p.mu.Unlock()
-		return fmt.Errorf("write to plugin: %w", werr)
-	}
-
-	select {
-	case resp := <-ch:
-		if resp.Error != "" {
-			return errors.New(resp.Error)
-		}
-		if result != nil && len(resp.Result) > 0 {
-			return json.Unmarshal(resp.Result, result)
-		}
-		return nil
-	case <-ctx.Done():
-		p.mu.Lock()
-		delete(p.pending, id)
-		p.mu.Unlock()
-		return ctx.Err()
-	}
-}
-
-// callStream performs a streaming request/response exchange. It registers the
-// request as a stream, sends it, then delivers every frame to onFrame until the
-// terminal (Done) frame, whose Result is decoded into final. onFrame must not
-// block indefinitely; a false return stops early (the stream is retired).
-func (p *pluginProc) callStream(ctx context.Context, method string, params interface{}, onFrame func(proto.StreamFrame) (bool, error), final interface{}) error {
-	p.mu.Lock()
-	if p.dead != nil {
-		err := fmt.Errorf("plugin: %w", p.dead)
-		p.mu.Unlock()
-		return err
-	}
-	id := p.nextID
-	p.nextID++
-	req := proto.Request{ID: id, Method: method}
-	if params != nil {
-		raw, err := json.Marshal(params)
-		if err != nil {
-			p.mu.Unlock()
-			return err
-		}
-		req.Params = raw
-	}
-	line, err := json.Marshal(req)
-	if err != nil {
-		p.mu.Unlock()
-		return err
-	}
-	ch := make(chan proto.Response, 8)
-	p.streams[id] = ch
-	_, werr := p.stdin.Write(append(line, '\n'))
-	p.mu.Unlock()
-	if werr != nil {
-		p.mu.Lock()
-		delete(p.streams, id)
-		p.mu.Unlock()
-		return fmt.Errorf("write to plugin: %w", werr)
-	}
-
-	stop := func() {
-		p.mu.Lock()
-		delete(p.streams, id)
-		p.mu.Unlock()
-	}
-	for {
-		select {
-		case resp := <-ch:
-			if resp.Error != "" {
-				stop()
-				return errors.New(resp.Error)
-			}
-			var f proto.StreamFrame
-			if len(resp.Result) > 0 {
-				if jerr := json.Unmarshal(resp.Result, &f); jerr != nil {
-					stop()
-					return jerr
-				}
-			}
-			keep := true
-			if !resp.Done && onFrame != nil {
-				var e error
-				keep, e = onFrame(f)
-				if e != nil {
-					stop()
-					return e
-				}
-			}
-			if resp.Done || !keep {
-				stop()
-				if resp.Done && final != nil && len(resp.Result) > 0 {
-					return json.Unmarshal(resp.Result, final)
-				}
-				return nil
-			}
-		case <-ctx.Done():
-			stop()
-			return ctx.Err()
-		}
-	}
-}
+func (p *pluginProc) kill() { _ = p.conn.Close() }
 
 func (p *pluginProc) Info() DriverInfo { return p.info }
+
+// call performs one round trip in the plugin's own vocabulary — the methods
+// the kernel has no view of included — through the kernel host.
+func (p *pluginProc) call(ctx context.Context, method string, params, result interface{}) error {
+	return p.conn.Call(ctx, method, params, result)
+}
+
+// callStream performs a streaming exchange through the kernel host, handing
+// each frame to the caller in fynequery's shape.
+func (p *pluginProc) callStream(ctx context.Context, method string, params interface{}, onFrame func(proto.StreamFrame) (bool, error), final interface{}) error {
+	return p.conn.CallStream(ctx, method, params, func(f plugindriver.StreamFrame) (bool, error) {
+		return onFrame(streamFrameOf(f))
+	}, final)
+}
+
+// streamFrameOf maps the kernel's frame onto the fynequery shape: the columns
+// carry the "PK" key marker the grid expects instead of the kernel's boolean.
+func streamFrameOf(f plugindriver.StreamFrame) proto.StreamFrame {
+	out := proto.StreamFrame{
+		Rows:         f.Rows,
+		RowsAffected: f.RowsAffected,
+		DurationMS:   f.DurationMS,
+	}
+	for _, col := range f.Columns {
+		c := proto.ColumnInfo{Name: col.Name, Type: col.Type, Nullable: col.Nullable}
+		if col.IsPrimaryKey {
+			c.Key = "PK"
+		}
+		out.Columns = append(out.Columns, c)
+	}
+	return out
+}
 
 func (p *pluginProc) Connect(cfg proto.ConnectParams) (Session, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	var res proto.OpenResult
-	if err := p.call(ctx, proto.MethodOpen, cfg, &res); err != nil {
+	connID, server, err := p.conn.Open(ctx, cfg)
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", p.info.Name, err)
 	}
-	return &remoteSession{p: p, connID: res.ConnID, server: res.Server}, nil
+	return &remoteSession{p: p, connID: connID, server: server}, nil
 }
+
+// Bind hands out the kernel's SQLDriver view of one connection of this plugin
+// process — the connection-oriented shape: many tabs share the process, each
+// bound view addresses exactly one connection.
+func (p *pluginProc) Bind(connID, database string) dbcore.SQLDriver {
+	return p.conn.Bind(connID, database)
+}
+
+// ConnIDs lists the connections this plugin process currently holds.
+func (p *pluginProc) ConnIDs() []string { return p.conn.ConnIDs() }
 
 // remoteSession is one connection inside a plugin process.
 type remoteSession struct {
