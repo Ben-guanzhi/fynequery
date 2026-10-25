@@ -234,7 +234,10 @@ func (p *pluginProc) Connect(cfg proto.ConnectParams) (Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", p.info.Name, err)
 	}
-	return &remoteSession{p: p, connID: connID, server: server}, nil
+	// Wide, not Bind: the session drives the connection's transaction, edits,
+	// metrics and streaming, and those calls are now typed in the kernel rather
+	// than spelled here in the plugin's private vocabulary.
+	return &remoteSession{p: p, connID: connID, server: server, wide: p.conn.Wide(connID, cfg.Database)}, nil
 }
 
 // Bind hands out the kernel's SQLDriver view of one connection of this plugin
@@ -248,17 +251,18 @@ func (p *pluginProc) Bind(connID, database string) dbcore.SQLDriver {
 func (p *pluginProc) ConnIDs() []string { return p.conn.ConnIDs() }
 
 // remoteSession is one connection inside a plugin process.
+//
+// The session surface below (transactions, row edits, metrics, streaming) is the
+// kernel's wide session — see dbcore's SessionTx / RowWriter / BatchWriter /
+// MetricsSource / StreamQuerier. This type only adapts it: the UI speaks
+// nullable strings, the kernel speaks dbcore.Value, and the conversion happens
+// here at the boundary. The transaction mirror the UI reads lives in the kernel
+// too (it is a property of the connection, not of this view of it).
 type remoteSession struct {
 	p      *pluginProc
 	connID string
 	server string
-
-	// txMu guards inTx, the client-side view of the manual transaction the
-	// plugin holds. The plugin is the source of truth for BEGIN/COMMIT/
-	// ROLLBACK; this flag mirrors it so the UI can show state and so a
-	// transaction left open on disconnect can be rolled back.
-	txMu sync.Mutex
-	inTx bool
+	wide   *plugindriver.Conn
 }
 
 func (s *remoteSession) Server() string { return s.server }
@@ -299,79 +303,57 @@ func (s *remoteSession) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// Roll back any transaction left open so the connection goes back to a
-	// clean state before it is dropped or returned to the pool.
-	s.txMu.Lock()
-	inTx := s.inTx
-	s.txMu.Unlock()
-	if inTx {
-		_ = s.p.call(ctx, proto.MethodRollback, proto.TxParams{ConnID: s.connID}, nil)
-		s.txMu.Lock()
-		s.inTx = false
-		s.txMu.Unlock()
+	// clean state before it is dropped or returned to the pool. The mirror the
+	// kernel keeps is what says whether one is open.
+	if s.wide.InTransaction() {
+		_ = s.wide.RollbackTx(ctx)
 	}
 	// Best effort: a failed close just leaves the conn to die with the process.
 	_ = s.p.call(ctx, proto.MethodClose, proto.CloseParams{ConnID: s.connID}, nil)
 }
 
 // ---- manual transactions (implements db.Transactional) ---------------------
+//
+// The plugin is the source of truth for BEGIN/COMMIT/ROLLBACK; the kernel's
+// wide session drives it and mirrors the state, so the UI can show it and a
+// transaction left open on disconnect can be rolled back.
 
-// Begin starts a transaction on the plugin connection. The plugin generates the
-// BEGIN; this flag mirrors it for the UI and disconnect rollback.
 func (s *remoteSession) Begin() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if err := s.p.call(ctx, proto.MethodBegin, proto.TxParams{ConnID: s.connID}, nil); err != nil {
-		return err
-	}
-	s.txMu.Lock()
-	s.inTx = true
-	s.txMu.Unlock()
-	return nil
+	return s.wide.BeginTx(ctx)
 }
 
-// Commit commits the active transaction.
 func (s *remoteSession) Commit() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if err := s.p.call(ctx, proto.MethodCommit, proto.TxParams{ConnID: s.connID}, nil); err != nil {
-		return err
-	}
-	s.txMu.Lock()
-	s.inTx = false
-	s.txMu.Unlock()
-	return nil
+	return s.wide.CommitTx(ctx)
 }
 
-// Rollback rolls back the active transaction.
 func (s *remoteSession) Rollback() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if err := s.p.call(ctx, proto.MethodRollback, proto.TxParams{ConnID: s.connID}, nil); err != nil {
-		return err
-	}
-	s.txMu.Lock()
-	s.inTx = false
-	s.txMu.Unlock()
-	return nil
+	return s.wide.RollbackTx(ctx)
 }
 
-// InTransaction reports the client-side view of the plugin's transaction state.
-func (s *remoteSession) InTransaction() bool {
-	s.txMu.Lock()
-	defer s.txMu.Unlock()
-	return s.inTx
-}
+// InTransaction reports the mirrored transaction state the kernel keeps for
+// this connection.
+func (s *remoteSession) InTransaction() bool { return s.wide.InTransaction() }
 
 // Metrics forwards a server-metrics request to the plugin, reusing the already
 // opened connection.
 func (s *remoteSession) Metrics() ([]proto.Metric, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	var res proto.MetricsResult
-	if err := s.p.call(ctx, proto.MethodMetrics, proto.MetricsParams{ConnID: s.connID}, &res); err != nil {
+	metrics, err := s.wide.ServerMetrics(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return res.Metrics, nil
+	out := make([]proto.Metric, 0, len(metrics))
+	for _, m := range metrics {
+		out = append(out, proto.Metric{Label: m.Label, Value: m.Value, Group: m.Group})
+	}
+	return out, nil
 }
 
 // QueryStream streams a statement's result from the plugin in batches over the
@@ -381,19 +363,70 @@ func (s *remoteSession) Metrics() ([]proto.Metric, error) {
 func (s *remoteSession) QueryStream(sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]*string) (bool, error)) (proto.QueryResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), pluginQueryTimeout)
 	defer cancel()
-	var final proto.QueryResult
-	err := s.p.callStream(ctx, proto.MethodQueryStream,
-		proto.QueryStreamParams{ConnID: s.connID, SQL: sqlText, Batch: batch},
-		func(f proto.StreamFrame) (bool, error) {
-			return emit(f.Columns, taggedRowsToStrings(f.Rows))
-		}, &final)
+	// The kernel's wide session owns the streaming protocol; this is only the
+	// shape adaptation back to the UI (see stringsOf / columnsOf).
+	//
+	// DurationMS comes from the session's own terminal frame when it reports
+	// one; otherwise it stays 0 and the caller falls back to the elapsed time
+	// it measured itself (query.go).
+	result, err := s.wide.QueryStream(ctx, sqlText, batch, func(b dbcore.StreamBatch) (bool, error) {
+		return emit(columnsOf(b.Columns), stringsOf(b.Rows))
+	})
 	if err != nil {
 		return proto.QueryResult{}, err
 	}
-	return final, nil
+	return proto.QueryResult{RowsAffected: result.AffectedRows, DurationMS: result.DurationMS}, nil
 }
 
-// taggedRowsToStrings renders the wire's tagged rows as the UI's nullable strings.
+// valuesOf renders the UI's nullable strings as the kernel's values. A nil
+// pointer is a NULL; an empty string is an empty string.
+func valuesOf(cells map[string]*string) map[string]dbcore.Value {
+	out := make(map[string]dbcore.Value, len(cells))
+	for name, value := range cells {
+		if value == nil {
+			out[name] = dbcore.Value{Kind: dbcore.ValNull}
+			continue
+		}
+		out[name] = dbcore.Value{Kind: dbcore.ValText, S: *value}
+	}
+	return out
+}
+
+// columnsOf renders the kernel's column metadata in the UI's shape, carrying
+// the primary-key marker across as "PK".
+func columnsOf(cols []dbcore.ColumnInfo) []proto.ColumnInfo {
+	out := make([]proto.ColumnInfo, 0, len(cols))
+	for _, c := range cols {
+		col := proto.ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable}
+		if c.IsPrimaryKey {
+			col.Key = "PK"
+		}
+		out = append(out, col)
+	}
+	return out
+}
+
+// stringsOf renders the kernel's values as the UI's nullable strings: a NULL is
+// a nil pointer, which is what the grid shows and edits.
+func stringsOf(rows [][]dbcore.Value) [][]*string {
+	out := make([][]*string, len(rows))
+	for i, row := range rows {
+		cells := make([]*string, len(row))
+		for j, v := range row {
+			if v.Kind == dbcore.ValNull {
+				continue
+			}
+			text := v.String()
+			cells[j] = &text
+		}
+		out[i] = cells
+	}
+	return out
+}
+
+// taggedRowsToStrings renders the wire's tagged rows as the UI's nullable
+// strings. The built-in drivers (mysql.go, redis.go) still hand the UI rows in
+// this form; the plugin path goes through the kernel's values now.
 func taggedRowsToStrings(rows [][]proto.CellPayload) [][]*string {
 	out := make([][]*string, len(rows))
 	for i, row := range rows {
@@ -427,29 +460,6 @@ func taggedRowsOf(rows [][]*string) [][]proto.CellPayload {
 	return out
 }
 
-// taggedRows converts a list of the UI's row maps into tagged cells.
-func taggedRows(rows []map[string]*string) []map[string]proto.CellPayload {
-	out := make([]map[string]proto.CellPayload, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, cellsToTagged(row))
-	}
-	return out
-}
-
-// cellsToTagged renders the UI's nullable strings as the tagged cells the wire
-// carries. A nil pointer is a NULL; an empty string is an empty string.
-func cellsToTagged(cells map[string]*string) map[string]proto.CellPayload {
-	out := make(map[string]proto.CellPayload, len(cells))
-	for name, value := range cells {
-		if value == nil {
-			out[name] = proto.CellPayload{Kind: "null"}
-			continue
-		}
-		out[name] = proto.CellPayload{Kind: "text", Text: *value}
-	}
-	return out
-}
-
 // ---- row-level DML (implements db.Updater / db.BatchUpdater) ----------------
 //
 // Plugin connections were historically read-only because the protocol had no
@@ -463,25 +473,19 @@ func cellsToTagged(cells map[string]*string) map[string]proto.CellPayload {
 func (s *remoteSession) UpdateRow(table string, pk, changes map[string]*string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	return s.p.call(ctx, proto.MethodUpdate, proto.DMLSingleParams{
-		ConnID: s.connID, Table: table, PK: cellsToTagged(pk), Changes: cellsToTagged(changes),
-	}, nil)
+	return s.wide.UpdateRow(ctx, table, valuesOf(pk), valuesOf(changes))
 }
 
 func (s *remoteSession) InsertRow(table string, values map[string]*string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	return s.p.call(ctx, proto.MethodInsert, proto.DMLSingleParams{
-		ConnID: s.connID, Table: table, Values: cellsToTagged(values),
-	}, nil)
+	return s.wide.InsertRow(ctx, table, valuesOf(values))
 }
 
 func (s *remoteSession) DeleteRow(table string, pk map[string]*string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	return s.p.call(ctx, proto.MethodDelete, proto.DMLSingleParams{
-		ConnID: s.connID, Table: table, PK: cellsToTagged(pk),
-	}, nil)
+	return s.wide.DeleteRow(ctx, table, valuesOf(pk))
 }
 
 // ApplyChanges forwards the whole commit to the plugin, which runs it inside
@@ -490,14 +494,17 @@ func (s *remoteSession) DeleteRow(table string, pk map[string]*string) error {
 func (s *remoteSession) ApplyChanges(table string, updates []RowEdit, deletes []map[string]*string, inserts []map[string]*string, ddl []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	up := make([]proto.DMLRow, 0, len(updates))
+	req := dbcore.BatchRequest{Table: table, DDL: ddl}
 	for _, u := range updates {
-		up = append(up, proto.DMLRow{PK: cellsToTagged(u.PK), Changes: cellsToTagged(u.Changes)})
+		req.Updates = append(req.Updates, dbcore.RowChange{PK: valuesOf(u.PK), Changes: valuesOf(u.Changes)})
 	}
-	err := s.p.call(ctx, proto.MethodApplyBatch, proto.DMLBatchParams{
-		ConnID: s.connID, Table: table, Updates: up, Deletes: taggedRows(deletes), Inserts: taggedRows(inserts), DDL: ddl,
-	}, nil)
-	return err
+	for _, d := range deletes {
+		req.Deletes = append(req.Deletes, valuesOf(d))
+	}
+	for _, i := range inserts {
+		req.Inserts = append(req.Inserts, valuesOf(i))
+	}
+	return s.wide.ApplyBatch(ctx, req)
 }
 
 // CreateDatabase forwards the request to the plugin process, reusing the already
@@ -505,12 +512,7 @@ func (s *remoteSession) ApplyChanges(table string, updates []RowEdit, deletes []
 func (s *remoteSession) CreateDatabase(name string, opts map[string]string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	return s.p.call(ctx, proto.MethodCreateDB, proto.CreateDBParams{
-		ConnID:    s.connID,
-		Name:      name,
-		Charset:   opts["charset"],
-		Collation: opts["collation"],
-	}, nil)
+	return s.wide.CreateDatabase(ctx, name, opts)
 }
 
 // pluginQueryTimeout matches the statement cap inside plugins; the host side
