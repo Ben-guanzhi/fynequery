@@ -240,5 +240,7 @@ func openURL(u string) {
 	default:
 		cmd = exec.Command("xdg-open", u)
 	}
-	_ = cmd.Start()
+	if err := cmd.Start(); err != nil {
+		appLogf("openURL %s: %v", u, err)
+	}
 }

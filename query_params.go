@@ -27,15 +27,26 @@ func loadQueryVars() map[string]string {
 		return map[string]string{}
 	}
 	m := map[string]string{}
-	_ = json.Unmarshal(raw, &m)
+	if err := json.Unmarshal(raw, &m); err != nil {
+		appLogf("query vars parse: %v", err)
+	}
 	return m
 }
 
-// saveQueryVars persists the remembered values.
+// saveQueryVars persists the remembered values; failures are logged, not
+// fatal (the dialog still works — only the "remember" is lost).
 func saveQueryVars(m map[string]string) {
-	_ = os.MkdirAll(configDir(), 0o755)
-	if raw, err := json.MarshalIndent(m, "", "  "); err == nil {
-		_ = os.WriteFile(varFile(), raw, 0o600)
+	if err := os.MkdirAll(configDir(), 0o755); err != nil {
+		appLogf("query vars save: %v", err)
+		return
+	}
+	raw, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		appLogf("query vars save: %v", err)
+		return
+	}
+	if err := os.WriteFile(varFile(), raw, 0o600); err != nil {
+		appLogf("query vars save: %v", err)
 	}
 }
 
@@ -160,12 +171,13 @@ func substituteParams(sqlText string, vals map[string]string) string {
 	return b.String()
 }
 
-// resultName extracts a "-- name: …" / "-- label: …" / "-- tab: …" comment
-// from the statement (TablePlus uses it to label the result tab); "" when
-// absent.
+// resultNameRe matches a "-- name: …" / "-- label: …" / "-- tab: …" comment.
+var resultNameRe = regexp.MustCompile(`(?m)^\s*--\s*(?:name|label|tab)\s*:\s*(.+)$`)
+
+// resultName extracts that comment from the statement (TablePlus uses it to
+// label the result tab); "" when absent.
 func resultName(sqlText string) string {
-	re := regexp.MustCompile(`(?m)^\s*--\s*(?:name|label|tab)\s*:\s*(.+)$`)
-	if m := re.FindStringSubmatch(sqlText); m != nil {
+	if m := resultNameRe.FindStringSubmatch(sqlText); m != nil {
 		return strings.TrimSpace(m[1])
 	}
 	return ""
@@ -263,7 +275,10 @@ func autoLimit(sqlText, driver string, n int) string {
 	if trimmed == "" || !isPlainSelect(trimmed) || hasTopLevelLimit(trimmed) {
 		return sqlText
 	}
-	if limitBlockRe.MatchString(stripSQLNoise(trimmed)) || topRe.MatchString(stripSQLNoise(trimmed)) {
+	// One noise-stripped copy serves both probes (FOR UPDATE / INTO OUTFILE /
+	// TOP); stripping is a full-text copy, doing it twice was pure waste.
+	noise := stripSQLNoise(trimmed)
+	if limitBlockRe.MatchString(noise) || topRe.MatchString(noise) {
 		return sqlText // FOR UPDATE / INTO OUTFILE / TOP already close the result
 	}
 	// Newline: a trailing "-- comment" must not swallow the clause.

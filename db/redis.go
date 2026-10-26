@@ -38,7 +38,17 @@ const (
 	// (inventory, approxRows, quick-open) without hiding command-driven edits,
 	// which invalidate the cache immediately.
 	redisKeyCacheTTL = 2 * time.Second
+	// redisCallTimeout bounds every KV round-trip: these calls serve the UI
+	// from background goroutines, and an unbounded call against a hung server
+	// parked the worker (and whatever refresh it was doing) forever.
+	redisCallTimeout = 30 * time.Second
 )
+
+// redisCtx returns a bounded context for one KV call. Every kv.* call in this
+// file must go through it — never context.Background() directly.
+func redisCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), redisCallTimeout)
+}
 
 type redisDialer struct{}
 
@@ -103,10 +113,16 @@ func (s *redisSession) Server() string { return s.server }
 func (s *redisSession) Close()         { _ = s.kv.Close() }
 
 // Ping lets the workspace keepalive probe the server without a SQL statement.
-func (s *redisSession) Ping() error { return s.kv.Ping(context.Background()) }
+func (s *redisSession) Ping() error {
+	ctx, cancel := redisCtx()
+	defer cancel()
+	return s.kv.Ping(ctx)
+}
 
 func (s *redisSession) readServer() string {
-	reply, err := s.kv.ExecCommand(context.Background(), []string{"INFO", "server"})
+	ctx, cancel := redisCtx()
+	defer cancel()
+	reply, err := s.kv.ExecCommand(ctx, []string{"INFO", "server"})
 	if err != nil {
 		return "Redis"
 	}
@@ -175,7 +191,9 @@ func (s *redisSession) keyList() ([]string, error) {
 
 	// SCAN can take a while on a large keyspace, so it runs outside the lock;
 	// a concurrent SetKeyFilter simply discards this snapshot when it lands.
-	keys, cursor, more, err := scanRedisKeys(context.Background(), s.kv, 0, pattern, nil)
+	scanCtx, cancel := redisCtx()
+	keys, cursor, more, err := scanRedisKeys(scanCtx, s.kv, 0, pattern, nil)
+	cancel()
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +266,9 @@ func (s *redisSession) LoadMoreKeys() (int, bool, error) {
 	if pattern == "" {
 		pattern = "*"
 	}
-	page, next, more, err := scanRedisKeys(context.Background(), s.kv, cursor, pattern, known)
+	pageCtx, cancel := redisCtx()
+	page, next, more, err := scanRedisKeys(pageCtx, s.kv, cursor, pattern, known)
+	cancel()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -279,7 +299,9 @@ func (s *redisSession) invalidateKeys() {
 }
 
 func (s *redisSession) Columns(table string) ([]proto.ColumnInfo, error) {
-	typ, err := s.kv.KeyType(context.Background(), table)
+	ctx, cancel := redisCtx()
+	defer cancel()
+	typ, err := s.kv.KeyType(ctx, table)
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +340,9 @@ func redisColumns(typ dbcore.RedisKeyType) ([]proto.ColumnInfo, bool) {
 // would change the grid's row key, which the SQL-style identity model cannot
 // express.
 func (s *redisSession) SetValue(edit ValueEdit) error {
-	typ, err := s.kv.KeyType(context.Background(), edit.Key)
+	ctx, cancel := redisCtx()
+	defer cancel()
+	typ, err := s.kv.KeyType(ctx, edit.Key)
 	if err != nil {
 		return err
 	}
@@ -343,7 +367,7 @@ func (s *redisSession) SetValue(edit ValueEdit) error {
 	if !ok {
 		return fmt.Errorf("redis: driver does not support element writes")
 	}
-	return ew.SetElement(context.Background(), dbcore.RedisElement{
+	return ew.SetElement(ctx, dbcore.RedisElement{
 		Key: edit.Key, Identity: edit.Identity, ID: edit.ID, Column: edit.Column, Value: edit.Value,
 	})
 }
@@ -354,7 +378,9 @@ func (s *redisSession) KeyMeta(key string) (KeyMeta, error) {
 	if !ok {
 		return KeyMeta{}, fmt.Errorf("redis: driver does not support key administration")
 	}
-	meta, err := ka.KeyMeta(context.Background(), key)
+	metaCtx, cancel := redisCtx()
+	defer cancel()
+	meta, err := ka.KeyMeta(metaCtx, key)
 	if err != nil {
 		return KeyMeta{}, err
 	}
@@ -367,7 +393,9 @@ func (s *redisSession) DeleteKey(key string) error {
 	if !ok {
 		return fmt.Errorf("redis: driver does not support key administration")
 	}
-	if err := ka.DeleteKeys(context.Background(), key); err != nil {
+	delCtx, cancel := redisCtx()
+	defer cancel()
+	if err := ka.DeleteKeys(delCtx, key); err != nil {
 		return err
 	}
 	s.invalidateKeys()
@@ -380,7 +408,9 @@ func (s *redisSession) RenameKey(oldKey, newKey string) error {
 	if !ok {
 		return fmt.Errorf("redis: driver does not support key administration")
 	}
-	if err := ka.RenameKey(context.Background(), oldKey, newKey); err != nil {
+	renCtx, cancel := redisCtx()
+	defer cancel()
+	if err := ka.RenameKey(renCtx, oldKey, newKey); err != nil {
 		return err
 	}
 	s.invalidateKeys()
@@ -394,7 +424,9 @@ func (s *redisSession) SetKeyTTL(key string, ttl time.Duration) error {
 	if !ok {
 		return fmt.Errorf("redis: driver does not support key administration")
 	}
-	return ka.SetTTL(context.Background(), key, ttl)
+	ttlCtx, cancel := redisCtx()
+	defer cancel()
+	return ka.SetTTL(ttlCtx, key, ttl)
 }
 
 // DeleteValue removes one element in place (HDEL/SREM/ZREM/XDEL), keeping the
@@ -405,12 +437,14 @@ func (s *redisSession) DeleteValue(edit ValueEdit) error {
 	if !ok {
 		return fmt.Errorf("redis: driver does not support element deletes")
 	}
-	if err := ed.DeleteElement(context.Background(), dbcore.RedisElement{
+	delCtx, cancel := redisCtx()
+	defer cancel()
+	if err := ed.DeleteElement(delCtx, dbcore.RedisElement{
 		Key: edit.Key, Identity: edit.Identity, ID: edit.ID,
 	}); err != nil {
 		return err
 	}
-	typ, err := s.kv.KeyType(context.Background(), edit.Key)
+	typ, err := s.kv.KeyType(delCtx, edit.Key)
 	if err == nil && typ == dbcore.RedisNone {
 		s.invalidateKeys()
 	}
@@ -419,7 +453,9 @@ func (s *redisSession) DeleteValue(edit ValueEdit) error {
 
 func (s *redisSession) Browse(table string, limit int) (proto.QueryResult, error) {
 	start := time.Now()
-	value, err := s.kv.GetValue(context.Background(), table)
+	valCtx, cancel := redisCtx()
+	value, err := s.kv.GetValue(valCtx, table)
+	cancel()
 	if err != nil {
 		return proto.QueryResult{}, err
 	}
@@ -505,7 +541,9 @@ func (s *redisSession) Query(text string, maxRows int) (proto.QueryResult, error
 		if len(args) == 0 {
 			continue
 		}
-		reply, err := s.kv.ExecCommand(context.Background(), args)
+		cmdCtx, cancel := redisCtx()
+		reply, err := s.kv.ExecCommand(cmdCtx, args)
+		cancel()
 		if err != nil {
 			return proto.QueryResult{}, err
 		}
@@ -598,7 +636,9 @@ func splitRedisCommand(line string) ([]string, error) {
 }
 
 func (s *redisSession) Metrics() ([]proto.Metric, error) {
-	reply, err := s.kv.ExecCommand(context.Background(), []string{"INFO"})
+	ctx, cancel := redisCtx()
+	defer cancel()
+	reply, err := s.kv.ExecCommand(ctx, []string{"INFO"})
 	if err != nil {
 		return nil, err
 	}

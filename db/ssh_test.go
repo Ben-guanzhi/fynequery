@@ -255,7 +255,7 @@ func (fakePlainSession) Close() {}
 func TestCapabilityForwarding(t *testing.T) {
 	// A bare type assertion on a wrapper is always true (the wrapper declares
 	// every forwarding method), so capability detection MUST go through As*.
-	w := wrapCapabilities(fakeUpdaterSession{})
+	w := Session(&capabilityWrapper{Session: fakeUpdaterSession{}})
 	if _, ok := AsUpdater(w); !ok {
 		t.Fatal("Updater should be forwarded")
 	}
@@ -273,7 +273,7 @@ func TestCapabilityForwarding(t *testing.T) {
 	// A plain inner session exposes nothing extra: AsUpdater reports false so
 	// callers never call UpdateRow through it, and the wrapper's forwarding
 	// guard still returns errUnsupported if the method is ever reached.
-	p := wrapCapabilities(fakePlainSession{})
+	p := Session(&capabilityWrapper{Session: fakePlainSession{}})
 	if _, ok := AsUpdater(p); ok {
 		t.Fatal("Updater should NOT be forwarded for a plain session")
 	}

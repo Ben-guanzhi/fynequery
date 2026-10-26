@@ -171,7 +171,7 @@ func (p *welcomePage) connect(c Connection) {
 		safeDo(func() {
 			progress.Hide()
 			if err != nil {
-				dialog.NewError(fmt.Errorf("%s: %v", dbTypeByDriver(c.Driver).Name, err), p.window).Show()
+				dialog.NewError(fmt.Errorf("%s: %w", dbTypeByDriver(c.Driver).Name, err), p.window).Show()
 				return
 			}
 			if p.onPick != nil {

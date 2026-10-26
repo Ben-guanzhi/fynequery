@@ -16,7 +16,7 @@ func (s *pingerSession) Ping() error {
 
 func TestAsPingerSeesThroughWrapper(t *testing.T) {
 	inner := &pingerSession{}
-	w := wrapCapabilities(inner)
+	w := Session(&capabilityWrapper{Session: inner})
 	if _, ok := w.(Pinger); !ok {
 		t.Fatal("wrapper should forward Pinger")
 	}
@@ -33,7 +33,7 @@ func TestAsPingerSeesThroughWrapper(t *testing.T) {
 }
 
 func TestAsPingerRejectsPlainSession(t *testing.T) {
-	w := wrapCapabilities(fakePlainSession{})
+	w := Session(&capabilityWrapper{Session: fakePlainSession{}})
 	if _, ok := AsPinger(w); ok {
 		t.Fatal("AsPinger should report false for a session without native ping")
 	}

@@ -290,15 +290,7 @@ const DefaultMarker = "__DEFAULT__"
 func (q QueryResult) StringRows() [][]*string {
 	out := make([][]*string, len(q.Rows))
 	for i, row := range q.Rows {
-		cells := make([]*string, len(row))
-		for j, cell := range row {
-			if cell.Kind == "null" || cell.Kind == "" {
-				continue
-			}
-			text := CellText(cell)
-			cells[j] = &text
-		}
-		out[i] = cells
+		out[i] = CellsToStrings(row)
 	}
 	return out
 }
@@ -343,12 +335,10 @@ func CellsToStrings(row []CellPayload) []*string {
 	out := make([]*string, len(row))
 	for i, cell := range row {
 		if cell.Kind == "" || cell.Kind == "null" {
-			out[i] = nil
 			continue
 		}
 		text := CellText(cell)
-		value := text
-		out[i] = &value
+		out[i] = &text
 	}
 	return out
 }
@@ -362,45 +352,6 @@ func StringsToCells(row []*string) []CellPayload {
 			continue
 		}
 		out[i] = TextCell(*value)
-	}
-	return out
-}
-
-// EncodeCell is the kernel's cell encoder, re-exported so plugin code does not
-// have to import the kernel package directly.
-func EncodeCell(v any) CellPayload {
-	switch value := v.(type) {
-	case nil:
-		return NullCell()
-	case string:
-		return TextCell(value)
-	case *string:
-		if value == nil {
-			return NullCell()
-		}
-		return TextCell(*value)
-	case int:
-		return CellPayload{Kind: "int", Int: int64(value)}
-	case int64:
-		return CellPayload{Kind: "int", Int: value}
-	case float64:
-		return CellPayload{Kind: "float", Flt: value}
-	case bool:
-		return CellPayload{Kind: "bool", Bool: value}
-	case []byte:
-		return CellPayload{Kind: "blob", Blob: value}
-	default:
-		// An unknown shape is text: the alternative is dropping the cell, and a
-		// visible string is better than a silent hole.
-		return TextCell(fmt.Sprintf("%v", value))
-	}
-}
-
-// MarshalRow is a convenience for plugin code that has a row of any values.
-func MarshalRow(row []any) []CellPayload {
-	out := make([]CellPayload, len(row))
-	for i, value := range row {
-		out[i] = EncodeCell(value)
 	}
 	return out
 }

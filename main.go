@@ -151,6 +151,18 @@ func fitWindowWhenScaled(w fyne.Window, size fyne.Size) {
 	})
 }
 
+// appLogSink is the file sink setupLogging installs; nil until then (and when
+// the log file cannot be opened), in which case diagnostics are dropped.
+var appLogSink func(string, ...interface{})
+
+// appLogf records a diagnostic in fynequery.log next to the config — the same
+// sink the db layer logs through.
+func appLogf(format string, args ...interface{}) {
+	if appLogSink != nil {
+		appLogSink(format, args...)
+	}
+}
+
 // setupLogging routes plugin diagnostics into a log file next to the config.
 func setupLogging() *os.File {
 	f, err := os.OpenFile(filepath.Join(configDir(), "fynequery.log"),
@@ -161,6 +173,9 @@ func setupLogging() *os.File {
 	db.SetLogger(func(format string, args ...interface{}) {
 		fmt.Fprintf(f, format+"\n", args...)
 	})
+	appLogSink = func(format string, args ...interface{}) {
+		fmt.Fprintf(f, format+"\n", args...)
+	}
 	return f
 }
 

@@ -394,57 +394,6 @@ func readDelimiterDirective(s string) (string, int, bool) {
 	return delim, after, true
 }
 
-// splitStatements splits a SQL script on semicolons that sit outside string
-// literals, quoted identifiers and -- line comments.
-func splitStatements(script string) []string {
-	var out []string
-	var sb strings.Builder
-	var quote byte // 0, '\'', '"' or '`'
-
-	flush := func() {
-		if s := strings.TrimSpace(sb.String()); s != "" {
-			out = append(out, s)
-		}
-		sb.Reset()
-	}
-
-	for i := 0; i < len(script); i++ {
-		c := script[i]
-		if quote != 0 {
-			sb.WriteByte(c)
-			if c == '\\' && quote != '`' && i+1 < len(script) {
-				sb.WriteByte(script[i+1])
-				i++
-				continue
-			}
-			if c == quote {
-				quote = 0
-			}
-			continue
-		}
-		switch c {
-		case '\'', '"', '`':
-			quote = c
-			sb.WriteByte(c)
-		case '-':
-			if i+1 < len(script) && script[i+1] == '-' {
-				for i < len(script) && script[i] != '\n' {
-					i++
-				}
-				sb.WriteByte('\n')
-				continue
-			}
-			sb.WriteByte(c)
-		case ';':
-			flush()
-		default:
-			sb.WriteByte(c)
-		}
-	}
-	flush()
-	return out
-}
-
 // quoteIdent quotes an identifier for the driver.
 func quoteIdent(driver, name string) string {
 	if q, err := sqltext.QuoteIdent(driver, name); err == nil {

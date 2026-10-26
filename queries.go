@@ -34,7 +34,9 @@ func loadSavedQueries() []SavedQuery {
 		return nil
 	}
 	var out []SavedQuery
-	_ = json.Unmarshal(raw, &out)
+	if err := json.Unmarshal(raw, &out); err != nil {
+		appLogf("queries.json parse: %v", err)
+	}
 	return out
 }
 

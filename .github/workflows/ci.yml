@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet
+        # -unsafeptr=false: chrome_windows.go's Win32 message-lParam casts are
+        # ABI-mandated uintptr→Pointer conversions (see check.ps1).
+        run: go vet -unsafeptr=false ./...
+      - name: build
+        run: go build ./...
+      - name: test
+        run: go test -race ./...

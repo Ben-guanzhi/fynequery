@@ -924,8 +924,8 @@ func looksLikeTimeout(err error) bool {
 type stmtRanges struct{ start, end int }
 
 // splitStatementsForRun breaks a script into non-blank top-level statements,
-// honouring quoted strings, -- line comments and /* */ blocks (the backup.go
-// splitStatements variant does not skip block comments, which is too lossy
+// honouring quoted strings, -- line comments and /* */ blocks. The
+// backup.go DELIMITER variant does not skip block comments, which is too lossy
 // for an "Run All" executor). A single trailing ';' on each statement is
 // stripped; attached leading comments are kept (they are valid SQL).
 func splitStatementsForRun(script string) []string {

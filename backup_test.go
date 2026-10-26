@@ -101,24 +101,6 @@ func TestParseConnURL(t *testing.T) {
 	}
 }
 
-func TestSplitStatements(t *testing.T) {
-	script := "SET x=1;\n-- a comment; not a statement\nINSERT INTO t VALUES ('a;b', 'c''d');\n`weird;col` = 1;\n"
-	got := splitStatements(script)
-	want := []string{
-		"SET x=1",
-		"INSERT INTO t VALUES ('a;b', 'c''d')",
-		"`weird;col` = 1",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("got %d stmts: %#v", len(got), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("stmt %d: %q want %q", i, got[i], want[i])
-		}
-	}
-}
-
 func TestSplitStatementsDelimited(t *testing.T) {
 	script := "SET FOREIGN_KEY_CHECKS=0;\n" +
 		"DELIMITER ;;\n" +

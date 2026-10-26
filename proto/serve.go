@@ -126,100 +126,54 @@ func dispatchSafe(h Handler, req Request) (result interface{}, err error) {
 	return dispatch(h, req)
 }
 
+// call unmarshals params into P and invokes fn. The unmarshal-and-call shape
+// was duplicated once per method in dispatch's switch; the table below keeps
+// each method a single line instead.
+func call[P any, R any](h Handler, params json.RawMessage, fn func(P) (R, error)) (any, error) {
+	var q P
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &q); err != nil {
+			return nil, fmt.Errorf("bad params: %w", err)
+		}
+	}
+	return fn(q)
+}
+
+// callVoid is call for methods that return only an error.
+func callVoid[P any](h Handler, params json.RawMessage, fn func(P) error) (any, error) {
+	var q P
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &q); err != nil {
+			return nil, fmt.Errorf("bad params: %w", err)
+		}
+	}
+	return struct{}{}, fn(q)
+}
+
+// dispatchTable maps one protocol method to its handler. Add a row here when
+// the Handler interface grows a method.
+var dispatchTable = map[string]func(Handler, json.RawMessage) (any, error){
+	MethodMeta:      func(h Handler, _ json.RawMessage) (any, error) { return h.Meta(), nil },
+	MethodOpen:      func(h Handler, p json.RawMessage) (any, error) { return call(h, p, h.Open) },
+	MethodClose:     func(h Handler, p json.RawMessage) (any, error) { return callVoid(h, p, h.Close) },
+	MethodTables:    func(h Handler, p json.RawMessage) (any, error) { return call(h, p, h.Tables) },
+	MethodColumns:   func(h Handler, p json.RawMessage) (any, error) { return call(h, p, h.Columns) },
+	MethodQuery:     func(h Handler, p json.RawMessage) (any, error) { return call(h, p, h.Query) },
+	MethodBrowse:    func(h Handler, p json.RawMessage) (any, error) { return call(h, p, h.Browse) },
+	MethodCreateDB:  func(h Handler, p json.RawMessage) (any, error) { return callVoid(h, p, h.CreateDatabase) },
+	MethodUpdate:    func(h Handler, p json.RawMessage) (any, error) { return call(h, p, h.Update) },
+	MethodInsert:    func(h Handler, p json.RawMessage) (any, error) { return call(h, p, h.Insert) },
+	MethodDelete:    func(h Handler, p json.RawMessage) (any, error) { return call(h, p, h.Delete) },
+	MethodApplyBatch: func(h Handler, p json.RawMessage) (any, error) { return call(h, p, h.ApplyBatch) },
+	MethodBegin:     func(h Handler, p json.RawMessage) (any, error) { return callVoid(h, p, h.Begin) },
+	MethodCommit:    func(h Handler, p json.RawMessage) (any, error) { return callVoid(h, p, h.Commit) },
+	MethodRollback:  func(h Handler, p json.RawMessage) (any, error) { return callVoid(h, p, h.Rollback) },
+	MethodMetrics:   func(h Handler, p json.RawMessage) (any, error) { return call(h, p, h.Metrics) },
+}
+
 func dispatch(h Handler, req Request) (interface{}, error) {
-	switch req.Method {
-	case MethodMeta:
-		return h.Meta(), nil
-	case MethodOpen:
-		var p ConnectParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return h.Open(p)
-	case MethodClose:
-		var p CloseParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return struct{}{}, h.Close(p)
-	case MethodTables:
-		var p TablesParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return h.Tables(p)
-	case MethodColumns:
-		var p ColumnsParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return h.Columns(p)
-	case MethodQuery:
-		var p QueryParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return h.Query(p)
-	case MethodBrowse:
-		var p BrowseParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return h.Browse(p)
-	case MethodCreateDB:
-		var p CreateDBParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return struct{}{}, h.CreateDatabase(p)
-	case MethodUpdate:
-		var p DMLSingleParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return h.Update(p)
-	case MethodInsert:
-		var p DMLSingleParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return h.Insert(p)
-	case MethodDelete:
-		var p DMLSingleParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return h.Delete(p)
-	case MethodApplyBatch:
-		var p DMLBatchParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return h.ApplyBatch(p)
-	case MethodBegin:
-		var p TxParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return struct{}{}, h.Begin(p)
-	case MethodCommit:
-		var p TxParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return struct{}{}, h.Commit(p)
-	case MethodRollback:
-		var p TxParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return struct{}{}, h.Rollback(p)
-	case MethodMetrics:
-		var p MetricsParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
-		}
-		return h.Metrics(p)
+	if fn, ok := dispatchTable[req.Method]; ok {
+		return fn(h, req.Params)
 	}
 	return nil, fmt.Errorf("unknown method %q", req.Method)
 }

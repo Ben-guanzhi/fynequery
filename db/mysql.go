@@ -166,9 +166,18 @@ func (s *mysqlSession) scalar(q string, args ...interface{}) (*string, error) {
 	return sqlkit.FormatValue(v), nil
 }
 
+// catalogCtx bounds metadata round-trips (Tables/Columns/KILL/Metrics): they
+// serve UI refreshes from background goroutines, and an unbounded call against
+// a slow server parked the worker (and whatever refresh it was doing) forever.
+func catalogCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 30*time.Second)
+}
+
 func (s *mysqlSession) Tables() ([]proto.ObjectInfo, error) {
 	// An empty schema resolves to DATABASE(), which is what the session is bound to.
-	found, err := dbcoremysql.NewFromDB(s.db).ListTables(context.Background(), "")
+	ctx, cancel := catalogCtx()
+	defer cancel()
+	found, err := dbcoremysql.NewFromDB(s.db).ListTables(ctx, "")
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +192,9 @@ func (s *mysqlSession) Tables() ([]proto.ObjectInfo, error) {
 
 func (s *mysqlSession) Columns(table string) ([]proto.ColumnInfo, error) {
 	// DATABASE() is the schema, so an empty schema resolves to the connected DB.
-	found, err := dbcoremysql.NewFromDB(s.db).ListColumns(context.Background(), "", table)
+	ctx, cancel := catalogCtx()
+	defer cancel()
+	found, err := dbcoremysql.NewFromDB(s.db).ListColumns(ctx, "", table)
 	if err != nil {
 		return nil, err
 	}
@@ -265,12 +276,14 @@ func (s *mysqlSession) KillQuery() error {
 	if id == 0 {
 		return fmt.Errorf("mysql: no active query to kill")
 	}
-	conn, err := s.db.Conn(context.Background())
+	ctx, cancel := catalogCtx()
+	defer cancel()
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("mysql kill: %w", err)
 	}
 	defer conn.Close()
-	_, err = conn.ExecContext(context.Background(), "KILL QUERY "+strconv.FormatInt(id, 10))
+	_, err = conn.ExecContext(ctx, "KILL QUERY "+strconv.FormatInt(id, 10))
 	return err
 }
 
@@ -288,9 +301,11 @@ func (s *mysqlSession) Browse(table string, limit int) (proto.QueryResult, error
 
 // Metrics returns curated read-only MySQL server metrics from SHOW GLOBAL STATUS.
 func (s *mysqlSession) Metrics() ([]proto.Metric, error) {
-	rows, err := s.db.Query("SHOW GLOBAL STATUS WHERE Variable_name IN (" +
-		"'Threads_connected','Threads_running','Uptime','Questions','Queries'," +
-		"'Slow_queries','Bytes_received','Bytes_sent','Innodb_buffer_pool_read_requests'," +
+	ctx, cancel := catalogCtx()
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, "SHOW GLOBAL STATUS WHERE Variable_name IN ("+
+		"'Threads_connected','Threads_running','Uptime','Questions','Queries',"+
+		"'Slow_queries','Bytes_received','Bytes_sent','Innodb_buffer_pool_read_requests',"+
 		"'Innodb_buffer_pool_reads','Max_used_connections')")
 	if err != nil {
 		return nil, err
