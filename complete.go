@@ -136,10 +136,23 @@ func buildSuggestions(tables []string, cols map[string][]string, dbName string, 
 // matchSuggestions returns the candidates whose label starts with prefix
 // (case-insensitive), up to limit entries. An empty prefix returns everything.
 func matchSuggestions(sugs []suggestion, prefix string, limit int) []suggestion {
+	return matchSuggestionsLc(sugs, nil, prefix, limit)
+}
+
+// matchSuggestionsLc matches against a pre-lowered label slice parallel to
+// sugs (nil lowers on the fly): the completion tick used to ToLower every
+// candidate's label on every keystroke over the full ~60k-entry list.
+func matchSuggestionsLc(sugs []suggestion, lower []string, prefix string, limit int) []suggestion {
 	p := strings.ToLower(prefix)
 	var out []suggestion
-	for _, s := range sugs {
-		if p != "" && !strings.HasPrefix(strings.ToLower(s.label), p) {
+	for i, s := range sugs {
+		lc := ""
+		if i < len(lower) {
+			lc = lower[i]
+		} else {
+			lc = strings.ToLower(s.label)
+		}
+		if p != "" && !strings.HasPrefix(lc, p) {
 			continue
 		}
 		out = append(out, s)
@@ -292,30 +305,118 @@ func (qp *queryPane) currentDB() string {
 	return qp.conn.Database
 }
 
+// colCall is one in-flight sess.Columns fetch, shared by every completion
+// request that asked for the same table (singleflight): without it, a
+// Ctrl+Space landing mid-debounce duplicated the round-trip, and the colMu
+// lock used to serialize both behind one slow network call.
+type colCall struct {
+	done chan struct{}
+	cols []string
+}
+
 // columnCandidates returns the columns of the given tables keyed by owner,
 // consulting a cache and the session for the rest (best effort; errors ignored).
 func (qp *queryPane) columnCandidates(tables []string) map[string][]string {
 	qp.colMu.Lock()
-	defer qp.colMu.Unlock()
 	if qp.colCache == nil {
 		qp.colCache = map[string][]string{}
 	}
 	out := make(map[string][]string, len(tables))
+	var missing []string
 	for _, t := range tables {
-		cols, ok := qp.colCache[t]
-		if !ok {
-			if sess := qp.session(); sess != nil {
-				if ci, err := sess.Columns(t); err == nil {
-					for _, c := range ci {
-						cols = append(cols, c.Name)
-					}
-				}
-			}
-			qp.colCache[t] = cols
+		if cols, ok := qp.colCache[t]; ok {
+			out[t] = cols
+		} else {
+			missing = append(missing, t)
 		}
-		out[t] = cols
+	}
+	qp.colMu.Unlock()
+	for _, t := range missing {
+		out[t] = qp.fetchColumnsOnce(t)
 	}
 	return out
+}
+
+// fetchColumnsOnce fetches one table's columns exactly once per generation:
+// cache hit → shared result; concurrent misses join the in-flight fetch.
+// The network call runs outside colMu, so slow lookups never block unrelated
+// completion work.
+func (qp *queryPane) fetchColumnsOnce(t string) []string {
+	qp.colMu.Lock()
+	if qp.colCache == nil {
+		qp.colCache = map[string][]string{}
+	}
+	if cols, ok := qp.colCache[t]; ok {
+		qp.colMu.Unlock()
+		return cols
+	}
+	if qp.colInflight == nil {
+		qp.colInflight = map[string]*colCall{}
+	}
+	if c, ok := qp.colInflight[t]; ok {
+		qp.colMu.Unlock()
+		<-c.done
+		return c.cols
+	}
+	c := &colCall{done: make(chan struct{})}
+	qp.colInflight[t] = c
+	qp.colMu.Unlock()
+
+	var cols []string
+	if sess := qp.session(); sess != nil {
+		if ci, err := sess.Columns(t); err == nil {
+			for _, x := range ci {
+				cols = append(cols, x.Name)
+			}
+		}
+	}
+
+	qp.colMu.Lock()
+	qp.colCache[t] = cols
+	qp.colVersion++
+	delete(qp.colInflight, t)
+	qp.colMu.Unlock()
+	close(c.done)
+	return cols
+}
+
+// sugCache is the built completion candidate list, keyed on the sidebar
+// inventory version, the column-cache version and the database scope.
+// Rebuilding + sorting the merged keyword/function/table/column list on
+// every debounce tick was pure waste when nothing had changed.
+type sugCache struct {
+	invVersion int
+	colVersion int
+	dbName     string
+	sugs       []suggestion
+	lower      []string // parallel lowercased labels for matchSuggestionsLc
+}
+
+// suggestionCache returns the merged candidate list, rebuilding it only when
+// one of its inputs changed. cols must be the map columnCandidates returned
+// for the current refs; it participates via colVersion, not by value.
+func (qp *queryPane) suggestionCache(tables []string, kinds map[string]string, dbName string, invV int, cols map[string][]string) ([]suggestion, []string) {
+	qp.colMu.Lock()
+	defer qp.colMu.Unlock()
+	if c := qp.sug; c != nil && c.invVersion == invV && c.colVersion == qp.colVersion && c.dbName == dbName {
+		return c.sugs, c.lower
+	}
+	sugs := buildSuggestions(tables, cols, dbName, kinds)
+	lower := make([]string, len(sugs))
+	for i, s := range sugs {
+		lower[i] = strings.ToLower(s.label)
+	}
+	qp.sug = &sugCache{invVersion: invV, colVersion: qp.colVersion, dbName: dbName, sugs: sugs, lower: lower}
+	return sugs, lower
+}
+
+// sideInventoryVersion snapshots the sidebar's inventory version on the UI
+// thread; background completion work keys its candidate cache on it.
+func (qp *queryPane) sideInventoryVersion() int {
+	if qp.side == nil {
+		return 0
+	}
+	return qp.side.invVersion
 }
 
 // complete opens the completion menu for the word under the cursor. Besides
@@ -328,11 +429,12 @@ func (qp *queryPane) complete() {
 	}
 	qp.hideAuto()
 	start, word := qp.currentWord()
-	tables := qp.tableCandidates()
+	tables, kinds, dbName, invV := qp.completionInputs()
 	refs := referencedTables(qp.editor.Text, tables)
 	safeGo("query.complete", func() {
 		cols := qp.columnCandidates(refs)
-		sug := matchSuggestions(buildSuggestions(tables, cols, qp.currentDB(), qp.tableKinds()), word, 80)
+		sugs, lower := qp.suggestionCache(tables, kinds, dbName, invV, cols)
+		sug := matchSuggestionsLc(sugs, lower, word, 80)
 		kws := qp.queryKeywordSuggestions(word)
 		safeDo(func() {
 			if len(sug) == 0 && len(kws) == 0 {
@@ -554,6 +656,17 @@ var (
 	delayedFocusSuppressed bool
 )
 
+// completionInputs captures the sidebar-derived completion inputs (tables,
+// kinds, database, inventory version) on the UI thread so the background
+// worker never reads mutable sidebar state.
+func (qp *queryPane) completionInputs() (tables []string, kinds map[string]string, dbName string, invV int) {
+	tables = qp.tableCandidates()
+	kinds = qp.tableKinds()
+	dbName = qp.currentDB()
+	invV = qp.sideInventoryVersion()
+	return
+}
+
 // autoComplete refreshes the inline popup for the identifier under the cursor.
 // It is a no-op unless the editor is focused and the word is a plausible
 // identifier prefix outside quoted strings.
@@ -579,11 +692,12 @@ func (qp *queryPane) autoComplete() {
 		return
 	}
 	gen := qp.autoGen
-	tables := qp.tableCandidates()
+	tables, kinds, dbName, invV := qp.completionInputs()
 	refs := referencedTables(text, tables)
 	safeGo("query.autocomplete", func() {
 		cols := qp.columnCandidates(refs)
-		sug := matchSuggestions(buildSuggestions(tables, cols, qp.currentDB(), qp.tableKinds()), seg, autoCompleteLimit)
+		sugs, lower := qp.suggestionCache(tables, kinds, dbName, invV, cols)
+		sug := matchSuggestionsLc(sugs, lower, seg, autoCompleteLimit)
 		safeDo(func() {
 			defer func() {
 				if autoCompleteSettled != nil {

@@ -2,6 +2,20 @@ package main
 
 import "testing"
 
+// findNow applies a find term with the debounce collapsed: tests assert
+// synchronous state, while the real UI schedules the whole-grid scan
+// findDebounce after typing stops.
+func findNow(g *dataTable, term string) {
+	g.setFindTerm(term)
+	if g.findTimer != nil {
+		g.findTimer.Stop()
+		g.findTimer = nil
+	}
+	if term != "" {
+		g.applyFindTerm(term)
+	}
+}
+
 // TestGridFind covers the in-result search loop: term -> hits -> step forward
 // -> step back (wrapping) -> highlights -> reset. Mirrors TablePlus in-grid
 // spotlight.
@@ -19,7 +33,7 @@ func TestGridFind(t *testing.T) {
 	var cur, total int
 	g.onFindStatus = func(c, tt int) { cur, total = c, tt }
 
-	g.setFindTerm("li") // Alice(0,0), Berlin(1,1), Lima(2,1)
+	findNow(g, "li") // Alice(0,0), Berlin(1,1), Lima(2,1)
 	if len(g.findHits) != 3 {
 		t.Fatalf("hits = %d, want 3 (%v)", len(g.findHits), g.findHits)
 	}
@@ -75,7 +89,7 @@ func TestGridFindNoHit(t *testing.T) {
 	var cur, total int
 	g.onFindStatus = func(c, tt int) { cur, total = c, tt }
 
-	g.setFindTerm("zzz")
+	findNow(g, "zzz")
 	if len(g.findHits) != 0 {
 		t.Fatalf("hits = %v, want none", g.findHits)
 	}
@@ -92,7 +106,7 @@ func TestGridFindSurvivesStreaming(t *testing.T) {
 	g := newDataTable(&TableData{
 		Cols: []ColumnInfo{{Name: "name", Type: "varchar"}},
 	}, nil)
-	g.setFindTerm("li")
+	findNow(g, "li")
 	g.appendRows([][]*string{{s("Alice")}, {s("Bob")}})
 	if len(g.findHits) != 1 || g.findHits[0] != (searchHitKey{0, 0}) {
 		t.Fatalf("hits after batch1 = %v, want [{0 0}]", g.findHits)

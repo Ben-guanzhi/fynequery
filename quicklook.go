@@ -189,29 +189,48 @@ func looksBinary(raw string) bool {
 }
 
 // hexViewLabel renders raw as a classic hex dump (16 bytes/line + ASCII).
+// Everything is written byte-wise into one pre-grown Builder: the previous
+// version did a Sprintf per byte with += concatenation, which was quadratic
+// in the blob size and froze the UI on megabyte values. The hex column is
+// padded to its full width on every line, so the ASCII column of a short
+// final line aligns with the rest (it used to shift left).
 func hexViewLabel(raw string) *widget.Label {
 	b := []byte(raw)
 	const per = 16
+	// hex column width: "xx " per byte plus one group gap after each full
+	// 4-byte group except the trailing one (16*3 + 3 = 51 chars).
+	const hexW = per*3 + per/4 - 1
 	var out strings.Builder
+	out.Grow(len(b)*4 + (len(b)/per+1)*(hexW+14))
+	var hex []byte
 	for off := 0; off < len(b); off += per {
 		end := off + per
 		if end > len(b) {
 			end = len(b)
 		}
 		chunk := b[off:end]
-		hexCol, ascii := "", ""
+		hex = hex[:0]
+		const digits = "0123456789abcdef"
 		for i, c := range chunk {
-			hexCol += fmt.Sprintf("%02x ", c)
+			hex = append(hex, digits[c>>4], digits[c&0x0f], ' ')
 			if i+1 < len(chunk) && (i+1)%4 == 0 {
-				hexCol += " "
-			}
-			if c >= 0x20 && c < 0x7f {
-				ascii += string(c)
-			} else {
-				ascii += "."
+				hex = append(hex, ' ')
 			}
 		}
-		fmt.Fprintf(&out, "%08x  %-47s %s\n", off, hexCol, ascii)
+		fmt.Fprintf(&out, "%08x  ", off)
+		out.Write(hex)
+		for pad := len(hex); pad < hexW; pad++ {
+			out.WriteByte(' ')
+		}
+		out.WriteByte(' ')
+		for _, c := range chunk {
+			if c >= 0x20 && c < 0x7f {
+				out.WriteByte(c)
+			} else {
+				out.WriteByte('.')
+			}
+		}
+		out.WriteByte('\n')
 	}
 	if out.Len() == 0 {
 		l2 := widget.NewLabelWithStyle("<empty>", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})

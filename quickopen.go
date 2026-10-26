@@ -102,11 +102,12 @@ func (ws *workspace) quickOpenCandidates() []objectMatch {
 			out = append(out, objectMatch{Kind: "connection", ConnName: c.Name, Label: c.Name})
 		}
 	}
-	if ws.sess != nil && ws.currentDB != "" {
-		if objs, err := ws.sess.Tables(); err == nil {
-			for _, o := range objs {
-				out = append(out, objectMatch{Kind: "table", Database: ws.currentDB, Table: o.Name, Label: o.Name})
-			}
+	if ws.currentDB != "" {
+		// Reuse the catalog loadInventory already fetched: this runs per
+		// keystroke, and it used to issue a fresh Tables() round-trip each
+		// time (on the UI thread).
+		for _, o := range ws.cachedInventory() {
+			out = append(out, objectMatch{Kind: "table", Database: ws.currentDB, Table: o.Name, Label: o.Name})
 		}
 	}
 	if ws.side != nil {

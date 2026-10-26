@@ -241,6 +241,11 @@ func dumpDatabase(sess db.Session, driver, database string, includeData bool) (s
 			cols[i] = quoteIdent(driver, cn.Name)
 		}
 		colList := "(" + strings.Join(cols, ", ") + ")"
+		// Convert every cell to its display string once per table. Building a
+		// one-row throwaway QueryResult per row (StringRows()[0]) allocated a
+		// fresh payload per dumped row — a hundred thousand rows meant a
+		// hundred thousand temporary structures.
+		rows := data.StringRows()
 		for start := 0; start < len(data.Rows); start += dumpBatch {
 			end := start + dumpBatch
 			if end > len(data.Rows) {
@@ -248,7 +253,7 @@ func dumpDatabase(sess db.Session, driver, database string, includeData bool) (s
 			}
 			b.WriteString("INSERT INTO " + quoteIdent(driver, t) + " " + colList + " VALUES\n")
 			for i := start; i < end; i++ {
-				b.WriteString("  (" + joinMySQLValues(proto.QueryResult{Rows: [][]proto.CellPayload{data.Rows[i]}}.StringRows()[0]) + ")")
+				b.WriteString("  (" + joinMySQLValues(rows[i]) + ")")
 				if i == end-1 {
 					b.WriteString(";\n")
 				} else {

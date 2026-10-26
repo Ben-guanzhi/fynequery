@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // SavedQuery is one entry of the saved-query panel.
@@ -81,15 +82,35 @@ func deleteSavedQuery(name string) error {
 }
 
 // savedQueryKeywords flattens the keyword bindings for the completion menu.
+// Cached on the file's mtime+size: the Ctrl+Space completion path used to
+// re-read and re-parse queries.json per keystroke.
 func savedQueryKeywords() map[string][]SavedQuery {
+	var modTime int64
+	var size int64
+	if st, err := os.Stat(savedQueriesPath); err == nil {
+		modTime, size = st.ModTime().UnixNano(), st.Size()
+	}
+	savedQueryMu.Lock()
+	defer savedQueryMu.Unlock()
+	if savedQueryKws != nil && savedQueryMod == modTime && savedQuerySize == size {
+		return savedQueryKws
+	}
 	out := map[string][]SavedQuery{}
 	for _, q := range loadSavedQueries() {
 		for _, kw := range q.Keywords {
 			out[strings.ToLower(kw)] = append(out[strings.ToLower(kw)], q)
 		}
 	}
+	savedQueryMod, savedQuerySize, savedQueryKws = modTime, size, out
 	return out
 }
+
+var (
+	savedQueryMu   sync.Mutex
+	savedQueryMod  int64
+	savedQuerySize int64
+	savedQueryKws  map[string][]SavedQuery
+)
 
 // sortedSavedQueries returns the panel list in stable name order.
 func sortedSavedQueries() []SavedQuery {

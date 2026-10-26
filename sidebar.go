@@ -51,6 +51,9 @@ type sidebar struct {
 	body        *sidebarBody // pane switcher; refreshed on every state change
 	suppress    bool         // guard Select.OnChanged during programmatic changes
 	objects     []TableInfo  // full inventory from the session
+	invVersion  int          // bumped on every setInventory: completion caches key on it
+	lowerNames  []string     // parallel to objects: lowercased names for the search filter
+	kindByName  map[string]string // name -> kind, so leafIcon never scans the inventory
 	filtered    []TableInfo  // after search filter
 	database    string
 	selID       string // currently selected tree node id (drives white-on-blue rows)
@@ -152,6 +155,16 @@ func (s *sidebar) rootGroups() []string {
 func (s *sidebar) setInventory(objs []TableInfo, database string) {
 	s.objects = objs
 	s.database = database
+	s.invVersion++
+	// Precompute what per-node rendering and filtering need: leafIcon used to
+	// scan the whole inventory for every visible tree row, and the search
+	// filter lowered every name on every keystroke.
+	s.lowerNames = make([]string, len(objs))
+	s.kindByName = make(map[string]string, len(objs))
+	for i, o := range objs {
+		s.lowerNames[i] = strings.ToLower(o.Name)
+		s.kindByName[o.Name] = o.Kind
+	}
 	s.loaded = true
 	s.loadErr = ""
 	s.noDB = false
@@ -295,8 +308,14 @@ func (s *sidebar) applyFilter() {
 		q = strings.ToLower(strings.TrimSpace(s.search.Text))
 	}
 	s.filtered = s.filtered[:0]
-	for _, o := range s.objects {
-		if q == "" || strings.Contains(strings.ToLower(o.Name), q) {
+	for i, o := range s.objects {
+		// lowerNames (built in setInventory) keeps the filter allocation-free;
+		// names can only change via setInventory.
+		lc := o.Name
+		if i < len(s.lowerNames) {
+			lc = s.lowerNames[i]
+		}
+		if q == "" || strings.Contains(lc, q) {
 			s.filtered = append(s.filtered, o)
 		}
 	}
@@ -305,13 +324,16 @@ func (s *sidebar) applyFilter() {
 		if p, q := s.pinned[s.filtered[i].Name], s.pinned[s.filtered[j].Name]; p != q {
 			return p
 		}
-		order := map[string]int{"function": 0, "table": 1, "view": 2}
-		if oi, oj := order[s.filtered[i].Kind], order[s.filtered[j].Kind]; oi != oj {
+		if oi, oj := kindOrder[s.filtered[i].Kind], kindOrder[s.filtered[j].Kind]; oi != oj {
 			return oi < oj
 		}
 		return s.filtered[i].Name < s.filtered[j].Name
 	})
 }
+
+// kindOrder is the sidebar's kind sort order; a package var so the
+// comparator does not build a map per comparison.
+var kindOrder = map[string]int{"function": 0, "table": 1, "view": 2}
 
 // childIDs lists the tree rows under id. KV inventories append a "load more"
 // row while the session holds a further key page.
@@ -364,17 +386,11 @@ func (s *sidebar) setMoreKeys(more bool) {
 // leafIcon picks a light, type-specific glyph so tables, views and functions
 // read apart at a glance without the heavy solid database cylinder.
 func (s *sidebar) leafIcon(name string) fyne.Resource {
-	for _, o := range s.filtered {
-		if o.Name != name {
-			continue
-		}
-		switch o.Kind {
-		case "function":
-			return icons.Function
-		case "view":
-			return icons.View
-		}
-		break
+	switch s.kindByName[name] {
+	case "function":
+		return icons.Function
+	case "view":
+		return icons.View
 	}
 	return icons.Table
 }
@@ -420,10 +436,14 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 			s.onSearch(text)
 		}
 		if s.loaded && !s.kv {
+			// SQL search is a local filter: only the tree changes. Refreshing
+			// the whole sidebar per keystroke rebuilt every pane (including
+			// the history label) for nothing.
 			s.applyFilter()
 			s.tree.Refresh()
+		} else {
+			s.Refresh() // KV: the server-side filter redraws via the pane refresh
 		}
-		s.Refresh()
 	}
 	searchRow := container.NewBorder(nil, nil, widget.NewIcon(icons.Search), s.searchClear, s.search)
 	s.searchWrap = container.NewPadded(searchRow)
@@ -663,15 +683,16 @@ func (b *sidebarBody) Refresh() {
 		if len(b.s.history) == 0 {
 			hl.SetText("-- 暂无查询")
 		} else {
-			out := ""
 			start := 0
 			if n := len(b.s.history); n > 10 {
 				start = n - 10
 			}
+			var out strings.Builder
 			for i := start; i < len(b.s.history); i++ {
-				out += b.s.history[i] + ";\n\n"
+				out.WriteString(b.s.history[i])
+				out.WriteString(";\n\n")
 			}
-			hl.SetText(out)
+			hl.SetText(out.String())
 		}
 	}
 	b.applyPane()

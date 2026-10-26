@@ -103,7 +103,7 @@ func TestSortDataResetsFind(t *testing.T) {
 		Cols: []ColumnInfo{{Name: "name", Type: "varchar"}},
 		Rows: [][]*string{{s("Alice")}, {s("Bob")}, {s("Carol")}, {s("Lima")}},
 	}, nil)
-	g.setFindTerm("li") // Alice(0,0) + Lima(3,0)
+	findNow(g, "li") // Alice(0,0) + Lima(3,0)
 	if len(g.findHits) != 2 {
 		t.Fatalf("hits = %v, want 2", g.findHits)
 	}

@@ -238,13 +238,14 @@ type erDiagram struct {
 	widget.BaseWidget
 	model    *erModel
 	nodes    map[string]*erNodeWidget
+	tableIdx map[string]int // name -> index into model.Tables, for O(1) position lookups
 	lines    []*canvas.Line
 	world    *fyne.Container // nil-layout absolute container
 	scroller fyne.CanvasObject
 }
 
 func newERDiagram(m *erModel) *erDiagram {
-	d := &erDiagram{model: m, nodes: map[string]*erNodeWidget{}}
+	d := &erDiagram{model: m, nodes: map[string]*erNodeWidget{}, tableIdx: map[string]int{}}
 	d.ExtendBaseWidget(d)
 
 	d.world = fyne.NewContainerWithoutLayout() // children keep Move() positions
@@ -254,6 +255,7 @@ func newERDiagram(m *erModel) *erDiagram {
 			continue
 		}
 		d.nodes[m.Tables[i].Name] = node
+		d.tableIdx[m.Tables[i].Name] = i
 		d.world.AddObject(node)
 	}
 	for range m.FKs {
@@ -288,12 +290,11 @@ func (d *erDiagram) CreateRenderer() fyne.WidgetRenderer {
 
 // applyPositions moves every node and re-lays every FK line.
 func (d *erDiagram) applyPositions() {
+	// tableIdx keeps the lookup O(1): the naive scan made each drag tick
+	// O(tables²) with the FK line relayout on top.
 	for name, n := range d.nodes {
-		for i := range d.model.Tables {
-			if d.model.Tables[i].Name == name {
-				n.moveTo(d.model.Tables[i].Pos)
-				break
-			}
+		if i, ok := d.tableIdx[name]; ok {
+			n.moveTo(d.model.Tables[i].Pos)
 		}
 	}
 	d.layoutLines()
@@ -319,6 +320,7 @@ type erNodeWidget struct {
 	widget.BaseWidget
 	d        *erDiagram
 	name     string
+	colIdx   map[string]int // column name -> row index (FK endpoint math)
 	border   *canvas.Rectangle
 	head     *canvas.Rectangle
 	title    *canvas.Text
@@ -341,6 +343,12 @@ func newERNode(d *erDiagram, name string) *erNodeWidget {
 	sz := erBoxSize(*t)
 
 	n := &erNodeWidget{d: d, name: name, width: sz.Width, height: sz.Height}
+	// Column-name → row index, so the FK endpoint math never rescans the
+	// column list per line per drag tick.
+	n.colIdx = make(map[string]int, len(t.Cols))
+	for i, c := range t.Cols {
+		n.colIdx[c.Name] = i
+	}
 	p := pal()
 	n.border = canvas.NewRectangle(p.contentBG)
 	n.border.StrokeColor = p.line
@@ -395,10 +403,8 @@ func (n *erNodeWidget) moveTo(pos fyne.Position) {
 
 // colIndex finds a column's row index within the node (0 when unknown).
 func (n *erNodeWidget) colIndex(col string) int {
-	for i, c := range n.d.model.ColumnsByName(n.name) {
-		if c.Name == col {
-			return i
-		}
+	if i, ok := n.colIdx[col]; ok {
+		return i
 	}
 	return 0
 }

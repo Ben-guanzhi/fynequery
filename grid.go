@@ -5,12 +5,12 @@ package main
 // right-aligned numbers, dimmed NULL cells.
 
 import (
-	"fmt"
 	"image/color"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -66,11 +66,22 @@ type dataTable struct {
 	sortCol int
 	sortAsc bool
 
+	// Per-column values the cell renderers need on every paint, precomputed
+	// once (see metaFor). Re-matching the SQL type and re-parsing the name's
+	// magic suffix per cell per refresh was the grid's hottest cost.
+	colMeta []colMeta
+	// Column-width cache, keyed on widthsGen (bumped by every colWidths /
+	// hidden / frozen mutation) and the requested width.
+	cwCache   *colWidthsCache
+	widthsGen int
+
 	// in-result search state (TablePlus in-grid spotlight)
 	findTerm     string
 	findHits     []searchHitKey
 	findHitSet   map[searchHitKey]bool
 	findCur      int
+	findTimer    *time.Timer // debounces the per-keystroke full scan
+	findGen      int         // drops a debounced scan overtaken by newer typing
 	onFindStatus func(cur, total int) // updates the counter label when hits change
 
 	// copy/Query-Magics context: owning table name ("" for query results) and
@@ -121,6 +132,7 @@ type searchHitKey [2]int
 // setHidden applies a hidden-column mask (by index) and re-lays-out the grid.
 func (t *dataTable) setHidden(m map[int]bool) {
 	t.hidden = m
+	t.widthsGen++
 	t.Refresh()
 	t.Resize(t.Size()) // force a re-layout so widths/visibility take effect
 }
@@ -149,8 +161,14 @@ func (t *dataTable) setData(d *TableData) {
 	t.findHits = nil
 	t.findHitSet = nil
 	t.findCur = 0
+	if t.findTimer != nil {
+		t.findTimer.Stop()
+		t.findTimer = nil
+	}
 	t.frozen = false
 	t.colWidths = nil
+	t.widthsGen++
+	t.colMeta = nil
 	if t.rows != nil {
 		t.rows.rebuildRows()
 	}
@@ -165,6 +183,17 @@ func (t *dataTable) setData(d *TableData) {
 // ascending/descending; numbers compare numerically only when the column's
 // declared type is numeric (a text column of digits stays lexicographic).
 // Mirrors TablePlus HeaderSort / HeaderSortDirection.
+// sortKey is the precomputed comparison key for one row during a sort.
+// Decorating once (O(n) ParseFloat calls) turns the sort's O(n log n)
+// comparator into pure field lookups — re-parsing both cells per comparison
+// made a 5000-row numeric sort parse ~120k times.
+type sortKey struct {
+	null  bool
+	isNum bool
+	num   float64
+	s     string
+}
+
 func (t *dataTable) sortData(col int) {
 	if col < 0 || col >= len(t.data.Cols) {
 		return
@@ -177,51 +206,101 @@ func (t *dataTable) sortData(col int) {
 	}
 	asc := t.sortAsc
 	numeric := isNumericType(t.data.Cols[col].Type)
-	sort.SliceStable(t.data.Rows, func(i, j int) bool {
-		if i >= len(t.data.Rows) || j >= len(t.data.Rows) {
-			return false
+	rows := t.data.Rows
+	keys := make([]sortKey, len(rows))
+	for i, row := range rows {
+		v := cellStr(row, col)
+		k := &keys[i]
+		if v == nil {
+			k.null = true
+			continue
 		}
-		a, b := cellStr(t.data.Rows[i], col), cellStr(t.data.Rows[j], col)
-		aNull, bNull := a == nil, b == nil
-		if aNull != bNull {
-			return !aNull // non-NULL first; NULLs always sink to the bottom
-		}
-		if aNull {
-			return false
-		}
-		av, bv := *a, *b
+		k.s = *v
 		if numeric {
-			if fa, ea := strconv.ParseFloat(av, 64); ea == nil {
-				if fb, eb := strconv.ParseFloat(bv, 64); eb == nil {
-					if asc {
-						return fa < fb
-					}
-					return fa > fb
-				}
+			if f, err := strconv.ParseFloat(k.s, 64); err == nil {
+				k.num, k.isNum = f, true
 			}
 		}
-		if asc {
-			return av < bv
+	}
+	// Decorate-sort-undecorate over an index permutation: the comparator
+	// reads keys by ORIGINAL index while sort permutes `order`, then the
+	// permutation is applied to the rows once. Sorting the row slice
+	// directly would break the index↔key correspondence as elements move.
+	order := make([]int, len(rows))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		a, b := &keys[order[i]], &keys[order[j]]
+		if a.null != b.null {
+			return !a.null // non-NULL first; NULLs always sink to the bottom
 		}
-		return av > bv
+		if a.null {
+			return false
+		}
+		if a.isNum && b.isNum {
+			if asc {
+				return a.num < b.num
+			}
+			return a.num > b.num
+		}
+		if asc {
+			return a.s < b.s
+		}
+		return a.s > b.s
 	})
+	sorted := make([][]*string, len(rows))
+	for i, src := range order {
+		sorted[i] = rows[src]
+	}
+	t.data.Rows = sorted
 	t.Refresh()
 	t.rescanFind() // a re-order invalidates collected hit positions
 }
 
 // setFindTerm re-scans the grid for the term and spotlights the first hit.
+// The scan is debounced: it touches every cell, so running it per keystroke
+// over a large result froze typing. Clearing stays immediate so highlights
+// vanish the moment the term is emptied.
 func (t *dataTable) setFindTerm(term string) {
 	t.findTerm = term
 	t.findHits = nil
 	t.findHitSet = nil
 	t.findCur = 0
-	needle := strings.ToLower(term)
-	if needle != "" {
-		t.scanFindHits(needle)
-		t.buildFindSet()
-		if len(t.findHits) > 0 {
-			t.showFindHit(0)
-		}
+	if t.findTimer != nil {
+		t.findTimer.Stop()
+		t.findTimer = nil
+	}
+	if term == "" {
+		t.updateFindStatus()
+		t.Refresh()
+		return
+	}
+	t.updateFindStatus()
+	t.Refresh()
+	t.findGen++
+	gen := t.findGen
+	t.findTimer = time.AfterFunc(findDebounce, func() {
+		safeDo(func() {
+			if gen != t.findGen || term != t.findTerm {
+				return // typing continued; a newer scan is scheduled
+			}
+			t.applyFindTerm(term)
+		})
+	})
+}
+
+// findDebounce waits out fast typing before the whole-grid search scan runs.
+const findDebounce = 180 * time.Millisecond
+
+// applyFindTerm runs the (debounced) whole-grid scan for term synchronously:
+// resets the hit list, rescans, spotlights the first hit and repaints.
+func (t *dataTable) applyFindTerm(term string) {
+	t.findHits = nil
+	t.scanFindHits(strings.ToLower(term))
+	t.buildFindSet()
+	if len(t.findHits) > 0 {
+		t.showFindHit(0)
 	}
 	t.updateFindStatus()
 	t.Refresh()
@@ -230,13 +309,61 @@ func (t *dataTable) setFindTerm(term string) {
 // scanFindHits collects every cell whose displayed text contains the needle,
 // in reading order. Comparing cellText means pending edits are searched too.
 func (t *dataTable) scanFindHits(needle string) {
-	for r := 0; r < len(t.data.Rows); r++ {
+	t.scanFindHitsRange(0, len(t.data.Rows), needle)
+}
+
+// scanFindHitsRange collects hits in rows [from, to) — the incremental form
+// appendRows uses while a result streams in.
+func (t *dataTable) scanFindHitsRange(from, to int, needle string) {
+	for r := from; r < to; r++ {
 		for c := 0; c < len(t.data.Cols); c++ {
-			if strings.Contains(strings.ToLower(t.cellText(r, c)), needle) {
+			if containsFold(t.cellText(r, c), needle) {
 				t.findHits = append(t.findHits, searchHitKey{r, c})
 			}
 		}
 	}
+	t.buildFindSet()
+}
+
+// containsFold reports whether s contains needle, case-insensitively for
+// ASCII and case-sensitively for non-ASCII text (CJK text is unaffected — it
+// has no case). It allocates nothing, unlike Contains(ToLower(s), needle),
+// which used to copy every cell's text on every keystroke.
+func containsFold(s, needle string) bool {
+	if needle == "" {
+		return true
+	}
+	if strings.Contains(s, needle) {
+		return true
+	}
+	if needle == strings.ToLower(needle) && needle == strings.ToUpper(needle) {
+		return false // no ASCII letters in the needle: the exact match was the only chance
+	}
+	n := len(needle)
+	for i := 0; i+n <= len(s); i++ {
+		if asciiFoldEqual(s[i:i+n], needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// asciiFoldEqual compares two equal-length byte strings ASCII-case-insensitively.
+func asciiFoldEqual(a, b string) bool {
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if ca == cb {
+			continue
+		}
+		if ('A' <= ca && ca <= 'Z') && cb == ca|0x20 {
+			continue
+		}
+		if ('A' <= cb && cb <= 'Z') && ca == cb|0x20 {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // buildFindSet indexes the collected hits for the per-cell highlight test.
@@ -330,6 +457,7 @@ func (t *dataTable) updateFindStatus() {
 // TableContentV4.AppendData). Used by the query pane to paint large results
 // incrementally instead of blocking on one giant rebuild.
 func (t *dataTable) appendRows(rows [][]*string) {
+	first := len(t.data.Rows)
 	t.data.Rows = append(t.data.Rows, rows...)
 	t.data.Fetched = len(t.data.Rows)
 	if t.data.Fetched > t.data.Total {
@@ -342,22 +470,57 @@ func (t *dataTable) appendRows(rows [][]*string) {
 		t.rows.syncRows()
 	}
 	t.Refresh()
-	t.rescanFind()
+	// While a term is active, scan only the newly arrived rows: rescanning
+	// every cell per batch made streaming O(n²) with search on. Positions of
+	// earlier hits are unchanged (rows only append), so the collected set
+	// stays valid.
+	if t.findTerm != "" {
+		t.scanFindHitsRange(first, len(t.data.Rows), strings.ToLower(t.findTerm))
+		t.updateFindStatus()
+	}
 }
 
 // selectRow moves the row highlight and notifies the workspace so the right
-// sidebar can show the row's field values.
+// sidebar can show the row's field values. Only the affected rows repaint.
 func (t *dataTable) selectRow(i int) {
+	old, oldCol := t.selRow, t.selCol
 	t.selRow = i
 	if t.window != nil && t.window.Canvas() != nil {
 		t.window.Canvas().Focus(t) // so arrow keys / Ctrl+C target this grid
 	}
-	t.Refresh()
 	if t.rows != nil {
+		if old != i || oldCol != t.selCol {
+			t.repaintRows(old, i) // repaint the rows whose highlight changed
+		}
 		t.rows.ensureVisible(i)
+	} else {
+		t.Refresh() // pre-layout: nothing to target yet
 	}
 	if t.onRowSelect != nil {
 		t.onRowSelect(i)
+	}
+}
+
+// repaintRows refreshes just the pooled row views bound to the given data
+// rows (negative indices are skipped). Falls back to a full refresh when the
+// row widget has not been laid out yet.
+func (t *dataTable) repaintRows(rows ...int) {
+	if t.rows == nil || t.rows.pool == nil {
+		t.Refresh()
+		return
+	}
+	repainted := false
+	for _, rv := range t.rows.pool {
+		for _, r := range rows {
+			if r >= 0 && rv.idx == r && rv.Visible() {
+				rv.Refresh()
+				repainted = true
+			}
+		}
+	}
+	if !repainted && len(rows) > 0 {
+		// None of the affected rows is on screen; nothing to do.
+		_ = rows
 	}
 }
 
@@ -387,13 +550,27 @@ func (t *dataTable) rowValues(row int) []*string {
 	return out
 }
 
+// colWidthsCache holds the last columnWidths result together with the state
+// it was computed from. The cached slice must be treated as read-only by
+// callers — the header drag handler mutates t.colWidths directly and bumps
+// widthsGen to discard the cache afterwards.
+type colWidthsCache struct {
+	gen   int
+	avail float32
+	out   []float32
+}
+
 func (t *dataTable) columnWidths(avail float32) []float32 {
 	n := len(t.data.Cols)
 	if n == 0 {
 		return nil
 	}
+	if c := t.cwCache; c != nil && c.gen == t.widthsGen && c.avail == avail && len(c.out) == n {
+		return c.out
+	}
+	var out []float32
 	if t.frozen {
-		out := make([]float32, n)
+		out = make([]float32, n)
 		for i := range out {
 			if i < len(t.colWidths) {
 				out[i] = t.colWidths[i]
@@ -401,24 +578,25 @@ func (t *dataTable) columnWidths(avail float32) []float32 {
 				out[i] = minColWidth
 			}
 		}
-		return out
-	}
-	vis := t.visibleCount()
-	if vis == 0 {
-		vis = 1
-	}
-	w := (avail - gutterWidth) / float32(vis)
-	if w < minColWidth {
-		w = minColWidth
-	}
-	out := make([]float32, n)
-	for i := range out {
-		if t.isHidden(i) {
-			out[i] = 0
-			continue
+	} else {
+		vis := t.visibleCount()
+		if vis == 0 {
+			vis = 1
 		}
-		out[i] = w
+		w := (avail - gutterWidth) / float32(vis)
+		if w < minColWidth {
+			w = minColWidth
+		}
+		out = make([]float32, n)
+		for i := range out {
+			if t.isHidden(i) {
+				out[i] = 0
+				continue
+			}
+			out[i] = w
+		}
 	}
+	t.cwCache = &colWidthsCache{gen: t.widthsGen, avail: avail, out: out}
 	return out
 }
 
@@ -680,6 +858,9 @@ func (h *headerWidget) Dragged(e *fyne.DragEvent) {
 	if t.colWidths[h.dragCol] < minColWidth {
 		t.colWidths[h.dragCol] = minColWidth
 	}
+	// The drag mutates t.colWidths (which may alias the width cache), so the
+	// cache must go.
+	t.widthsGen++
 	t.Refresh()
 	t.Resize(t.Size())
 }
@@ -709,6 +890,7 @@ func (h *headerWidget) DoubleTapped(*fyne.PointEvent) {
 	t := h.t
 	t.frozen = false
 	t.colWidths = nil
+	t.widthsGen++
 	t.Refresh()
 	t.Resize(t.Size())
 }
@@ -1112,23 +1294,26 @@ func (rv *rowView) colAtX(x float32) int {
 func (rv *rowView) Cursor() desktop.Cursor { return desktop.DefaultCursor }
 
 // MouseIn/Out drive the row hover highlight via dataTable.hoverRow, read by the
-// gutter and cell renderers.
+// gutter and cell renderers. Only the two affected row views repaint — a full
+// dataTable.Refresh walks every pooled row (~1000 cells) and made moving the
+// mouse down a column stutter.
 func (rv *rowView) MouseIn(*desktop.MouseEvent) {
 	if rv.t.hoverRow != rv.idx {
+		old := rv.t.hoverRow
 		rv.t.hoverRow = rv.idx
-		rv.t.Refresh()
+		rv.t.repaintRows(old, rv.idx)
 	}
 }
 func (rv *rowView) MouseMoved(*desktop.MouseEvent) {}
 func (rv *rowView) MouseOut() {
 	if rv.t.hoverRow == rv.idx {
 		rv.t.hoverRow = -1
-		rv.t.Refresh()
+		rv.t.repaintRows(rv.idx)
 	}
 }
 
 func (rv *rowView) CreateRenderer() fyne.WidgetRenderer {
-	rv.gut = canvas.NewText(fmt.Sprintf("%d", rv.idx+1), pal().gridNullFG)
+	rv.gut = canvas.NewText(strconv.Itoa(rv.idx+1), pal().gridNullFG)
 	rv.gut.TextSize = 12
 	rv.gut.Alignment = fyne.TextAlignTrailing
 	rv.gutBG = canvas.NewRectangle(pal().gutterBG)
@@ -1172,7 +1357,7 @@ func (r *rowViewRenderer) Layout(size fyne.Size) {
 }
 
 func (r *rowViewRenderer) Refresh() {
-	r.rv.gut.Text = fmt.Sprintf("%d", r.rv.idx+1)
+	r.rv.gut.Text = strconv.Itoa(r.rv.idx+1)
 	p := pal()
 	if r.rv.idx == r.rv.t.selRow {
 		r.rv.gut.Color = p.selFG // white row number on the blue selection
@@ -1285,7 +1470,8 @@ func (r *cellRenderer) Refresh() {
 		}
 	}
 	isNull := cell == nil
-	numeric := cv.col < len(cv.t.data.Cols) && isNumericType(cv.t.data.Cols[cv.col].Type)
+	m := cv.t.metaFor(cv.col)
+	numeric := m.numeric
 
 	txt := ""
 	style := fyne.TextStyle{}
@@ -1298,19 +1484,16 @@ func (r *cellRenderer) Refresh() {
 		// (__format__ aliases) reshape the text/colour first.
 		raw := *cell
 		txt = raw
-		r.text.Color = cellColor(cv, p)
-		if cv.col < len(cv.t.data.Cols) {
-			_, magic := splitMagic(cv.t.data.Cols[cv.col].Name)
-			if strings.HasPrefix(magic, "goto:") {
-				// a table-jump link (TablePlus foreign-key arrow)
-				r.text.Color = p.statusLink
-				style.Italic = true
-			} else if magic != "" {
-				if mtxt, c, mstyle, ok := renderMagic(magic, raw, p); ok {
-					txt = mtxt
-					r.text.Color = c
-					style = mstyle
-				}
+		r.text.Color = cellColor(m, p)
+		if strings.HasPrefix(m.magic, "goto:") {
+			// a table-jump link (TablePlus foreign-key arrow)
+			r.text.Color = p.statusLink
+			style.Italic = true
+		} else if m.magic != "" {
+			if mtxt, c, mstyle, ok := renderMagic(m.magic, raw, p); ok {
+				txt = mtxt
+				r.text.Color = c
+				style = mstyle
 			}
 		}
 	}
@@ -1388,23 +1571,70 @@ func (cv *cellView) DoubleTapped(*fyne.PointEvent) {
 	}
 }
 
-// cellColor picks the value color for a cell from its column's SQL type,
-// mirroring TablePlus' color-coded data grid.
-func cellColor(cv *cellView, p *palette) color.Color {
-	if cv.col >= len(cv.t.data.Cols) {
-		return p.cellDefault
+// colMeta carries the per-column values the cell renderers need on every
+// paint, precomputed once per data change instead of re-derived per cell:
+// cellColor's ToLower(Type) alone allocated one string per cell per refresh.
+type colMeta struct {
+	numeric  bool
+	colorKey int // one of the ck* constants below
+	base     string
+	magic    string
+}
+
+// Colour kinds cellColor maps to palette entries (cellColor's former switch).
+const (
+	ckDefault = iota
+	ckInt
+	ckFloat
+	ckDate
+	ckStr
+)
+
+// metaFor returns the derived values for column col, rebuilding the cache
+// when the column set changed. Lazy so construction order never matters.
+func (t *dataTable) metaFor(col int) colMeta {
+	if len(t.colMeta) != len(t.data.Cols) {
+		t.rebuildColMeta()
 	}
-	switch strings.ToLower(cv.t.data.Cols[cv.col].Type) {
-	case "int", "int2", "int4", "int8", "integer", "tinyint", "smallint",
-		"mediumint", "bigint", "serial", "bigserial", "smallserial", "bit", "bool", "boolean":
+	if col < 0 || col >= len(t.colMeta) {
+		return colMeta{}
+	}
+	return t.colMeta[col]
+}
+
+func (t *dataTable) rebuildColMeta() {
+	t.colMeta = make([]colMeta, len(t.data.Cols))
+	for i, c := range t.data.Cols {
+		m := &t.colMeta[i]
+		m.numeric = isNumericType(c.Type)
+		m.base, m.magic = splitMagic(c.Name)
+		switch strings.ToLower(c.Type) {
+		case "int", "int2", "int4", "int8", "integer", "tinyint", "smallint",
+			"mediumint", "bigint", "serial", "bigserial", "smallserial", "bit", "bool", "boolean":
+			m.colorKey = ckInt
+		case "numeric", "decimal", "float", "float4", "float8", "double",
+			"double precision", "real", "money", "number":
+			m.colorKey = ckFloat
+		case "date", "datetime", "timestamp", "time", "year", "timestamptz":
+			m.colorKey = ckDate
+		case "char", "varchar", "text", "string", "enum", "uuid", "json",
+			"jsonb", "nvarchar", "nchar", "longtext", "mediumtext":
+			m.colorKey = ckStr
+		}
+	}
+}
+
+// cellColor maps a column's precomputed colour kind to the palette,
+// mirroring TablePlus' color-coded data grid.
+func cellColor(m colMeta, p *palette) color.Color {
+	switch m.colorKey {
+	case ckInt:
 		return p.cellInt
-	case "numeric", "decimal", "float", "float4", "float8", "double",
-		"double precision", "real", "money", "number":
+	case ckFloat:
 		return p.cellFloat
-	case "date", "datetime", "timestamp", "time", "year", "timestamptz":
+	case ckDate:
 		return p.cellDate
-	case "char", "varchar", "text", "string", "enum", "uuid", "json",
-		"jsonb", "nvarchar", "nchar", "longtext", "mediumtext":
+	case ckStr:
 		return p.cellStr
 	}
 	return p.cellDefault
