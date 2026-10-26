@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -107,6 +108,8 @@ type workspace struct {
 	loadingGen       int         // generation counter to discard stale async results
 	searchTimer      *time.Timer // pending KV key-filter debounce
 	searchSeq        int         // drops a debounced filter overtaken by newer typing
+	keepAliveStop    chan struct{} // closed when the workspace closes, ending the keep-alive ticker
+	invCache         []proto.ObjectInfo // last fetched catalog (approxRows lookup); guarded by loadingMu
 	// toolbar
 	ribbon        *serverRibbon     // connection ribbon (opens the connection picker)
 	ribbonTLS     string            // TLS version shown in the ribbon ("" = omit)
@@ -172,9 +175,15 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 			return
 		}
 		closing = true
-		if ws.sess != nil {
-			ws.sess.Close()
-			ws.sess = nil
+		// End the keep-alive goroutine first so it never observes a torn
+		// session swap, then close the session under the same lock.
+		if ws.keepAliveStop != nil {
+			close(ws.keepAliveStop)
+			ws.keepAliveStop = nil
+		}
+		if old := ws.liveSession(); old != nil {
+			old.Close()
+			ws.setSession(nil)
 		}
 		w.Close()
 		// Switching connections from the toolbar opens the next workspace
@@ -339,11 +348,11 @@ func (ws *workspace) openMoreMenu() {
 			darkMode = !darkMode
 			applyTheme(ws.window)
 		}),
-		fyne.NewMenuItem(fmt.Sprintf("保活 ping(30s): %s", map[bool]string{true: "开", false: "关"}[keepAliveEnabled]), func() {
-			keepAliveEnabled = !keepAliveEnabled
+		fyne.NewMenuItem(fmt.Sprintf("保活 ping(30s): %s", map[bool]string{true: "开", false: "关"}[keepAliveEnabled.Load()]), func() {
+			keepAliveEnabled.Store(!keepAliveEnabled.Load())
 			showInfo(ws.window, "连接保活",
 				fmt.Sprintf("每 30 秒向服务器发一次 ping，防止空闲连接被防火墙/SSH 断开。当前：%s。",
-					map[bool]string{true: "开", false: "关"}[keepAliveEnabled]))
+					map[bool]string{true: "开", false: "关"}[keepAliveEnabled.Load()]))
 		}),
 		fyne.NewMenuItem(privacyLabel, func() { ws.togglePrivacy() }),
 		fyne.NewMenuItem("ER Diagram", func() { ws.openERDiagram() }),
@@ -493,7 +502,11 @@ const detailWidth float32 = 230
 // (closed by servers/firewalls/SSH) stay open.
 const keepAliveInterval = 30 * time.Second
 
-var keepAliveEnabled = true // toggled from the 更多功能 menu
+// keepAliveEnabled is toggled from the 更多功能 menu; atomic because the
+// keep-alive goroutine reads it on its own thread.
+var keepAliveEnabled atomic.Bool
+
+func init() { keepAliveEnabled.Store(true) }
 
 // liveSession / setSession guard ws.sess against the keep-alive goroutine.
 func (ws *workspace) liveSession() db.Session {
@@ -505,6 +518,7 @@ func (ws *workspace) liveSession() db.Session {
 func (ws *workspace) setSession(s db.Session) {
 	ws.loadingMu.Lock()
 	ws.sess = s
+	ws.invCache = nil // the previous session's catalog says nothing about the new one
 	ws.loadingMu.Unlock()
 	safeDo(ws.syncTxControls)
 }
@@ -512,16 +526,25 @@ func (ws *workspace) setSession(s db.Session) {
 // startKeepAlive pings the session every 30s in the background. It reads the
 // current session pointer each tick (so a database switch just follows), and
 // is a no-op while keepAliveEnabled is off. SQLite connections (file-based,
-// never idle-closed) skip the ping.
+// never idle-closed) skip the ping. The goroutine exits when the workspace's
+// CloseIntercept closes keepAliveStop — without it every workspace window
+// leaked one live goroutine (holding the whole workspace) after closing.
 func (ws *workspace) startKeepAlive() {
 	if ws.conn.Driver == "sqlite" {
 		return
 	}
+	stop := make(chan struct{})
+	ws.keepAliveStop = stop
 	go func() {
 		tick := time.NewTicker(keepAliveInterval)
 		defer tick.Stop()
-		for range tick.C {
-			if !keepAliveEnabled {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+			}
+			if !keepAliveEnabled.Load() {
 				continue
 			}
 			sess := ws.liveSession()
@@ -760,13 +783,15 @@ func (ws *workspace) build() fyne.CanvasObject {
 }
 
 // fetchFunctions lists stored functions/routines for the 函数 tree group.
-// Best-effort: unsupported drivers simply yield nothing.
-func (ws *workspace) fetchFunctions() []TableInfo {
-	if ws.sess == nil || ws.currentDB == "" {
+// Best-effort: unsupported drivers simply yield nothing. It issues a real
+// query, so it must run on a background goroutine; driver and database are
+// snapshots so the worker never reads mutable workspace state.
+func (ws *workspace) fetchFunctions(sess db.Session, driver, curDB string) []TableInfo {
+	if sess == nil || curDB == "" {
 		return nil
 	}
 	var q string
-	switch ws.conn.Driver {
+	switch driver {
 	case "redis":
 		return nil // keyspace, not routines
 	case "postgres", "postgresql":
@@ -778,7 +803,7 @@ func (ws *workspace) fetchFunctions() []TableInfo {
 		q = "SELECT routine_name FROM information_schema.routines " +
 			"WHERE routine_schema = DATABASE() AND routine_type = 'FUNCTION' ORDER BY routine_name"
 	}
-	res, err := ws.sess.Query(q, 5000)
+	res, err := sess.Query(q, 5000)
 	if err != nil {
 		return nil
 	}
@@ -800,28 +825,42 @@ func (ws *workspace) loadInventory() {
 		return
 	}
 	gen := ws.nextGen()
+	sess := ws.liveSession()
+	if sess == nil {
+		return
+	}
+	// Snapshots: the worker must not read ws.sess / ws.conn, which the
+	// reconnect/close paths swap concurrently.
+	driver, curDB := ws.conn.Driver, ws.currentDB
 	safeGo("loadInventory", func() {
-		objs, err := ws.sess.Tables()
+		objs, err := sess.Tables()
+		// fetchFunctions is its own query — it belongs in this background
+		// goroutine; calling it inside the safeDo block below froze the UI
+		// for the length of the round-trip.
+		fns := ws.fetchFunctions(sess, driver, curDB)
 		safeDo(func() {
-			if !ws.current(gen) || ws.sess == nil {
+			if !ws.current(gen) || ws.liveSession() != sess {
 				return
 			}
 			if err != nil {
 				ws.side.setLoadError(err.Error()) // inline, persistent (was a transient dialog)
 				return
 			}
-			list := make([]TableInfo, 0, len(objs))
+			list := make([]TableInfo, 0, len(objs)+len(fns))
 			for _, o := range objs {
 				list = append(list, TableInfo{Name: o.Name, Kind: o.Kind, Rows: o.Rows, Approx: o.ApproxRows})
 			}
-			list = append(list, ws.fetchFunctions()...)
+			list = append(list, fns...)
 			ws.side.setInventory(list, ws.currentDB)
-			if kp, ok := db.AsKeyPager(ws.sess); ok {
+			ws.loadingMu.Lock()
+			ws.invCache = objs // approxRows reads the catalog from here, no re-pull
+			ws.loadingMu.Unlock()
+			if kp, ok := db.AsKeyPager(sess); ok {
 				ws.side.setMoreKeys(kp.MoreKeys())
 			} else {
 				ws.side.setMoreKeys(false)
 			}
-			if srv := ws.sess.Server(); srv != "" {
+			if srv := sess.Server(); srv != "" {
 				ws.window.SetTitle("TablePro — " + ws.conn.Name + " — " + srv)
 			}
 			ws.refreshRibbon()
@@ -1519,7 +1558,7 @@ func (t *dataTableTab) gridRowCount() int {
 // switching databases never strands a captured (closed) connection.
 func (ws *workspace) newQueryTabPane() *queryPane {
 	qp := newQueryPane(ws.window, ws.conn, ws.sess, ws.side)
-	qp.sessFn = func() db.Session { return ws.sess }
+	qp.sessFn = func() db.Session { return ws.liveSession() }
 	qp.onReconnect = ws.reconnect
 	qp.onRowSelect = ws.showQueryRow
 	qp.onLog = func(s string) { ws.logf("%s", s) }
@@ -2115,6 +2154,17 @@ func (ws *workspace) quoteTable(name string) string {
 	}
 }
 
+// quoteSQLString renders v as a single-quoted SQL string literal for the
+// connection's dialect. MySQL (unless NO_BACKSLASH_ESCAPES) treats '\' as an
+// escape inside literals, so a value ending in a backslash would escape the
+// closing quote and corrupt the statement — double it along with the quotes.
+func (ws *workspace) quoteSQLString(v string) string {
+	if ws.conn.Driver == "mysql" || ws.conn.Driver == "mariadb" {
+		v = strings.ReplaceAll(v, `\`, `\\`)
+	}
+	return "'" + strings.ReplaceAll(v, "'", "''") + "'"
+}
+
 // updatePaging refreshes the ‹/› button states.
 func (ws *workspace) updatePaging(canPrev, canNext bool) {
 	if ws.prevBtn == nil {
@@ -2160,12 +2210,23 @@ func (ws *workspace) loadIndexes() {
 	ws.loadIndexesTab(t, ws.liveSession())
 }
 
-// approxRows looks up the inventory entry for the current table.
+// cachedInventory returns the catalog loadInventory fetched, or nil when none
+// is loaded. UI-thread callers must not fall back to a live Tables() — that
+// would put a network round-trip back on the UI thread.
+func (ws *workspace) cachedInventory() []proto.ObjectInfo {
+	ws.loadingMu.Lock()
+	defer ws.loadingMu.Unlock()
+	return ws.invCache
+}
+
+// approxRows looks up the inventory entry for the current table in the
+// catalog cached by loadInventory. It used to re-pull Tables() on every table
+// open — a full catalog round-trip per click (N+1 when browsing several
+// tables). A cold cache (inventory not loaded yet) simply reports "unknown".
 func (ws *workspace) approxRows(name string) (int, bool) {
-	objs, err := ws.sess.Tables()
-	if err != nil {
-		return -1, false
-	}
+	ws.loadingMu.Lock()
+	objs := ws.invCache
+	ws.loadingMu.Unlock()
 	for _, o := range objs {
 		if o.Name == name {
 			return int(o.Rows), o.ApproxRows && o.Rows >= 0

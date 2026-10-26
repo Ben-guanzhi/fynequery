@@ -363,7 +363,7 @@ func (ws *workspace) gotoTable(table, column, value string) {
 	// own filter per tab, so the goto filter is applied to that tab directly.
 	filter := ""
 	if column != "" {
-		filter = ws.quoteTable(column) + " = '" + strings.ReplaceAll(value, "'", "''") + "'"
+		filter = ws.quoteTable(column) + " = " + ws.quoteSQLString(value)
 	}
 	ws.openTableFiltered(table, filter)
 }
@@ -886,13 +886,23 @@ func kvDeleteFor(key string, g *dataTable, row int) (db.ValueEdit, bool) {
 func (ws *workspace) writeKVDelete(d db.ValueDeleter, edit db.ValueEdit) {
 	safeGo("kv delete", func() {
 		err := d.DeleteValue(edit)
+		// The "did the key vanish?" probe is a Redis round-trip: it stays in
+		// this background goroutine — issuing it from the safeDo block below
+		// froze the UI for the length of the call.
+		sess := ws.liveSession()
+		gone := false
+		if err == nil && sess != nil {
+			if _, cerr := sess.Columns(edit.Key); cerr != nil {
+				gone = true
+			}
+		}
 		safeDo(func() {
 			if err != nil {
 				dialog.NewError(err, ws.window).Show()
 				return
 			}
 			ws.logf("已删除 %s 的 %s=%s", edit.Key, edit.Identity, edit.ID)
-			if _, err := ws.sess.Columns(edit.Key); err != nil {
+			if gone {
 				ws.closeDataTabNamed(edit.Key)
 				ws.loadInventory()
 				return

@@ -4,11 +4,14 @@ package main
 // Structure pane: column list for the Structure segment.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"image/color"
+	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -64,12 +67,17 @@ type queryPane struct {
 	onRowSelect   func(data *TableData, row int) // a result row was selected
 	onLog         func(string)                   // workspace console sink (optional)
 	colCache      map[string][]string            // table -> column names (completion)
-	colMu         sync.Mutex                     // guards colCache (autocomplete runs concurrently)
+	colVersion    int                            // bumped when colCache gains entries (invalidates sugCache)
+	colInflight   map[string]*colCall            // in-flight Columns() fetches, deduplicated per table
+	sug           *sugCache                      // built + sorted completion candidates (guarded by colMu)
+	colMu         sync.Mutex                     // guards colCache / colVersion / colInflight / sug
 	shortcutBound bool
 
 	// runGen discards result batches from a superseded run (TablePlus
-	// generation guard). bumpRun returns the new generation.
-	runGen int
+	// generation guard). bumpRun returns the new generation. Atomic: bumpRun
+	// runs on the query's background goroutine while the UI thread reads it
+	// inside every batch callback — two concurrent runs may bump at once.
+	runGen atomic.Int32
 	// continueOnError keeps a multi-statement run going past failures
 	// (TablePlus "Return on Error" inverted; we default to stopping).
 	continueOnError bool
@@ -425,8 +433,7 @@ func (qp *queryPane) bindFind(g *dataTable) {
 // bumpRun advances and returns the run generation, superseding any in-flight
 // streaming batches from a previous run.
 func (qp *queryPane) bumpRun() int {
-	qp.runGen++
-	return qp.runGen
+	return int(qp.runGen.Add(1))
 }
 
 // refreshPos updates the "第 N 行, 第 M 列, 位置 K" readout from the editor text.
@@ -662,20 +669,21 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 		}
 		total := len(res.Rows)
 		myGen := qp.bumpRun()
+		// Convert every cell to its display string once, up front. Calling
+		// StringRows() inside the batch loop re-converted the whole result
+		// set per batch (5× the work and garbage at rowLimit=5000) and kept
+		// one full copy of the rows alive per chunk.
+		rows := res.StringRows()
+		res.Rows = nil // release the CellPayload copy; the grid owns rows now
 		const batch = 1000
 		for off := 0; off < total; off += batch {
 			end := off + batch
 			if end > total {
 				end = total
 			}
-			chunk := res.StringRows()[off:end]
-			// yield so the UI thread can paint the previous batch rather
-			// than freezing on one giant rebuild.
-			if off > 0 {
-				time.Sleep(time.Millisecond)
-			}
+			chunk := rows[off:end]
 			safeDo(func() {
-				if myGen != qp.runGen {
+				if myGen != int(qp.runGen.Load()) {
 					return // a newer run superseded this one
 				}
 				g := qp.resultGrid()
@@ -687,7 +695,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 			})
 		}
 		safeDo(func() {
-			if myGen != qp.runGen {
+			if myGen != int(qp.runGen.Load()) {
 				return
 			}
 			noun := "rows"
@@ -747,7 +755,7 @@ func (qp *queryPane) runStreaming(st db.Streamer, stmt, label string, all []stri
 			seen += int64(len(rows))
 			keep := int(seen) < limit
 			safeDo(func() {
-				if myGen != qp.runGen {
+				if myGen != int(qp.runGen.Load()) {
 					return
 				}
 				if g := qp.streamGrid(state, pcols, label); g != nil {
@@ -764,7 +772,7 @@ func (qp *queryPane) runStreaming(st db.Streamer, stmt, label string, all []stri
 			res.DurationMS = time.Since(start).Milliseconds()
 		}
 		safeDo(func() {
-			if myGen != qp.runGen {
+			if myGen != int(qp.runGen.Load()) {
 				return
 			}
 			qp.finishStream(state, res, err, stmt, label, all, i)
@@ -891,9 +899,20 @@ func (qp *queryPane) cancelRun() {
 
 // looksLikeTimeout reports whether the error is of the "server too slow"
 // class that deserves the wait/reconnect dialog (TablePlus behaviour).
+// Structured checks come first (context deadline, net.Error timeout); the
+// string fallback covers driver-specific messages. "eof" is deliberately not
+// treated as a timeout: a dropped connection is not the server being slow and
+// must not open the wait dialog.
 func looksLikeTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
-	for _, m := range []string{"timeout", "timed out", "deadline", "i/o timeout", "eof"} {
+	for _, m := range []string{"timeout", "timed out", "deadline"} {
 		if strings.Contains(msg, m) {
 			return true
 		}

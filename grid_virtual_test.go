@@ -129,7 +129,7 @@ func TestQueryPaneRunGenDiscardsStale(t *testing.T) {
 	}
 
 	// Replicates the exact guard inside run()'s streaming loop.
-	alive := func(myGen int) bool { return myGen == qp.runGen }
+	alive := func(myGen int) bool { return myGen == int(qp.runGen.Load()) }
 	if alive(gen1) {
 		t.Fatal("a superseded generation must be dropped, but reported alive")
 	}
