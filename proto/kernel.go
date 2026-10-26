@@ -319,6 +319,10 @@ func CellText(cell CellPayload) string {
 		return string(cell.Blob)
 	case "time":
 		return cell.Time
+	case "decimal":
+		// Exact decimal digits: never re-format them through a float, that is
+		// the whole reason the kind exists.
+		return cell.Text
 	default:
 		return ""
 	}
