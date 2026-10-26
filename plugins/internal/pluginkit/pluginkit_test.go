@@ -28,6 +28,27 @@ func (nilMapDialect) Metrics(*sql.DB) ([]proto.Metric, error)                 { 
 
 func sp(s string) *string { return &s }
 
+// TestCellStringsDecimalKind guards the decimal drift regression: a decimal
+// cell must render as its exact text (the whole point of the kind — never
+// reformatted through a float, never dropped to ""), NULL stays nil.
+func TestCellStringsDecimalKind(t *testing.T) {
+	cells := map[string]proto.CellPayload{
+		"amount": {Kind: "decimal", Text: "1234567890.1234567890"},
+		"id":     {Kind: "int", Int: 7},
+		"note":   {Kind: "null"},
+	}
+	out := cellStrings(cells)
+	if out["amount"] == nil || *out["amount"] != "1234567890.1234567890" {
+		t.Fatalf("decimal cell = %v, want exact text \"1234567890.1234567890\"", out["amount"])
+	}
+	if out["id"] == nil || *out["id"] != "7" {
+		t.Fatalf("int cell = %v, want \"7\"", out["id"])
+	}
+	if out["note"] != nil {
+		t.Fatalf("null cell = %v, want nil", out["note"])
+	}
+}
+
 // TestDMLBuilders exercises the centralized UPDATE/INSERT/DELETE generation so
 // a regression in quoting or placeholder numbering is caught without a live
 // database. The dialect here is trivial (identity quoting, "?"), which keeps

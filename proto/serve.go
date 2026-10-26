@@ -94,7 +94,7 @@ func serve(h Handler, banner Banner, r io.Reader, w io.Writer) error {
 				serveStream(h, req, w)
 				return
 			}
-			result, err := dispatch(h, req)
+			result, err := dispatchSafe(h, req)
 			if err != nil {
 				res.Error = err.Error()
 			} else {
@@ -112,6 +112,18 @@ func serve(h Handler, banner Banner, r io.Reader, w io.Writer) error {
 		}(req)
 	}
 	return sc.Err()
+}
+
+// dispatchSafe isolates handler panics: a panicking method surfaces as an
+// error response for that one request instead of killing the plugin process
+// (the host would otherwise see a broken pipe on every later call too).
+func dispatchSafe(h Handler, req Request) (result interface{}, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("plugin panic: %v", r)
+		}
+	}()
+	return dispatch(h, req)
 }
 
 func dispatch(h Handler, req Request) (interface{}, error) {
@@ -228,7 +240,7 @@ func serveStream(h Handler, req Request, w io.Writer) {
 		}
 		return writeLine(w, Response{ID: req.ID, Result: b})
 	}
-	final, err := h.QueryStream(p, emit)
+	final, err := queryStreamSafe(h, p, emit)
 	if err != nil {
 		_ = writeLine(w, Response{ID: req.ID, Error: err.Error(), Done: true})
 		return
@@ -239,4 +251,15 @@ func serveStream(h Handler, req Request, w io.Writer) {
 		return
 	}
 	_ = writeLine(w, Response{ID: req.ID, Result: b, Done: true})
+}
+
+// queryStreamSafe runs a streaming handler with the same panic isolation as
+// dispatchSafe: the panic becomes the terminal error frame, the process lives.
+func queryStreamSafe(h Handler, p QueryStreamParams, emit func(StreamFrame) error) (final QueryResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("plugin panic: %v", r)
+		}
+	}()
+	return h.QueryStream(p, emit)
 }

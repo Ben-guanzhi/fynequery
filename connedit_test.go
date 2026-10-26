@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 // writeConns persists conns to the (test-isolated) config dir.
 func writeConns(t *testing.T, conns ...Connection) {
@@ -116,5 +120,47 @@ func TestApplyConnectionEditEmptyName(t *testing.T) {
 	got := readConns(t)
 	if len(got) != 1 || got[0].Name != "keep" {
 		t.Errorf("store must be unchanged on empty-name error: %+v", got)
+	}
+}
+
+// TestUpsertConnectionCorruptFileKeepsData guards the data-loss regression: a
+// corrupt connections.json must fail the upsert with an error and leave the
+// file untouched — never overwrite it with a list holding only the new entry.
+func TestUpsertConnectionCorruptFileKeepsData(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FYNEQUERY_CONFIG_DIR", dir)
+	corrupt := []byte(`[{"name":"prod","driver":`) // truncated JSON
+	if err := os.WriteFile(connectionsPath(), corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := upsertConnection(Connection{Name: "new", Driver: "mysql", UseKeyring: false})
+	if err == nil {
+		t.Fatal("expected error when the saved file is corrupt")
+	}
+	got, readErr := os.ReadFile(connectionsPath())
+	if readErr != nil {
+		t.Fatalf("corrupt file was removed: %v", readErr)
+	}
+	if string(got) != string(corrupt) {
+		t.Fatalf("corrupt file was overwritten: %q", got)
+	}
+}
+
+// TestSaveConnectionsKeepsBackup verifies each save leaves the previous
+// generation in connections.json.bak so a bad write is recoverable.
+func TestSaveConnectionsKeepsBackup(t *testing.T) {
+	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
+	writeConns(t, Connection{Name: "v1", Driver: "mysql", UseKeyring: false})
+
+	if err := saveConnections([]Connection{{Name: "v2", Driver: "mysql", UseKeyring: false}}); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+	raw, err := os.ReadFile(connectionsPath() + ".bak")
+	if err != nil {
+		t.Fatalf("no backup written: %v", err)
+	}
+	if !strings.Contains(string(raw), `"v1"`) || strings.Contains(string(raw), `"v2"`) {
+		t.Fatalf("backup does not hold the previous generation: %s", raw)
 	}
 }

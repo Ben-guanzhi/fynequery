@@ -8,8 +8,6 @@ package pluginkit
 // drifting apart.
 
 import (
-	"strconv"
-
 	"context"
 	"database/sql"
 	"errors"
@@ -34,30 +32,10 @@ func cellStrings(cells map[string]proto.CellPayload) map[string]*string {
 			out[name] = nil
 			continue
 		}
-		text := cellText(cell)
+		text := proto.CellText(cell)
 		out[name] = &text
 	}
 	return out
-}
-
-// cellText is the text of one tagged cell.
-func cellText(cell proto.CellPayload) string {
-	switch cell.Kind {
-	case "int":
-		return strconv.FormatInt(cell.Int, 10)
-	case "float":
-		return strconv.FormatFloat(cell.Flt, 'g', -1, 64)
-	case "text":
-		return cell.Text
-	case "bool":
-		return strconv.FormatBool(cell.Bool)
-	case "blob":
-		return string(cell.Blob)
-	case "time":
-		return cell.Time
-	default:
-		return ""
-	}
 }
 
 // argOf converts a *string cell into a driver argument: nil → NULL, the DEFAULT

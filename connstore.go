@@ -157,6 +157,12 @@ func saveConnections(conns []Connection) error {
 	if err != nil {
 		return err
 	}
+	// Keep one generation of the file around: if this write (or a later
+	// reader) produces something unusable, the user can recover the previous
+	// connection list from connections.json.bak instead of losing everything.
+	if old, err := os.ReadFile(connectionsPath()); err == nil {
+		_ = os.WriteFile(connectionsPath()+".bak", old, 0o600)
+	}
 	return os.WriteFile(connectionsPath(), raw, 0o600)
 }
 
@@ -177,7 +183,10 @@ func upsertConnection(c Connection) error {
 	}
 	conns, err := loadConnections()
 	if err != nil {
-		conns = nil
+		// A corrupt file must not turn into "no saved connections": saving on
+		// top of that would wipe every stored connection. Surface the error
+		// and leave the file (and its .bak) untouched.
+		return fmt.Errorf("load saved connections: %w", err)
 	}
 	replaced := false
 	for i := range conns {

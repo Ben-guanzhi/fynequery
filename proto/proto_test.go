@@ -293,3 +293,69 @@ func TestServeStreamRoundTrip(t *testing.T) {
 		t.Fatal("expected the mid-stream error on the terminal frame")
 	}
 }
+
+// panicHandler blows up on Query and mid-stream on QueryStream: the host must
+// see "plugin panic" error responses and the serve loop must keep serving
+// afterwards (a panicking handler must not kill the plugin process).
+type panicHandler struct{ testHandler }
+
+func (panicHandler) Query(QueryParams) (QueryResult, error) {
+	panic("query exploded")
+}
+
+func (panicHandler) QueryStream(p QueryStreamParams, emit func(StreamFrame) error) (QueryResult, error) {
+	_ = emit(StreamFrame{Columns: []ColumnInfo{{Name: "n"}}, Rows: [][]CellPayload{{TextCell("1")}}})
+	panic("stream exploded")
+}
+
+func TestServeSurvivesHandlerPanic(t *testing.T) {
+	reqR, reqW := io.Pipe()
+	respR, respW := io.Pipe()
+	go func() { _ = serve(panicHandler{}, Banner{Proto: ProtocolName, Version: 1}, reqR, respW) }()
+
+	c := &client{w: reqW, r: bufio.NewReader(respR)}
+	c.r.ReadString('\n') // banner
+
+	resp, err := c.call(1, MethodQuery, QueryParams{ConnID: "c1", SQL: "SELECT 1"})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if !strings.Contains(resp.Error, "plugin panic") || !strings.Contains(resp.Error, "query exploded") {
+		t.Fatalf("expected the panic surfaced as an error response, got %+v", resp)
+	}
+
+	// The stream variant surfaces the panic on the terminal frame, after any
+	// frames already emitted.
+	raw, _ := json.Marshal(QueryStreamParams{ConnID: "c1", SQL: "SELECT n", Batch: 2})
+	req, _ := json.Marshal(Request{ID: 2, Method: MethodQueryStream, Params: raw})
+	if _, err := c.w.Write(append(req, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	sawFrame, sawPanic := false, false
+	for {
+		line, err := c.r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read frame: %v", err)
+		}
+		var resp Response
+		_ = json.Unmarshal([]byte(line), &resp)
+		if resp.ID != 2 {
+			continue
+		}
+		if !resp.Done {
+			sawFrame = true
+			continue
+		}
+		sawPanic = strings.Contains(resp.Error, "plugin panic")
+		break
+	}
+	if !sawFrame || !sawPanic {
+		t.Fatalf("stream panic not surfaced: frameSeen=%v panicSeen=%v", sawFrame, sawPanic)
+	}
+
+	// The process lives: a later request still answers.
+	resp, err = c.call(3, MethodMeta, nil)
+	if err != nil || resp.Error != "" {
+		t.Fatalf("meta after panic: resp=%+v err=%v", resp, err)
+	}
+}
