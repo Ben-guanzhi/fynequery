@@ -2,10 +2,12 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -655,4 +657,54 @@ func rowStrings(rows [][]*string) [][]string {
 		out[i] = cells
 	}
 	return out
+}
+
+// TestRedisBrowseBounded guards the bounded value read behind Browse: a huge
+// list is cut at the requested row limit instead of read whole, and a giant
+// string comes back within the driver's byte cap with the cell intact.
+func TestRedisBrowseBounded(t *testing.T) {
+	mr := miniredis.RunT(t)
+	items := make([]string, 5000)
+	for i := range items {
+		items[i] = fmt.Sprintf("item%04d", i)
+	}
+	if _, err := mr.RPush("biglist", items...); err != nil {
+		t.Fatal(err)
+	}
+	if err := mr.Set("bigstr", strings.Repeat("x", 1<<20)); err != nil { // 1 MiB
+		t.Fatal(err)
+	}
+
+	host, port, err := net.SplitHostPort(mr.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := (redisDialer{}).Connect(proto.ConnectParams{Host: host, Port: port, Database: "0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	res, err := sess.Browse("biglist", 10)
+	if err != nil {
+		t.Fatalf("Browse(biglist): %v", err)
+	}
+	if len(res.Rows) != 10 {
+		t.Fatalf("Browse(biglist,10) = %d rows, want the bounded 10", len(res.Rows))
+	}
+	if got := rowStrings(res.StringRows()); got[0][1] != "item0000" || got[9][1] != "item0009" {
+		t.Fatalf("Browse(biglist) first window = %q..%q, want item0000..item0009", got[0][1], got[9][1])
+	}
+
+	res, err = sess.Browse("bigstr", 10)
+	if err != nil {
+		t.Fatalf("Browse(bigstr): %v", err)
+	}
+	rows := res.StringRows()
+	if len(rows) != 1 || rows[0][1] == nil {
+		t.Fatalf("Browse(bigstr) = %+v, want one value row", rows)
+	}
+	if len(*rows[0][1]) > int(dbcore.DefaultMaxStringBytes) {
+		t.Fatalf("Browse(bigstr) value = %d bytes, want <= the %d byte cap", len(*rows[0][1]), dbcore.DefaultMaxStringBytes)
+	}
 }

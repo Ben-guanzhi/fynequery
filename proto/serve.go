@@ -44,6 +44,15 @@ type Handler interface {
 	// Metrics returns a curated set of read-only server metrics. Additive (see
 	// messages.go).
 	Metrics(p MetricsParams) (MetricsResult, error)
+
+	// Cancel stops every statement currently running on one connection: the
+	// plugin cancels the context those statements run under, and database/sql
+	// aborts them. It is served while a Query/QueryStream on the same
+	// connection is still in flight — each request runs in its own goroutine —
+	// so the editor's Cancel button reaches a running statement. Returns an
+	// error when the connection has nothing in flight or predates the method.
+	// Additive (see messages.go).
+	Cancel(p CancelParams) error
 }
 
 var stdoutMu sync.Mutex
@@ -169,6 +178,7 @@ var dispatchTable = map[string]func(Handler, json.RawMessage) (any, error){
 	MethodCommit:    func(h Handler, p json.RawMessage) (any, error) { return callVoid(h, p, h.Commit) },
 	MethodRollback:  func(h Handler, p json.RawMessage) (any, error) { return callVoid(h, p, h.Rollback) },
 	MethodMetrics:   func(h Handler, p json.RawMessage) (any, error) { return call(h, p, h.Metrics) },
+	MethodCancel:    func(h Handler, p json.RawMessage) (any, error) { return callVoid(h, p, h.Cancel) },
 }
 
 func dispatch(h Handler, req Request) (interface{}, error) {

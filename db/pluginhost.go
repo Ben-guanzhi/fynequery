@@ -16,8 +16,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fynequery/proto"
@@ -29,9 +31,14 @@ import (
 const pluginPrefix = "fq-plugin-"
 
 // DiscoverPlugins scans dir (and ./plugins under the working directory as a
-// development fallback) for plugin executables and registers each one.
-// Missing directories or broken plugins are skipped silently — the built-in
-// drivers keep working regardless.
+// development fallback) for plugin executables and registers each one —
+// lazily: nothing is spawned here. The driver code comes from the executable
+// name ("fq-plugin-<code>[.exe]", the convention isPluginFile enforces), so
+// the driver picker can list every engine at startup without paying a process
+// per engine; the first Connect (or Bind) starts the process and replaces the
+// provisional display info with what the plugin's meta call reports. Missing
+// directories are skipped silently — the built-in drivers keep working
+// regardless.
 func DiscoverPlugins(dir string) {
 	seen := map[string]bool{}
 	for _, d := range pluginSearchDirs(dir) {
@@ -43,23 +50,62 @@ func DiscoverPlugins(dir string) {
 			if e.IsDir() || !isPluginFile(e.Name()) {
 				continue
 			}
-			proc, err := spawnPlugin(filepath.Join(d, e.Name()))
-			if err != nil {
-				logf("pluginhost: %v", err)
+			code := pluginCode(e.Name())
+			if code == "" {
 				continue
 			}
-			if seen[proc.info.Code] {
-				proc.kill()
+			// The first file naming a code wins, matching the old
+			// first-registered-wins dedup by announced code.
+			if seen[code] {
+				logf("pluginhost: duplicate plugin for %s skipped: %s", code, e.Name())
 				continue
 			}
-			seen[proc.info.Code] = true
+			seen[code] = true
+			proc := &pluginProc{
+				info: lazyDriverInfo(code),
+				exe:  filepath.Join(d, e.Name()),
+			}
 			procsMu.Lock()
 			procs = append(procs, proc)
 			procsMu.Unlock()
 			Register(proc)
-			logf("pluginhost: registered %s (%s) from %s", proc.info.Name, proc.info.Code, e.Name())
+			logf("pluginhost: registered %s (lazy) from %s", code, e.Name())
 		}
 	}
+}
+
+// pluginCode derives the driver code from an executable name:
+// "fq-plugin-<code>[.exe]".
+func pluginCode(name string) string {
+	code := strings.TrimPrefix(name, pluginPrefix)
+	if runtime.GOOS == "windows" {
+		code = strings.TrimSuffix(code, ".exe")
+	}
+	return code
+}
+
+// pluginDisplayNames covers the engines shipped with the app; a plugin whose
+// code is not listed shows its code until the first start corrects it from
+// its meta call.
+var pluginDisplayNames = map[string]string{
+	"postgres": "PostgreSQL",
+	"mssql":    "SQL Server",
+	"oracle":   "Oracle",
+	"sqlite":   "SQLite",
+}
+
+// lazyDriverInfo builds the metadata a not-yet-started plugin answers with:
+// the code from the file name, a display name from the table above, and the
+// kernel's conventional port for the engine. SQLite has no port.
+func lazyDriverInfo(code string) DriverInfo {
+	info := DriverInfo{Code: code, Name: code, Plugin: true}
+	if name, ok := pluginDisplayNames[code]; ok {
+		info.Name = name
+	}
+	if port := dbcore.DefaultPort(dbcore.DatabaseKind(code)); port != 0 {
+		info.DefaultPort = strconv.Itoa(port)
+	}
+	return info
 }
 
 func pluginSearchDirs(primary string) []string {
@@ -112,17 +158,23 @@ var (
 	procs   []*pluginProc
 )
 
-// pluginProc is one spawned plugin executable acting as a Dialer: the
-// connection-oriented kernel host underneath owns the process (one process,
-// many connections — the tabs all share it); this type adds the dialer
-// metadata and the session surface.
+// pluginProc is one plugin executable acting as a Dialer. Discovery registers
+// it from the executable's name alone; the process underneath (the
+// connection-oriented kernel host — one process, many connections, the tabs
+// all share it) starts on first use, so an engine the session never opens
+// never costs a process. The session surface (this file's remoteSession) goes
+// through ensure.
 type pluginProc struct {
 	info DriverInfo
 	exe  string
+
+	mu   sync.Mutex
 	conn *plugindriver.ConnDriver
 }
 
-func spawnPlugin(exe string) (*pluginProc, error) {
+// startPlugin launches the plugin process, completes the banner handshake and
+// fetches the plugin's meta call. It is the lazy path's one expensive step.
+func startPlugin(exe string) (*plugindriver.ConnDriver, proto.MetaResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	conn, err := plugindriver.StartConnWithOpts(ctx, exe, nil, plugindriver.StartOpts{
@@ -132,7 +184,7 @@ func spawnPlugin(exe string) (*pluginProc, error) {
 		BannerTimeout: 5 * time.Second,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", exe, err)
+		return nil, proto.MetaResult{}, fmt.Errorf("%s: %w", exe, err)
 	}
 
 	// The kernel handshake verified the banner; the dialer metadata (display
@@ -142,11 +194,22 @@ func spawnPlugin(exe string) (*pluginProc, error) {
 	var meta proto.MetaResult
 	if err := conn.Call(metaCtx, proto.MethodMeta, nil, &meta); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("%s: meta: %w", exe, err)
+		return nil, proto.MetaResult{}, fmt.Errorf("%s: meta: %w", exe, err)
 	}
 	if meta.Code == "" {
 		_ = conn.Close()
-		return nil, fmt.Errorf("%s: plugin reported empty driver code", exe)
+		return nil, proto.MetaResult{}, fmt.Errorf("%s: plugin reported empty driver code", exe)
+	}
+	return conn, meta, nil
+}
+
+// spawnPlugin starts a plugin immediately (the lazy path's helper, and what
+// the tests use): the process runs from now, with the meta call's authoritative
+// info.
+func spawnPlugin(exe string) (*pluginProc, error) {
+	conn, meta, err := startPlugin(exe)
+	if err != nil {
+		return nil, err
 	}
 	return &pluginProc{
 		info: DriverInfo{
@@ -159,6 +222,36 @@ func spawnPlugin(exe string) (*pluginProc, error) {
 		exe:  exe,
 		conn: conn,
 	}, nil
+}
+
+// ensure starts the plugin process on first use and returns the connection
+// driver. The first start also corrects the provisional display info with the
+// plugin's own meta call, so the driver picker shows the real name and port
+// once any connection has been made.
+func (p *pluginProc) ensure() (*plugindriver.ConnDriver, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.conn != nil {
+		return p.conn, nil
+	}
+	conn, meta, err := startPlugin(p.exe)
+	if err != nil {
+		return nil, err
+	}
+	if meta.Code != "" && meta.Code != p.info.Code {
+		logf("pluginhost: %s announces code %q, registered as %q", filepath.Base(p.exe), meta.Code, p.info.Code)
+	}
+	if meta.Name != "" {
+		p.info.Name = meta.Name
+	}
+	if meta.Version != "" {
+		p.info.Version = meta.Version
+	}
+	if meta.DefaultPort != "" {
+		p.info.DefaultPort = meta.DefaultPort
+	}
+	p.conn = conn
+	return conn, nil
 }
 
 // newPrefixWriter renders the plugin's stderr lines in the host log with the
@@ -191,20 +284,45 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (p *pluginProc) kill() { _ = p.conn.Close() }
+// kill shuts the plugin process down; a never-started process has nothing to
+// kill. Not idempotent-guarded: Close is.
+func (p *pluginProc) kill() {
+	p.mu.Lock()
+	conn := p.conn
+	p.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+}
 
-func (p *pluginProc) Info() DriverInfo { return p.info }
+// Info reports the dialer metadata. Before the first start this is the
+// provisional info derived from the executable's name (see lazyDriverInfo);
+// the first start corrects it from the plugin's meta call. Never starts the
+// process: enumerating the driver picker must stay free.
+func (p *pluginProc) Info() DriverInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.info
+}
 
 // call performs one round trip in the plugin's own vocabulary — the methods
 // the kernel has no view of included — through the kernel host.
 func (p *pluginProc) call(ctx context.Context, method string, params, result interface{}) error {
-	return p.conn.Call(ctx, method, params, result)
+	conn, err := p.ensure()
+	if err != nil {
+		return err
+	}
+	return conn.Call(ctx, method, params, result)
 }
 
 // callStream performs a streaming exchange through the kernel host, handing
 // each frame to the caller in fynequery's shape.
 func (p *pluginProc) callStream(ctx context.Context, method string, params interface{}, onFrame func(proto.StreamFrame) (bool, error), final interface{}) error {
-	return p.conn.CallStream(ctx, method, params, func(f plugindriver.StreamFrame) (bool, error) {
+	conn, err := p.ensure()
+	if err != nil {
+		return err
+	}
+	return conn.CallStream(ctx, method, params, func(f plugindriver.StreamFrame) (bool, error) {
 		return onFrame(streamFrameOf(f))
 	}, final)
 }
@@ -228,27 +346,46 @@ func streamFrameOf(f plugindriver.StreamFrame) proto.StreamFrame {
 }
 
 func (p *pluginProc) Connect(cfg proto.ConnectParams) (Session, error) {
+	conn, err := p.ensure()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", p.Info().Code, err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	connID, server, err := p.conn.Open(ctx, cfg)
+	connID, server, err := conn.Open(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", p.info.Name, err)
+		return nil, fmt.Errorf("%s: %w", p.Info().Name, err)
 	}
 	// Wide, not Bind: the session drives the connection's transaction, edits,
 	// metrics and streaming, and those calls are now typed in the kernel rather
 	// than spelled here in the plugin's private vocabulary.
-	return &remoteSession{p: p, connID: connID, server: server, wide: p.conn.Wide(connID, cfg.Database)}, nil
+	return &remoteSession{p: p, connID: connID, server: server, wide: conn.Wide(connID, cfg.Database)}, nil
 }
 
 // Bind hands out the kernel's SQLDriver view of one connection of this plugin
 // process — the connection-oriented shape: many tabs share the process, each
 // bound view addresses exactly one connection.
 func (p *pluginProc) Bind(connID, database string) dbcore.SQLDriver {
-	return p.conn.Bind(connID, database)
+	conn, err := p.ensure()
+	if err != nil {
+		logf("pluginhost: bind %s: %v", p.Info().Code, err)
+		return nil
+	}
+	return conn.Bind(connID, database)
 }
 
-// ConnIDs lists the connections this plugin process currently holds.
-func (p *pluginProc) ConnIDs() []string { return p.conn.ConnIDs() }
+// ConnIDs lists the connections this plugin process currently holds; a plugin
+// that has never started holds none (and starting it for an inventory question
+// would defeat the lazy loading).
+func (p *pluginProc) ConnIDs() []string {
+	p.mu.Lock()
+	conn := p.conn
+	p.mu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.ConnIDs()
+}
 
 // remoteSession is one connection inside a plugin process.
 //
@@ -263,6 +400,12 @@ type remoteSession struct {
 	connID string
 	server string
 	wide   *plugindriver.Conn
+
+	// cancelAsked records that KillQuery was called for the statement currently
+	// running, the same flag the built-in MySQL driver keeps: when the query
+	// then fails, it reports the clean db.ErrQueryCancelled instead of the
+	// driver's raw "context canceled" noise. Reset at every query start.
+	cancelAsked atomic.Bool
 }
 
 func (s *remoteSession) Server() string { return s.server }
@@ -286,8 +429,13 @@ func (s *remoteSession) Columns(table string) ([]proto.ColumnInfo, error) {
 func (s *remoteSession) Query(sqlText string, maxRows int) (proto.QueryResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), pluginQueryTimeout)
 	defer cancel()
+	s.cancelAsked.Store(false)
 	var res proto.QueryResult
 	err := s.p.call(ctx, proto.MethodQuery, proto.QueryParams{ConnID: s.connID, SQL: sqlText, MaxRows: maxRows}, &res)
+	if err != nil && s.cancelAsked.Load() {
+		// The user cancelled this statement: surface the clean sentinel.
+		return proto.QueryResult{}, ErrQueryCancelled
+	}
 	return res, err
 }
 
@@ -297,6 +445,22 @@ func (s *remoteSession) Browse(table string, limit int) (proto.QueryResult, erro
 	var res proto.QueryResult
 	err := s.p.call(ctx, proto.MethodBrowse, proto.BrowseParams{ConnID: s.connID, Table: table, Limit: limit}, &res)
 	return res, err
+}
+
+// KillQuery terminates the statement currently running on this session: the
+// cancel call goes out while the query's own request is still in flight (the
+// plugin serves each request in its own goroutine) and the plugin cancels that
+// statement's context, which aborts the database/sql call. A plugin built
+// before the cancel method answers "unknown method"; the statement then runs
+// to completion and the error says so. Implements db.Canceller.
+func (s *remoteSession) KillQuery() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.cancelAsked.Store(true)
+	if err := s.p.call(ctx, proto.MethodCancel, proto.CancelParams{ConnID: s.connID}, nil); err != nil {
+		return fmt.Errorf("cancel: %w", err)
+	}
+	return nil
 }
 
 func (s *remoteSession) Close() {
@@ -363,6 +527,7 @@ func (s *remoteSession) Metrics() ([]proto.Metric, error) {
 func (s *remoteSession) QueryStream(sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]*string) (bool, error)) (proto.QueryResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), pluginQueryTimeout)
 	defer cancel()
+	s.cancelAsked.Store(false)
 	// The kernel's wide session owns the streaming protocol; this is only the
 	// shape adaptation back to the UI (see stringsOf / columnsOf).
 	//
@@ -373,6 +538,9 @@ func (s *remoteSession) QueryStream(sqlText string, batch int, emit func(cols []
 		return emit(columnsOf(b.Columns), stringsOf(b.Rows))
 	})
 	if err != nil {
+		if s.cancelAsked.Load() {
+			return proto.QueryResult{}, ErrQueryCancelled
+		}
 		return proto.QueryResult{}, err
 	}
 	return proto.QueryResult{RowsAffected: result.AffectedRows, DurationMS: result.DurationMS}, nil

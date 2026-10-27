@@ -80,6 +80,12 @@ func (fakeHandler) ApplyBatch(p proto.DMLBatchParams) (proto.DMLResult, error) {
 	return proto.DMLResult{RowsAffected: int64(n)}, nil
 }
 
+// Cancel reports honestly: the fake plugin never has a statement running,
+// so a cancel always finds nothing to stop.
+func (fakeHandler) Cancel(p proto.CancelParams) error {
+	return fmt.Errorf("no active query on connection %q", p.ConnID)
+}
+
 func (fakeHandler) Begin(p proto.TxParams) error    { return nil }
 func (fakeHandler) Commit(p proto.TxParams) error   { return nil }
 func (fakeHandler) Rollback(p proto.TxParams) error { return nil }

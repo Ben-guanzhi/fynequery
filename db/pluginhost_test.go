@@ -285,3 +285,87 @@ func TestRemoteSessionMetrics(t *testing.T) {
 		t.Fatalf("metrics = %+v", ms)
 	}
 }
+
+// TestDiscoveryLazyLoading pins the lazy-loading contract: discovery registers
+// a plugin from its file name alone and starts no process; the first Connect
+// spawns it and the provisional display info is corrected from the plugin's
+// meta call.
+func TestDiscoveryLazyLoading(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "fq-plugin-lazyfake.exe")
+	if out, err := exec.Command("go", "build", "-o", exe, "./testdata/fakeplugin").CombinedOutput(); err != nil {
+		t.Fatalf("build fakeplugin: %v\n%s", err, out)
+	}
+
+	DiscoverPlugins(filepath.Dir(exe))
+
+	d, ok := Driver("lazyfake")
+	if !ok {
+		t.Fatal("discovery did not register the plugin by file name")
+	}
+	p, ok := d.(*pluginProc)
+	if !ok {
+		t.Fatalf("Driver(lazyfake) = %T, want *pluginProc", d)
+	}
+
+	// Nothing spawned yet, and the provisional info is usable by the picker.
+	p.mu.Lock()
+	started := p.conn != nil
+	p.mu.Unlock()
+	if started {
+		t.Fatal("discovery must not spawn the plugin process")
+	}
+	info := p.Info()
+	if !info.Plugin || info.Code != "lazyfake" {
+		t.Fatalf("provisional Info = %+v", info)
+	}
+
+	// Connect starts the process on demand and works end to end.
+	sess, err := d.Connect(proto.ConnectParams{Name: "lazy", Host: "localhost", Database: "db"})
+	if err != nil {
+		t.Fatalf("Connect (first, spawns): %v", err)
+	}
+	defer sess.Close()
+	defer p.kill() // release the executable so the TempDir cleanup can remove it
+	if got := sess.Server(); got != "FakeDB 1.2.3" {
+		t.Fatalf("Server = %q", got)
+	}
+
+	// The meta call's authoritative info has replaced the provisional one.
+	info = p.Info()
+	if info.Name != "FakeDB" || info.Version != "test" || info.DefaultPort != "1234" {
+		t.Fatalf("Info after first start = %+v, want the meta call's values", info)
+	}
+
+	// A second dialer lookup must not re-register over it.
+	if again, ok := Driver("lazyfake"); !ok || again != d {
+		t.Fatal("registry lost the plugin after start")
+	}
+}
+
+// TestRemoteSessionKillQueryWirePath pins the cancel protocol round trip: the
+// host speaks MethodCancel through the pipe, and the fake plugin — which never
+// has a statement running — answers its honest error. The full
+// cancel-while-running behaviour is proven against a real statement in
+// pluginkit's TestHandlerCancelAbortsRunningQuery.
+func TestRemoteSessionKillQueryWirePath(t *testing.T) {
+	exe := buildFakePlugin(t)
+	p, err := spawnPlugin(exe)
+	if err != nil {
+		t.Fatalf("spawnPlugin: %v", err)
+	}
+	defer p.kill()
+
+	sess, err := p.Connect(proto.ConnectParams{Name: "cancel", Host: "localhost", Database: "db"})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer sess.Close()
+
+	c, ok := AsCanceller(sess)
+	if !ok {
+		t.Fatal("remoteSession should satisfy Canceller via AsCanceller")
+	}
+	if err := c.KillQuery(); err == nil || !strings.Contains(err.Error(), "no active query") {
+		t.Fatalf("KillQuery with nothing running = %v, want the plugin's no-active-query error", err)
+	}
+}

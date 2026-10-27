@@ -454,10 +454,23 @@ func (s *redisSession) DeleteValue(edit ValueEdit) error {
 func (s *redisSession) Browse(table string, limit int) (proto.QueryResult, error) {
 	start := time.Now()
 	valCtx, cancel := redisCtx()
-	value, err := s.kv.GetValue(valCtx, table)
-	cancel()
-	if err != nil {
-		return proto.QueryResult{}, err
+	defer cancel()
+	// A bounded read when the driver has it: the value grid gets the first
+	// window of the key instead of paying for a million-member collection or a
+	// half-gigabyte string. limit<=0 resolves to the driver's default.
+	var value dbcore.RedisValue
+	if br, ok := dbcore.AsBoundedValueReader(s.kv); ok {
+		bv, err := br.GetValueBounded(valCtx, table, dbcore.RedisValueLimit{MaxEntries: int64(limit)})
+		if err != nil {
+			return proto.QueryResult{}, err
+		}
+		value = bv.Value
+	} else {
+		v, err := s.kv.GetValue(valCtx, table)
+		if err != nil {
+			return proto.QueryResult{}, err
+		}
+		value = v
 	}
 	cols, ok := redisColumns(value.Type)
 	if !ok {

@@ -48,12 +48,19 @@ func firstWord(s string) string {
 // protocol: row-returning statements produce columns+rows (capped at
 // maxRows), everything else reports rows affected.
 func Run(q Querier, sqlText string, maxRows int) (proto.QueryResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	defer cancel()
+	return RunCtx(q, ctx, sqlText, maxRows)
+}
+
+// RunCtx is Run with the caller's context: a plugin tracks the statements it
+// runs per connection so a Cancel request can cancel them mid-flight. The
+// caller owns the context's lifetime (and its timeout, if it wants one).
+func RunCtx(q Querier, ctx context.Context, sqlText string, maxRows int) (proto.QueryResult, error) {
 	if maxRows <= 0 {
 		maxRows = 1000
 	}
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
-	defer cancel()
 
 	if !IsRowReturning(sqlText) {
 		res, err := q.ExecContext(ctx, sqlText)
@@ -93,12 +100,18 @@ type StreamResult struct {
 // RowsAffected is returned in the result. If emit returns an error, streaming
 // stops and that error is returned.
 func StreamRun(q Querier, sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]proto.CellPayload) error) (StreamResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	defer cancel()
+	return StreamRunCtx(q, ctx, sqlText, batch, emit)
+}
+
+// StreamRunCtx is StreamRun with the caller's context (see RunCtx): cancelling
+// it aborts both the query and the cursor walk.
+func StreamRunCtx(q Querier, ctx context.Context, sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]proto.CellPayload) error) (StreamResult, error) {
 	if batch <= 0 {
 		batch = 200
 	}
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
-	defer cancel()
 
 	if !IsRowReturning(sqlText) {
 		res, err := q.ExecContext(ctx, sqlText)

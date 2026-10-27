@@ -104,17 +104,79 @@ type handler struct {
 	txs     map[string]*sql.Tx // active manual transactions, keyed by ConnID
 	server  map[string]string
 	next    int
+
+	// runMu guards inflight: the statements currently running per connection,
+	// so a Cancel request can cancel them while their own request is still
+	// being served (serve runs each request in its own goroutine).
+	runMu    sync.Mutex
+	inflight map[string]map[int]context.CancelFunc
+	runSeq   int
 }
+
+// errQueryCancelled is what a cancelled statement reports, matching the host's
+// db.ErrQueryCancelled vocabulary so the UI can show "cancelled" instead of a
+// driver error.
+var errQueryCancelled = errors.New("query cancelled")
 
 // newHandler builds a handler with every map initialized; Open writes to both
 // conns and server, so a missing map would panic on the first success.
 func newHandler(d Dialect) *handler {
 	return &handler{
-		dialect: d,
-		conns:   map[string]*sql.DB{},
-		txs:     map[string]*sql.Tx{},
-		server:  map[string]string{},
+		dialect:  d,
+		conns:    map[string]*sql.DB{},
+		txs:      map[string]*sql.Tx{},
+		server:   map[string]string{},
+		inflight: map[string]map[int]context.CancelFunc{},
 	}
+}
+
+// trackRun registers a cancellable context for one statement on connID. The
+// returned done func must be deferred: it deregisters the run so a later
+// Cancel cannot cancel a statement that has already finished (and so Cancel
+// with nothing in flight can report that honestly).
+func (h *handler) trackRun(connID string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	h.runMu.Lock()
+	runs := h.inflight[connID]
+	if runs == nil {
+		runs = map[int]context.CancelFunc{}
+		h.inflight[connID] = runs
+	}
+	h.runSeq++
+	seq := h.runSeq
+	runs[seq] = cancel
+	h.runMu.Unlock()
+	return ctx, func() {
+		cancel()
+		h.runMu.Lock()
+		delete(runs, seq)
+		h.runMu.Unlock()
+	}
+}
+
+// Cancel cancels every statement running on the connection the params name.
+func (h *handler) Cancel(p proto.CancelParams) error {
+	h.runMu.Lock()
+	runs := h.inflight[p.ConnID]
+	cancels := make([]context.CancelFunc, 0, len(runs))
+	for _, cancel := range runs {
+		cancels = append(cancels, cancel)
+	}
+	h.runMu.Unlock()
+	if len(cancels) == 0 {
+		return fmt.Errorf("no active query on connection %q", p.ConnID)
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	return nil
+}
+
+// cancelled reports whether err is the statement's death by Cancel rather than
+// a server error: the context the statement ran under is the authority (the
+// driver's own error text varies by engine).
+func cancelled(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() != nil
 }
 
 func (h *handler) Meta() proto.MetaResult {
@@ -212,7 +274,13 @@ func (h *handler) Query(p proto.QueryParams) (proto.QueryResult, error) {
 	if err != nil {
 		return proto.QueryResult{}, err
 	}
-	return sqlkit.Run(q, p.SQL, p.MaxRows)
+	ctx, done := h.trackRun(p.ConnID)
+	defer done()
+	res, err := sqlkit.RunCtx(q, ctx, p.SQL, p.MaxRows)
+	if cancelled(ctx, err) {
+		return proto.QueryResult{}, errQueryCancelled
+	}
+	return res, err
 }
 
 func (h *handler) Browse(p proto.BrowseParams) (proto.QueryResult, error) {
@@ -223,7 +291,13 @@ func (h *handler) Browse(p proto.BrowseParams) (proto.QueryResult, error) {
 	if p.Limit <= 0 {
 		p.Limit = 1000
 	}
-	return sqlkit.Run(q, h.dialect.BrowseSQL(p.Table, p.Limit), p.Limit)
+	ctx, done := h.trackRun(p.ConnID)
+	defer done()
+	res, err := sqlkit.RunCtx(q, ctx, h.dialect.BrowseSQL(p.Table, p.Limit), p.Limit)
+	if cancelled(ctx, err) {
+		return proto.QueryResult{}, errQueryCancelled
+	}
+	return res, err
 }
 
 // CreateDatabase looks up the opened connection and delegates to the dialect.
@@ -390,15 +464,22 @@ func (h *handler) Rollback(p proto.TxParams) error {
 
 // QueryStream runs a statement and emits its result in batches as rows are read
 // from the cursor, so a large result is fetched incrementally with bounded
-// memory. It runs inside an active transaction when one is open.
+// memory. It runs inside an active transaction when one is open, and is
+// cancellable like Query (the tracked context aborts both the query and the
+// cursor walk).
 func (h *handler) QueryStream(p proto.QueryStreamParams, emit func(proto.StreamFrame) error) (proto.QueryResult, error) {
 	q, err := h.querier(p.ConnID)
 	if err != nil {
 		return proto.QueryResult{}, err
 	}
-	res, err := sqlkit.StreamRun(q, p.SQL, p.Batch, func(cols []proto.ColumnInfo, rows [][]proto.CellPayload) error {
+	ctx, done := h.trackRun(p.ConnID)
+	defer done()
+	res, err := sqlkit.StreamRunCtx(q, ctx, p.SQL, p.Batch, func(cols []proto.ColumnInfo, rows [][]proto.CellPayload) error {
 		return emit(proto.StreamFrame{Columns: cols, Rows: rows})
 	})
+	if cancelled(ctx, err) {
+		return proto.QueryResult{}, errQueryCancelled
+	}
 	if err != nil {
 		return proto.QueryResult{}, err
 	}

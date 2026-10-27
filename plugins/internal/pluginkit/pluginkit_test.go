@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver for the handler test
 
@@ -356,5 +357,71 @@ func TestKVMetricsSQLitePragma(t *testing.T) {
 		if m.Value == "" {
 			t.Fatalf("metric %q has empty value", m.Label)
 		}
+	}
+}
+
+// TestHandlerCancelAbortsRunningQuery guards the protocol cancel path: the
+// statement in flight on one connection is aborted by Cancel with the clean
+// "query cancelled" error, the connection keeps working afterwards, and a
+// cancel with nothing running says so instead of pretending.
+func TestHandlerCancelAbortsRunningQuery(t *testing.T) {
+	h := newHandler(sqliteTxDialect{})
+	open, err := h.Open(proto.ConnectParams{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	id := open.ConnID
+
+	// A recursive CTE counting to 100 million: seconds of work answering one
+	// row, so the cancel below always lands mid-flight.
+	slow := "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 100000000) SELECT COUNT(*) FROM c"
+	type qres struct {
+		res proto.QueryResult
+		err error
+	}
+	done := make(chan qres, 1)
+	go func() {
+		res, err := h.Query(proto.QueryParams{ConnID: id, SQL: slow, MaxRows: 10})
+		done <- qres{res, err}
+	}()
+
+	// Wait until the query is registered as in-flight, then cancel it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		h.runMu.Lock()
+		n := len(h.inflight[id])
+		h.runMu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("query never registered as in-flight")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if err := h.Cancel(proto.CancelParams{ConnID: id}); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	select {
+	case qr := <-done:
+		if qr.err == nil || qr.err.Error() != "query cancelled" {
+			t.Fatalf("cancelled query err = %v, want %q", qr.err, "query cancelled")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("cancelled query did not return")
+	}
+
+	// Nothing in flight: cancel says so, and the connection still works.
+	if err := h.Cancel(proto.CancelParams{ConnID: id}); err == nil {
+		t.Fatal("cancel with nothing in flight should fail")
+	}
+	if got := countRows(t, h, id); got != "0" {
+		t.Fatalf("count after cancel = %q, want 0 (connection must survive)", got)
+	}
+
+	// Cancelling an unknown connection fails without touching anything.
+	if err := h.Cancel(proto.CancelParams{ConnID: "nope"}); err == nil {
+		t.Fatal("cancel on unknown connection should fail")
 	}
 }

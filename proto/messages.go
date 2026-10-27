@@ -48,4 +48,9 @@ const (
 
 	// MethodMetrics returns a curated set of read-only server metrics. Additive.
 	MethodMetrics = "metrics"
+
+	// MethodCancel stops every statement currently running on one connection
+	// (the editor's Cancel button). Additive: a plugin that predates it answers
+	// "unknown method", and the in-flight statement runs to completion.
+	MethodCancel = "cancel"
 )

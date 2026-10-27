@@ -85,6 +85,13 @@ func (testHandler) QueryStream(p QueryStreamParams, emit func(StreamFrame) error
 	return QueryResult{}, nil
 }
 
+func (testHandler) Cancel(p CancelParams) error {
+	if p.ConnID == "" {
+		return errors.New("no active query on connection \"\"")
+	}
+	return nil
+}
+
 func (testHandler) Metrics(p MetricsParams) (MetricsResult, error) {
 	return MetricsResult{Metrics: []Metric{{Label: "Uptime", Value: "1h"}}}, nil
 }
@@ -193,6 +200,7 @@ func (streamTestHandler) Begin(TxParams) error                         { return 
 func (streamTestHandler) Commit(TxParams) error                        { return nil }
 func (streamTestHandler) Rollback(TxParams) error                      { return nil }
 func (streamTestHandler) Metrics(MetricsParams) (MetricsResult, error) { return MetricsResult{}, nil }
+func (streamTestHandler) Cancel(CancelParams) error              { return nil }
 
 func (streamTestHandler) QueryStream(p QueryStreamParams, emit func(StreamFrame) error) (QueryResult, error) {
 	if p.SQL == "boom" {
@@ -357,5 +365,29 @@ func TestServeSurvivesHandlerPanic(t *testing.T) {
 	resp, err = c.call(3, MethodMeta, nil)
 	if err != nil || resp.Error != "" {
 		t.Fatalf("meta after panic: resp=%+v err=%v", resp, err)
+	}
+}
+
+// TestServeCancelRoundTrip pins the cancel method's wire contract: it is
+// dispatched like any other call, the handler's error comes back as the
+// response error, and success carries no error.
+func TestServeCancelRoundTrip(t *testing.T) {
+	reqR, reqW := io.Pipe()
+	respR, respW := io.Pipe()
+	go func() { _ = serve(testHandler{}, Banner{Proto: ProtocolName, Version: 1}, reqR, respW) }()
+
+	c := &client{w: reqW, r: bufio.NewReader(respR)}
+	c.r.ReadString('\n') // banner
+
+	raw, _ := json.Marshal(CancelParams{ConnID: "c1"})
+	resp, err := c.call(11, MethodCancel, json.RawMessage(raw))
+	if err != nil || resp.Error != "" {
+		t.Fatalf("cancel c1: resp=%+v err=%v", resp, err)
+	}
+
+	raw, _ = json.Marshal(CancelParams{ConnID: ""})
+	resp, err = c.call(12, MethodCancel, json.RawMessage(raw))
+	if err != nil || !strings.Contains(resp.Error, "no active query") {
+		t.Fatalf("cancel empty: resp=%+v err=%v", resp, err)
 	}
 }

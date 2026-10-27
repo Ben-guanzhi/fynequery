@@ -118,6 +118,7 @@ const (
 	KernelMethodRollback    = plugindriver.MethodConnRollback
 	KernelMethodQueryStream = plugindriver.MethodConnQueryStream
 	KernelMethodMetrics     = plugindriver.MethodConnMetrics
+	KernelMethodCancel      = plugindriver.MethodConnCancel
 )
 
 // The result payloads keep the fynequery shape (they are what the plugins
@@ -264,6 +265,14 @@ type (
 
 	// TxParams identifies the connection for a begin/commit/rollback call.
 	TxParams struct {
+		ConnID string `json:"connId"`
+	}
+
+	// CancelParams stops every statement running on one connection. The call is
+	// served while the statement's own request is still in flight (each request
+	// runs in its own goroutine), so the plugin can cancel the statement's
+	// context and abort the database/sql call.
+	CancelParams struct {
 		ConnID string `json:"connId"`
 	}
 
