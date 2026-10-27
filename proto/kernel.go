@@ -152,6 +152,11 @@ type (
 		Rows         [][]CellPayload `json:"rows"`
 		RowsAffected int64           `json:"rowsAffected,omitempty"`
 		DurationMS   int64           `json:"durationMs"`
+		// Truncated reports that the result is a window, not the whole thing
+		// (bounded Redis value reads): the UI can then say so instead of
+		// presenting the first page as the full set. Old plugins never set it;
+		// a host-side session fills it when the driver reports truncation.
+		Truncated bool `json:"truncated,omitempty"`
 	}
 
 	// StreamFrame is one frame of a streaming reply.

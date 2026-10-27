@@ -457,14 +457,18 @@ func (s *redisSession) Browse(table string, limit int) (proto.QueryResult, error
 	defer cancel()
 	// A bounded read when the driver has it: the value grid gets the first
 	// window of the key instead of paying for a million-member collection or a
-	// half-gigabyte string. limit<=0 resolves to the driver's default.
+	// half-gigabyte string. limit<=0 resolves to the driver's default. The
+	// truncation flag rides along on the result so the UI can say "first page"
+	// instead of presenting the window as the whole key.
 	var value dbcore.RedisValue
+	var truncated bool
 	if br, ok := dbcore.AsBoundedValueReader(s.kv); ok {
 		bv, err := br.GetValueBounded(valCtx, table, dbcore.RedisValueLimit{MaxEntries: int64(limit)})
 		if err != nil {
 			return proto.QueryResult{}, err
 		}
 		value = bv.Value
+		truncated = bv.Truncated
 	} else {
 		v, err := s.kv.GetValue(valCtx, table)
 		if err != nil {
@@ -479,8 +483,9 @@ func (s *redisSession) Browse(table string, limit int) (proto.QueryResult, error
 	rows := redisValueRows(table, value)
 	if limit > 0 && len(rows) > limit {
 		rows = rows[:limit]
+		truncated = true
 	}
-	return proto.QueryResult{Columns: cols, Rows: taggedRowsOf(rows), DurationMS: time.Since(start).Milliseconds()}, nil
+	return proto.QueryResult{Columns: cols, Rows: taggedRowsOf(rows), DurationMS: time.Since(start).Milliseconds(), Truncated: truncated}, nil
 }
 
 func redisValueRows(key string, v dbcore.RedisValue) [][]*string {

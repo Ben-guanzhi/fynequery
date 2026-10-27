@@ -692,6 +692,9 @@ func TestRedisBrowseBounded(t *testing.T) {
 	if len(res.Rows) != 10 {
 		t.Fatalf("Browse(biglist,10) = %d rows, want the bounded 10", len(res.Rows))
 	}
+	if !res.Truncated {
+		t.Fatalf("Browse(biglist,10).Truncated = false, want true: the grid must not pose as the whole list")
+	}
 	if got := rowStrings(res.StringRows()); got[0][1] != "item0000" || got[9][1] != "item0009" {
 		t.Fatalf("Browse(biglist) first window = %q..%q, want item0000..item0009", got[0][1], got[9][1])
 	}
@@ -700,11 +703,27 @@ func TestRedisBrowseBounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Browse(bigstr): %v", err)
 	}
+	if !res.Truncated {
+		t.Fatalf("Browse(bigstr,10).Truncated = false, want true: the string came back byte-capped")
+	}
 	rows := res.StringRows()
 	if len(rows) != 1 || rows[0][1] == nil {
 		t.Fatalf("Browse(bigstr) = %+v, want one value row", rows)
 	}
 	if len(*rows[0][1]) > int(dbcore.DefaultMaxStringBytes) {
 		t.Fatalf("Browse(bigstr) value = %d bytes, want <= the %d byte cap", len(*rows[0][1]), dbcore.DefaultMaxStringBytes)
+	}
+
+	// A key that fits whole is not truncated — the flag stays off so the UI
+	// does not cry wolf.
+	if err := mr.Set("small", "tiny"); err != nil {
+		t.Fatal(err)
+	}
+	res, err = sess.Browse("small", 10)
+	if err != nil {
+		t.Fatalf("Browse(small): %v", err)
+	}
+	if res.Truncated {
+		t.Fatalf("Browse(small,10).Truncated = true, want false")
 	}
 }

@@ -1950,6 +1950,13 @@ func (ws *workspace) loadTableData(t *dataTableTab, offset int) {
 			data := tableDataFromResult(res, -1, false)
 			t.totalRows = data.Fetched
 			t.totalApprox = false
+			if res.Truncated {
+				// A bounded read (Redis value pages) says "this is a window":
+				// the status bar keeps the ~ marker and the log carries the
+				// detail, so the first page never poses as the whole key.
+				t.totalApprox = true
+				ws.logf("键 %s 的值超过单页上限，仅显示前 %d 行", name, len(data.Rows))
+			}
 			t.offset = offset
 			t.loaded = true
 			grid := newDataTable(data, ws.status)
