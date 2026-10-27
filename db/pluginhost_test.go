@@ -369,3 +369,77 @@ func TestRemoteSessionKillQueryWirePath(t *testing.T) {
 		t.Fatalf("KillQuery with nothing running = %v, want the plugin's no-active-query error", err)
 	}
 }
+
+// TestRemoteSessionRecoversAfterRestart pins the restart semantics: a plugin
+// process that died does not poison the session. The next call reaps the dead
+// process, starts a fresh one, re-opens the database connection on it, and the
+// session goes on — instead of erroring forever until an explicit restart.
+func TestRemoteSessionRecoversAfterRestart(t *testing.T) {
+	exe := buildFakePlugin(t)
+	p, err := spawnPlugin(exe)
+	if err != nil {
+		t.Fatalf("spawnPlugin: %v", err)
+	}
+	defer p.kill()
+
+	sess, err := p.Connect(proto.ConnectParams{Name: "rec", Host: "localhost", Database: "db"})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer sess.Close()
+
+	if sess.(*remoteSession).wide.Dead() {
+		t.Fatal("a fresh session reports a dead connection")
+	}
+
+	// The process dies out from under the session (crash, lock-screen kill —
+	// the cause is irrelevant; the kernel flags the corpse either way).
+	p.mu.Lock()
+	oldConn := p.conn
+	p.mu.Unlock()
+	if err := oldConn.Close(); err != nil {
+		t.Fatalf("simulate death: %v", err)
+	}
+	if !sess.(*remoteSession).wide.Dead() {
+		t.Fatal("session did not notice the process died")
+	}
+	if sess.(*remoteSession).InTransaction() {
+		t.Fatal("a dead process holds no transaction")
+	}
+	// Closing a dead session is a no-op, not a re-establishment.
+	sess.Close()
+
+	// The next call heals: fresh process, fresh connection, same answer.
+	tables, err := sess.Tables()
+	if err != nil {
+		t.Fatalf("Tables after restart: %v", err)
+	}
+	if len(tables) != 2 {
+		t.Fatalf("Tables after restart = %+v, want the fake catalog", tables)
+	}
+	p.mu.Lock()
+	newConn := p.conn
+	p.mu.Unlock()
+	if newConn == oldConn {
+		t.Fatal("ensure did not start a new process")
+	}
+	if newConn.Dead() {
+		t.Fatal("the restarted process reports dead")
+	}
+
+	// The wide paths recover through the same live() point: begin/commit on
+	// the new connection.
+	tx, ok := sess.(Transactional)
+	if !ok {
+		t.Fatal("remoteSession should satisfy Transactional")
+	}
+	if err := tx.Begin(); err != nil {
+		t.Fatalf("Begin after restart: %v", err)
+	}
+	if !tx.InTransaction() {
+		t.Fatal("Begin after restart did not open a transaction")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit after restart: %v", err)
+	}
+}

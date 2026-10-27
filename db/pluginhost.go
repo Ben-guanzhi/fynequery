@@ -224,15 +224,27 @@ func spawnPlugin(exe string) (*pluginProc, error) {
 	}, nil
 }
 
-// ensure starts the plugin process on first use and returns the connection
-// driver. The first start also corrects the provisional display info with the
-// plugin's own meta call, so the driver picker shows the real name and port
-// once any connection has been made.
+// ensure returns a live plugin process, starting (or restarting) it on demand.
+// The first start also corrects the provisional display info with the plugin's
+// own meta call, so the driver picker shows the real name and port once any
+// connection has been made.
+//
+// A process that died — crash, or an earlier kill — is reaped and started
+// fresh: whatever asked for service gets a working process, so a reconnect
+// after a lock-screen DisconnectAll also works without an explicit restart.
+// Sessions opened on the dead process recover the same way (remoteSession's
+// live), because their database handles died with the process and are opened
+// again on the new one.
 func (p *pluginProc) ensure() (*plugindriver.ConnDriver, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.conn != nil {
-		return p.conn, nil
+		if !p.conn.Dead() {
+			return p.conn, nil
+		}
+		logf("pluginhost: %s 进程已退出，重新拉起", filepath.Base(p.exe))
+		_ = p.conn.Close()
+		p.conn = nil
 	}
 	conn, meta, err := startPlugin(p.exe)
 	if err != nil {
@@ -359,7 +371,7 @@ func (p *pluginProc) Connect(cfg proto.ConnectParams) (Session, error) {
 	// Wide, not Bind: the session drives the connection's transaction, edits,
 	// metrics and streaming, and those calls are now typed in the kernel rather
 	// than spelled here in the plugin's private vocabulary.
-	return &remoteSession{p: p, connID: connID, server: server, wide: conn.Wide(connID, cfg.Database)}, nil
+	return &remoteSession{p: p, connID: connID, server: server, wide: conn.Wide(connID, cfg.Database), cfg: cfg}, nil
 }
 
 // Bind hands out the kernel's SQLDriver view of one connection of this plugin
@@ -400,6 +412,10 @@ type remoteSession struct {
 	connID string
 	server string
 	wide   *plugindriver.Conn
+	// cfg is what opened the database connection. The process underneath can
+	// die and be restarted lazily (pluginProc.ensure); live() then re-opens
+	// the connection from these params on the new process.
+	cfg proto.ConnectParams
 
 	// cancelAsked records that KillQuery was called for the statement currently
 	// running, the same flag the built-in MySQL driver keeps: when the query
@@ -410,9 +426,35 @@ type remoteSession struct {
 
 func (s *remoteSession) Server() string { return s.server }
 
+// live makes sure the session's connection is usable: while the plugin process
+// is alive it is a cheap flag read; after a restart (or before the first use,
+// for sessions inherited from a dead process) it re-opens the database
+// connection on the current process and refreshes the connection id and wide
+// view. Every process-touching session method goes through it first, so a
+// crashed plugin heals on the next call instead of erroring forever.
+func (s *remoteSession) live(ctx context.Context) error {
+	if s.wide != nil && !s.wide.Dead() {
+		return nil
+	}
+	conn, err := s.p.ensure()
+	if err != nil {
+		return err
+	}
+	connID, server, err := conn.Open(ctx, s.cfg)
+	if err != nil {
+		return fmt.Errorf("%s: %w", s.p.Info().Name, err)
+	}
+	s.connID, s.server = connID, server
+	s.wide = conn.Wide(connID, s.cfg.Database)
+	return nil
+}
+
 func (s *remoteSession) Tables() ([]proto.ObjectInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return nil, err
+	}
 	var res proto.TablesResult
 	err := s.p.call(ctx, proto.MethodTables, proto.TablesParams{ConnID: s.connID}, &res)
 	return res.Objects, err
@@ -421,6 +463,9 @@ func (s *remoteSession) Tables() ([]proto.ObjectInfo, error) {
 func (s *remoteSession) Columns(table string) ([]proto.ColumnInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return nil, err
+	}
 	var res proto.ColumnsResult
 	err := s.p.call(ctx, proto.MethodColumns, proto.ColumnsParams{ConnID: s.connID, Table: table}, &res)
 	return res.Columns, err
@@ -429,6 +474,9 @@ func (s *remoteSession) Columns(table string) ([]proto.ColumnInfo, error) {
 func (s *remoteSession) Query(sqlText string, maxRows int) (proto.QueryResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), pluginQueryTimeout)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return proto.QueryResult{}, err
+	}
 	s.cancelAsked.Store(false)
 	var res proto.QueryResult
 	err := s.p.call(ctx, proto.MethodQuery, proto.QueryParams{ConnID: s.connID, SQL: sqlText, MaxRows: maxRows}, &res)
@@ -442,6 +490,9 @@ func (s *remoteSession) Query(sqlText string, maxRows int) (proto.QueryResult, e
 func (s *remoteSession) Browse(table string, limit int) (proto.QueryResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), pluginQueryTimeout)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return proto.QueryResult{}, err
+	}
 	var res proto.QueryResult
 	err := s.p.call(ctx, proto.MethodBrowse, proto.BrowseParams{ConnID: s.connID, Table: table, Limit: limit}, &res)
 	return res, err
@@ -457,6 +508,9 @@ func (s *remoteSession) KillQuery() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	s.cancelAsked.Store(true)
+	if err := s.live(ctx); err != nil {
+		return fmt.Errorf("cancel: %w", err)
+	}
 	if err := s.p.call(ctx, proto.MethodCancel, proto.CancelParams{ConnID: s.connID}, nil); err != nil {
 		return fmt.Errorf("cancel: %w", err)
 	}
@@ -464,6 +518,11 @@ func (s *remoteSession) KillQuery() error {
 }
 
 func (s *remoteSession) Close() {
+	// A session on a dead process has nothing to close: the connection died
+	// with the process, and live() would only open a new one to close it.
+	if s.wide != nil && s.wide.Dead() {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// Roll back any transaction left open so the connection goes back to a
@@ -485,30 +544,45 @@ func (s *remoteSession) Close() {
 func (s *remoteSession) Begin() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return err
+	}
 	return s.wide.BeginTx(ctx)
 }
 
 func (s *remoteSession) Commit() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return err
+	}
 	return s.wide.CommitTx(ctx)
 }
 
 func (s *remoteSession) Rollback() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return err
+	}
 	return s.wide.RollbackTx(ctx)
 }
 
 // InTransaction reports the mirrored transaction state the kernel keeps for
-// this connection.
-func (s *remoteSession) InTransaction() bool { return s.wide.InTransaction() }
+// this connection. A dead process holds no transaction — the restart dropped
+// it with the connection.
+func (s *remoteSession) InTransaction() bool {
+	return s.wide != nil && !s.wide.Dead() && s.wide.InTransaction()
+}
 
 // Metrics forwards a server-metrics request to the plugin, reusing the already
 // opened connection.
 func (s *remoteSession) Metrics() ([]proto.Metric, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return nil, err
+	}
 	metrics, err := s.wide.ServerMetrics(ctx)
 	if err != nil {
 		return nil, err
@@ -528,15 +602,10 @@ func (s *remoteSession) QueryStream(sqlText string, batch int, emit func(cols []
 	ctx, cancel := context.WithTimeout(context.Background(), pluginQueryTimeout)
 	defer cancel()
 	s.cancelAsked.Store(false)
-	// The kernel's wide session owns the streaming protocol; this is only the
-	// shape adaptation back to the UI (see stringsOf / columnsOf).
-	//
-	// DurationMS comes from the session's own terminal frame when it reports
-	// one; otherwise it stays 0 and the caller falls back to the elapsed time
-	// it measured itself (query.go).
-	result, err := s.wide.QueryStream(ctx, sqlText, batch, func(b dbcore.StreamBatch) (bool, error) {
-		return emit(columnsOf(b.Columns), stringsOf(b.Rows))
-	})
+	if err := s.live(ctx); err != nil {
+		return proto.QueryResult{}, err
+	}
+	result, err := s.wideQueryStream(ctx, sqlText, batch, emit)
 	if err != nil {
 		if s.cancelAsked.Load() {
 			return proto.QueryResult{}, ErrQueryCancelled
@@ -544,6 +613,17 @@ func (s *remoteSession) QueryStream(sqlText string, batch int, emit func(cols []
 		return proto.QueryResult{}, err
 	}
 	return proto.QueryResult{RowsAffected: result.AffectedRows, DurationMS: result.DurationMS}, nil
+}
+
+// wideQueryStream is QueryStream's body after the recovery point: the kernel's
+// wide session owns the streaming protocol; this is only the shape adaptation
+// back to the UI (see stringsOf / columnsOf). DurationMS comes from the
+// session's own terminal frame when it reports one; otherwise it stays 0 and
+// the caller falls back to the elapsed time it measured itself (query.go).
+func (s *remoteSession) wideQueryStream(ctx context.Context, sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]*string) (bool, error)) (*dbcore.StreamResult, error) {
+	return s.wide.QueryStream(ctx, sqlText, batch, func(b dbcore.StreamBatch) (bool, error) {
+		return emit(columnsOf(b.Columns), stringsOf(b.Rows))
+	})
 }
 
 // valuesOf renders the UI's nullable strings as the kernel's values. A nil
@@ -641,18 +721,27 @@ func taggedRowsOf(rows [][]*string) [][]proto.CellPayload {
 func (s *remoteSession) UpdateRow(table string, pk, changes map[string]*string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return err
+	}
 	return s.wide.UpdateRow(ctx, table, valuesOf(pk), valuesOf(changes))
 }
 
 func (s *remoteSession) InsertRow(table string, values map[string]*string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return err
+	}
 	return s.wide.InsertRow(ctx, table, valuesOf(values))
 }
 
 func (s *remoteSession) DeleteRow(table string, pk map[string]*string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return err
+	}
 	return s.wide.DeleteRow(ctx, table, valuesOf(pk))
 }
 
@@ -662,6 +751,9 @@ func (s *remoteSession) DeleteRow(table string, pk map[string]*string) error {
 func (s *remoteSession) ApplyChanges(table string, updates []RowEdit, deletes []map[string]*string, inserts []map[string]*string, ddl []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return err
+	}
 	req := dbcore.BatchRequest{Table: table, DDL: ddl}
 	for _, u := range updates {
 		req.Updates = append(req.Updates, dbcore.RowChange{PK: valuesOf(u.PK), Changes: valuesOf(u.Changes)})
@@ -680,6 +772,9 @@ func (s *remoteSession) ApplyChanges(table string, updates []RowEdit, deletes []
 func (s *remoteSession) CreateDatabase(name string, opts map[string]string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if err := s.live(ctx); err != nil {
+		return err
+	}
 	return s.wide.CreateDatabase(ctx, name, opts)
 }
 
