@@ -10,6 +10,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # The runner has MSYS2 preinstalled but not on PATH; fyne needs cgo, so
+      # vet/build/test cannot even load the packages without gcc. The vet step
+      # has failed on exactly this since the workflow was added — the same
+      # command is green locally (see check.ps1).
+      - name: put mingw gcc on PATH
+        run: Add-Content $env:GITHUB_PATH 'C:\msys64\mingw64\bin'
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
