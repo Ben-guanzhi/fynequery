@@ -10,6 +10,23 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # go.mod carries `replace github.com/dbcore/dbcore => ../dbcore`; without
+      # the sibling checkout vet dies on "replacement directory does not exist"
+      # — this workflow predates the sibling-checkout fix the other consumers
+      # got, which is why its vet step had never once been green.
+      - name: check out dbcore (sibling, for the local replace)
+        shell: bash
+        env:
+          DBCORE_TOKEN: ${{ secrets.DBCORE_CHECKOUT_TOKEN }}
+        run: |
+          set -eu
+          dest="$(dirname "$GITHUB_WORKSPACE")/dbcore"
+          if [ -n "${DBCORE_TOKEN:-}" ]; then
+            hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$DBCORE_TOKEN" | base64 -w0)"
+            git -c "http.extraheader=$hdr" clone --depth 1 https://github.com/Ben-guanzhi/dbcore.git "$dest"
+          else
+            git clone --depth 1 https://github.com/Ben-guanzhi/dbcore.git "$dest"
+          fi
       # The runner has MSYS2 preinstalled but not on PATH; fyne needs cgo, so
       # vet/build/test cannot even load the packages without gcc. The vet step
       # has failed on exactly this since the workflow was added — the same
