@@ -53,6 +53,9 @@ type dataTableTab struct {
 	indexObj    fyne.CanvasObject
 	gen         int // per-tab load generation (discards stale async results)
 	loaded      bool
+	// kvNext is the Redis value pager's continuation cursor ("" = exhausted
+	// or not a paged collection). The 加载更多值 button is driven by it.
+	kvNext string
 }
 
 // docTab ties one strip entry to its content (a table view or a query pane).
@@ -103,6 +106,7 @@ type workspace struct {
 	txnRow           *fyne.Container // bottom-bar row holding the transaction strip
 	prevBtn          *flatButton
 	nextBtn          *flatButton
+	moreValBtn       *flatButton       // Redis 值页「加载更多值」（kvNext 驱动显隐）
 	bottomBar        fyne.CanvasObject // data-view bottom bar (hidden in query tabs)
 	pendingDDL       []string          // queued ALTER TABLE statements (Preview/Commit)
 	findCounterLabel *widget.Label     // "cur/total" counter for the data-grid find box
@@ -1317,6 +1321,11 @@ func (ws *workspace) buildBottomBar() fyne.CanvasObject {
 	ws.prevBtn.onTap = func() { ws.gotoOffset(ws.offset - browseLimit) }
 	ws.nextBtn = newFlatButton("›")
 	ws.nextBtn.onTap = func() { ws.gotoOffset(ws.offset + browseLimit) }
+	// 加载更多值: a Redis collection continues in place instead of being
+	// capped at its first window; hidden unless the pager says there is more.
+	ws.moreValBtn = newFlatButton("加载更多值")
+	ws.moreValBtn.onTap = func() { ws.loadMoreValueRows(ws.activeData) }
+	ws.moreValBtn.Hide()
 	pageMark := newFlatButton("≡")
 	pageMark.onTap = func() { ws.showColumnsDialog() }
 	filtersBtn := newFlatButton("Filter")
@@ -1325,7 +1334,7 @@ func (ws *workspace) buildBottomBar() fyne.CanvasObject {
 	columnsBtn := newFlatButton("Columns")
 	columnsBtn.onTap = func() { ws.showColumnsDialog() }
 	row2right := container.NewHBox(filtersBtn, spacerW(6), columnsBtn, spacerW(10),
-		ws.prevBtn, pageMark, ws.nextBtn)
+		ws.prevBtn, pageMark, ws.nextBtn, spacerW(6), ws.moreValBtn)
 	// in-result search box (TablePlus in-grid spotlight) on the data tab.
 	findEntry := newGridSearchEntry()
 	findEntry.PlaceHolder = "在数据中查找…"
@@ -1967,8 +1976,21 @@ func (ws *workspace) loadTableData(t *dataTableTab, offset int) {
 	safeGo("loadTable "+name, func() {
 		var res proto.QueryResult
 		var err error
+		kvNext := ""
 		if strings.TrimSpace(filter) == "" {
-			res, err = sess.Browse(name, browseLimit)
+			// A Redis collection reads its first window through the kernel's
+			// value pager when the driver has it: the bounded whole read knew
+			// only "truncated", never how to continue — a million-member key
+			// was its first 300 rows forever.
+			if ws.conn.Driver == "redis" {
+				if pager, pok := db.AsValuePager(sess); pok {
+					res, _, kvNext, _, err = pager.BrowseValuePage(name, "", browseLimit)
+				} else {
+					res, err = sess.Browse(name, browseLimit)
+				}
+			} else {
+				res, err = sess.Browse(name, browseLimit)
+			}
 		} else {
 			res, err = sess.Query(
 				fmt.Sprintf("SELECT * FROM %s WHERE %s LIMIT %d",
@@ -1985,6 +2007,7 @@ func (ws *workspace) loadTableData(t *dataTableTab, offset int) {
 				}
 				return
 			}
+			t.kvNext = kvNext
 			data := tableDataFromResult(res, -1, false)
 			t.totalRows = data.Fetched
 			t.totalApprox = false
@@ -2017,6 +2040,52 @@ func (ws *workspace) loadTableData(t *dataTableTab, offset int) {
 					}
 				})
 			})
+		})
+	})
+}
+
+// loadMoreValueRows appends the next window of a Redis collection to the open
+// grid: the pager continues from t.kvNext, rows land in place via
+// appendRows (no tab reload), and the button hides when the walk is over.
+func (ws *workspace) loadMoreValueRows(t *dataTableTab) {
+	if t == nil || t.kvNext == "" {
+		return
+	}
+	sess := ws.liveSession()
+	if sess == nil {
+		return
+	}
+	pager, ok := db.AsValuePager(sess)
+	if !ok {
+		return
+	}
+	name := t.name
+	cursor := t.kvNext
+	t.gen++
+	gen := t.gen
+	safeGo("moreValues "+name, func() {
+		_, rows, next, more, err := pager.BrowseValuePage(name, cursor, browseLimit)
+		safeDo(func() {
+			if ws.liveSession() != sess || gen != t.gen || !ws.tabOpen(t) {
+				return
+			}
+			if err != nil {
+				ws.logf("加载更多值失败：%v", err)
+				if ws.activeData == t {
+					showInfo(ws.window, "加载更多值", err.Error())
+				}
+				return
+			}
+			if t.grid == nil {
+				return
+			}
+			t.grid.appendRows(rows)
+			t.kvNext = next
+			if ws.activeData == t {
+				ws.status.setRows(t.gridRowCount(), t.totalRows, true)
+			}
+			ws.updatePaging(t.offset > 0, t.gridRowCount() >= browseLimit)
+			_ = more
 		})
 	})
 }
@@ -2237,6 +2306,15 @@ func (ws *workspace) updatePaging(canPrev, canNext bool) {
 	}
 	ws.prevBtn.SetEnabled(canPrev)
 	ws.nextBtn.SetEnabled(canNext)
+	if ws.moreValBtn != nil {
+		// The Redis value walk is append-only: the button's visibility IS the
+		// pager's "more" answer (kvNext ""), driven by the active tab.
+		if t := ws.activeData; t != nil && t.kvNext != "" {
+			ws.moreValBtn.Show()
+		} else {
+			ws.moreValBtn.Hide()
+		}
+	}
 }
 
 // gotoOffset loads one page of the active table starting at row off.

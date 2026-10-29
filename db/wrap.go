@@ -54,6 +54,9 @@ func AsPinger(s Session) (Pinger, bool) { return asCapability[Pinger](s) }
 // AsKeyPager reports whether s can load keys beyond the first inventory page.
 func AsKeyPager(s Session) (KeyPager, bool) { return asCapability[KeyPager](s) }
 
+// AsValuePager reports whether s can continue a collection key's value read.
+func AsValuePager(s Session) (ValuePager, bool) { return asCapability[ValuePager](s) }
+
 // AsCanceller reports whether s can cancel a running query.
 func AsCanceller(s Session) (Canceller, bool) { return asCapability[Canceller](s) }
 
@@ -187,6 +190,13 @@ func (w *capabilityWrapper) LoadMoreKeys() (int, bool, error) {
 		return p.LoadMoreKeys()
 	}
 	return 0, false, errUnsupported("key paging")
+}
+
+func (w *capabilityWrapper) BrowseValuePage(key string, cursor string, limit int) (proto.QueryResult, [][]*string, string, bool, error) {
+	if p, ok := w.Session.(ValuePager); ok {
+		return p.BrowseValuePage(key, cursor, limit)
+	}
+	return proto.QueryResult{}, nil, "", false, errUnsupported("value paging")
 }
 
 func (w *capabilityWrapper) CreateDatabase(name string, opts map[string]string) error {

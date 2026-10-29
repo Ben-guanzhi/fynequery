@@ -771,3 +771,79 @@ func TestRedisKeyListRefreshContinuesCursor(t *testing.T) {
 		t.Fatal("MoreKeys() = false while the keyspace is not exhausted")
 	}
 }
+
+// fakePageReader 提供 list 语义的 KeyPageReader，供窗口函数测试。
+type fakePageReader struct {
+	items []string
+}
+
+func (f *fakePageReader) ListRange(ctx context.Context, key string, start, stop int64) ([]string, int64, error) {
+	if start < 0 || start >= int64(len(f.items)) {
+		return nil, int64(len(f.items)), nil
+	}
+	end := stop + 1
+	if end > int64(len(f.items)) {
+		end = int64(len(f.items))
+	}
+	return f.items[start:end], int64(len(f.items)), nil
+}
+
+func (f *fakePageReader) HashPage(ctx context.Context, key string, cursor uint64, count int64) ([]dbcore.RedisField, uint64, error) {
+	return nil, 0, nil
+}
+
+func (f *fakePageReader) SetPage(ctx context.Context, key string, cursor uint64, count int64) ([]string, uint64, error) {
+	return nil, 0, nil
+}
+
+func (f *fakePageReader) ZSetRange(ctx context.Context, key string, start, stop int64) ([]string, []float64, int64, error) {
+	return nil, nil, 0, nil
+}
+
+func (f *fakePageReader) StreamRange(ctx context.Context, key, afterID string, count int64) ([]dbcore.RedisStreamEntry, int64, error) {
+	return nil, 0, nil
+}
+
+// 续读窗口必须携带元素的真实秩：list 的 index 列是 LSET 编辑的寻址键，
+// 从零重编号会把编辑打到错误的元素上。三窗走完 7 个元素，第三窗 next 为
+// 空（耗尽），第二窗的 index 从 3 起。
+func TestRedisValueWindowListCarriesRealRank(t *testing.T) {
+	fake := &fakePageReader{items: []string{"a", "b", "c", "d", "e", "f", "g"}}
+	ctx := context.Background()
+
+	v1, next1, err := redisValueWindow(ctx, fake, "k", dbcore.RedisList, "", 3)
+	if err != nil {
+		t.Fatalf("window 1: %v", err)
+	}
+	if next1 != "3" {
+		t.Fatalf("next1 = %q, want 3", next1)
+	}
+	rows1 := redisValueRowsFrom("k", v1, 0)
+	if rows1[0][0] == nil || *rows1[0][0] != "0" {
+		t.Fatalf("first window first index = %v, want 0", rows1[0][0])
+	}
+
+	v2, next2, err := redisValueWindow(ctx, fake, "k", dbcore.RedisList, next1, 3)
+	if err != nil {
+		t.Fatalf("window 2: %v", err)
+	}
+	if next2 != "6" {
+		t.Fatalf("next2 = %q, want 6", next2)
+	}
+	rows2 := redisValueRowsFrom("k", v2, 3)
+	if *rows2[0][0] != "3" || *rows2[0][1] != "d" {
+		t.Fatalf("second window first row = %v/%v, want 3/d", *rows2[0][0], *rows2[0][1])
+	}
+
+	v3, next3, err := redisValueWindow(ctx, fake, "k", dbcore.RedisList, next2, 3)
+	if err != nil {
+		t.Fatalf("window 3: %v", err)
+	}
+	if next3 != "" {
+		t.Fatalf("exhausted walk must return empty next, got %q", next3)
+	}
+	rows3 := redisValueRowsFrom("k", v3, 6)
+	if len(rows3) != 1 || *rows3[0][0] != "6" || *rows3[0][1] != "g" {
+		t.Fatalf("final window = %v, want [6 g]", rows3)
+	}
+}

@@ -175,6 +175,16 @@ type KeyMeta struct {
 	HasTTL bool
 }
 
+// ValuePager is the optional ability to read a collection key's value in
+// windows: cursor "" starts the walk, the returned next continues it ("" =
+// exhausted). Backed by the kernel's KeyPageReader; the value grid uses it
+// for its 加载更多值 button instead of stopping at the first window forever.
+// rows rides along the rendered result so the grid can append without
+// re-reading.
+type ValuePager interface {
+	BrowseValuePage(key string, cursor string, limit int) (proto.QueryResult, [][]*string, string, bool, error)
+}
+
 // KeyAdmin is optionally implemented by KV sessions that can inspect and
 // delete/rename keys, and change their expiry. RenameKey must refuse to
 // overwrite an existing target, so a typo cannot destroy another key's value;

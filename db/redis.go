@@ -520,6 +520,14 @@ func (s *redisSession) Browse(table string, limit int) (proto.QueryResult, error
 }
 
 func redisValueRows(key string, v dbcore.RedisValue) [][]*string {
+	return redisValueRowsFrom(key, v, 0)
+}
+
+// redisValueRowsFrom renders value rows with the list's index column starting
+// at listStart: a continuation window must carry each item's real rank (LSET
+// edits by index — a window renumbered from zero would point an edit at the
+// wrong item). Every other type ignores it.
+func redisValueRowsFrom(key string, v dbcore.RedisValue, listStart int) [][]*string {
 	switch v.Type {
 	case dbcore.RedisStr:
 		return [][]*string{{redisStr(key), redisStr(v.Str)}}
@@ -537,7 +545,7 @@ func redisValueRows(key string, v dbcore.RedisValue) [][]*string {
 	case dbcore.RedisList:
 		rows := make([][]*string, 0, len(v.Items))
 		for i, item := range v.Items {
-			rows = append(rows, []*string{redisStr(strconv.Itoa(i)), redisStr(item)})
+			rows = append(rows, []*string{redisStr(strconv.Itoa(listStart + i)), redisStr(item)})
 		}
 		return rows
 	case dbcore.RedisSet:
@@ -733,4 +741,203 @@ func parseRedisInfo(raw string) map[string]string {
 		}
 	}
 	return out
+}
+
+// kvScanMaxRounds bounds the SCAN fill loop the same way the kernel bounds its
+// own key scan: a cursor that never advances must not hang the request.
+const kvScanMaxRounds = 100
+
+// valuePageDefaultLimit is the window size when the caller passes 0 (the UI
+// passes its own browseLimit).
+const valuePageDefaultLimit = 300
+
+// BrowseValuePage reads one window of a collection key through the kernel's
+// KeyPageReader. cursor "" starts the walk; the returned next continues it
+// ("" = exhausted). The bounded whole read had no way forward: a
+// million-member key was its first 300 rows forever. Strings (one cell) and
+// drivers without the capability fall back to Browse.
+func (s *redisSession) BrowseValuePage(table string, cursor string, limit int) (proto.QueryResult, [][]*string, string, bool, error) {
+	if limit <= 0 {
+		limit = valuePageDefaultLimit
+	}
+	pr, ok := dbcore.AsKeyPageReader(s.kv)
+	if !ok {
+		res, err := s.Browse(table, limit)
+		return res, nil, "", false, err
+	}
+	ctx, cancel := redisCtx()
+	defer cancel()
+
+	kind, err := s.kv.KeyType(ctx, table)
+	if err != nil {
+		return proto.QueryResult{}, nil, "", false, err
+	}
+	if kind == dbcore.RedisStr {
+		// A string is one cell: the bounded read is its page.
+		res, err := s.Browse(table, limit)
+		return res, nil, "", false, err
+	}
+	value, next, err := redisValueWindow(ctx, pr, table, kind, cursor, limit)
+	if err != nil {
+		return proto.QueryResult{}, nil, "", false, err
+	}
+	cols, ok := redisColumns(value.Type)
+	if !ok {
+		return proto.QueryResult{}, nil, "", false, fmt.Errorf("redis: unsupported key type %q", value.Type)
+	}
+	listStart := 0
+	if kind == dbcore.RedisList {
+		if n, err := parseRankCursor(cursor); err == nil {
+			listStart = int(n)
+		}
+	}
+	rows := redisValueRowsFrom(table, value, listStart)
+	more := next != ""
+	res := proto.QueryResult{Columns: cols, Rows: taggedRowsOf(rows), Truncated: more}
+	return res, rows, next, more, nil
+}
+
+// redisValueWindow mirrors the kernel pager's per-type semantics (the same
+// shapes the TableProGo client renders): list/zset by rank with the length as
+// the end signal, stream by last-ID with a full window as the "maybe more",
+// hash/set by SCAN with a bounded fill loop, dedup and sort.
+func redisValueWindow(ctx context.Context, p dbcore.KeyPageReader, key string,
+	kind dbcore.RedisKeyType, cursor string, limit int) (dbcore.RedisValue, string, error) {
+	switch kind {
+	case dbcore.RedisList:
+		start, err := parseRankCursor(cursor)
+		if err != nil {
+			return dbcore.RedisValue{}, "", err
+		}
+		items, length, err := p.ListRange(ctx, key, start, start+int64(limit)-1)
+		if err != nil {
+			return dbcore.RedisValue{}, "", err
+		}
+		next := ""
+		if end := start + int64(len(items)); end < length {
+			next = strconv.FormatInt(end, 10)
+		}
+		return dbcore.RedisValue{Type: kind, Items: items}, next, nil
+	case dbcore.RedisZSet:
+		start, err := parseRankCursor(cursor)
+		if err != nil {
+			return dbcore.RedisValue{}, "", err
+		}
+		members, scores, length, err := p.ZSetRange(ctx, key, start, start+int64(limit)-1)
+		if err != nil {
+			return dbcore.RedisValue{}, "", err
+		}
+		next := ""
+		if end := start + int64(len(members)); end < length {
+			next = strconv.FormatInt(end, 10)
+		}
+		return dbcore.RedisValue{Type: kind, Items: members, Scores: scores}, next, nil
+	case dbcore.RedisStream:
+		// StreamRange reads strictly after the ID: the cursor is the last
+		// entry of the previous window ("" = from the start). A full window is
+		// the only "more may follow" signal — a short one ends the walk.
+		entries, _, err := p.StreamRange(ctx, key, cursor, int64(limit))
+		if err != nil {
+			return dbcore.RedisValue{}, "", err
+		}
+		v := dbcore.RedisValue{Type: kind}
+		for _, e := range entries {
+			v.Items = append(v.Items, renderStreamEntry(e))
+			v.Stream = append(v.Stream, e)
+		}
+		next := ""
+		if len(entries) == limit {
+			next = entries[len(entries)-1].ID
+		}
+		return v, next, nil
+	case dbcore.RedisSet:
+		seen := map[string]bool{}
+		var members []string
+		scan, err := parseScanCursor(cursor)
+		if err != nil {
+			return dbcore.RedisValue{}, "", err
+		}
+		for round := 0; round < kvScanMaxRounds; round++ {
+			page, cont, err := p.SetPage(ctx, key, scan, int64(limit))
+			if err != nil {
+				return dbcore.RedisValue{}, "", err
+			}
+			for _, m := range page {
+				if !seen[m] {
+					seen[m] = true
+					members = append(members, m)
+				}
+			}
+			scan = cont
+			if scan == 0 || len(members) >= limit {
+				break
+			}
+		}
+		sort.Strings(members)
+		return dbcore.RedisValue{Type: kind, Items: members}, formatScanCont(scan), nil
+	case dbcore.RedisHash:
+		fields := map[string]string{}
+		scan, err := parseScanCursor(cursor)
+		if err != nil {
+			return dbcore.RedisValue{}, "", err
+		}
+		for round := 0; round < kvScanMaxRounds; round++ {
+			page, cont, err := p.HashPage(ctx, key, scan, int64(limit))
+			if err != nil {
+				return dbcore.RedisValue{}, "", err
+			}
+			for _, f := range page {
+				fields[f.Name] = f.Value
+			}
+			scan = cont
+			if scan == 0 || len(fields) >= limit {
+				break
+			}
+		}
+		return dbcore.RedisValue{Type: kind, Hash: fields}, formatScanCont(scan), nil
+	default:
+		return dbcore.RedisValue{}, "", fmt.Errorf("redis: cannot page %q keys", kind)
+	}
+}
+
+func parseRankCursor(cursor string) (int64, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(cursor, 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("redis: invalid window cursor %q", cursor)
+	}
+	return n, nil
+}
+
+func parseScanCursor(cursor string) (uint64, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseUint(cursor, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("redis: invalid scan cursor %q", cursor)
+	}
+	return n, nil
+}
+
+// formatScanCont spells a SCAN continuation: cursor 0 means the walk is over.
+func formatScanCont(cursor uint64) string {
+	if cursor == 0 {
+		return ""
+	}
+	return strconv.FormatUint(cursor, 10)
+}
+
+// renderStreamEntry flattens one entry into the grid's single "entry" column
+// exactly as the whole-key read renders it: the ID, then the fields sorted by
+// name as "k=v", space separated.
+func renderStreamEntry(e dbcore.RedisStreamEntry) string {
+	fields := make([]string, 0, len(e.Fields))
+	for _, f := range e.Fields {
+		fields = append(fields, f.Name+"="+f.Value)
+	}
+	sort.Strings(fields)
+	return e.ID + " " + strings.Join(fields, " ")
 }
