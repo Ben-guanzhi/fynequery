@@ -182,8 +182,31 @@ func (s *redisSession) keyList() ([]string, error) {
 		s.mu.Unlock()
 		return keys, nil
 	}
-	pattern := s.pattern
+	if s.loading {
+		// A LoadMoreKeys page is landing; hand out what is on screen and let
+		// the next refresh pick the merged state up.
+		keys := s.keys
+		s.mu.Unlock()
+		return keys, nil
+	}
+	pattern, cursor := s.pattern, s.cursor
 	s.gen++
+	// gen snapshot AFTER the bump: the landing check asks "did anyone else
+	// invalidate the state since I started" — a filter change, a mutation
+	// invalidation or a newer refresh all bump gen again and void this scan.
+	gen := s.gen
+	// Continue the previous scan instead of restarting it from cursor 0: a
+	// cache refresh fires on every sidebar reload (rename, delete, manual),
+	// and a restart used to wipe the pages the user had already paged in via
+	// 加载更多 — cursor back to zero, keys 2..N gone. In-app mutations go
+	// through invalidateKeys (full reset), so the incremental merge never
+	// hides a key this app deleted; changes made outside it line up on the
+	// next filter change or reconnect.
+	known := make(map[string]bool, len(s.keys))
+	for _, key := range s.keys {
+		known[key] = true
+	}
+	existing := s.keys
 	s.mu.Unlock()
 	if pattern == "" {
 		pattern = "*"
@@ -192,20 +215,28 @@ func (s *redisSession) keyList() ([]string, error) {
 	// SCAN can take a while on a large keyspace, so it runs outside the lock;
 	// a concurrent SetKeyFilter simply discards this snapshot when it lands.
 	scanCtx, cancel := redisCtx()
-	keys, cursor, more, err := scanRedisKeys(scanCtx, s.kv, 0, pattern, nil)
+	fresh, next, more, err := scanRedisKeys(scanCtx, s.kv, cursor, pattern, known)
 	cancel()
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(keys)
 
 	s.mu.Lock()
-	if s.pattern == pattern || (s.pattern == "" && pattern == "*") {
-		s.keys, s.keysAt = keys, time.Now()
-		s.cursor, s.more = cursor, more
+	defer s.mu.Unlock()
+	if (s.pattern == pattern || (s.pattern == "" && pattern == "*")) && s.gen == gen {
+		merged := existing
+		if len(fresh) > 0 {
+			merged = append(append([]string(nil), existing...), fresh...)
+			sort.Strings(merged)
+		}
+		s.keys, s.keysAt = merged, time.Now()
+		s.cursor, s.more = next, more
+		return merged, nil
 	}
-	s.mu.Unlock()
-	return keys, nil
+	// The filter changed or a mutation reset the state mid-scan: keep the
+	// original behavior of returning what the scan found; the caller's next
+	// refresh re-runs against the new state.
+	return fresh, nil
 }
 
 // scanRedisKeys collects at most redisKeyPageLimit new keys from cursor,

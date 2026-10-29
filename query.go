@@ -629,10 +629,9 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 						qp.timer.Refresh()
 						qp.logQuery("执行失败（继续）：%v", err)
 						qp.finishRun()
-						go func() {
-							defer func() { recover() }()
-							dialog.NewError(err, qp.window).Show()
-						}()
+						// 直接在 UI 线程 Show：Fyne 2.8 的 overlay/窗口操作不许离开主线程，
+						// 裸 goroutine 里的空 recover 还会把 panic 无声吞掉（绕过 crash.go 的全量记录）。
+						dialog.NewError(err, qp.window).Show()
 						qp.runChainAt(all, i+1)
 						return
 					}
@@ -829,10 +828,9 @@ func (qp *queryPane) finishStream(state *streamState, res proto.QueryResult, err
 				qp.timer.Text = fmt.Sprintf("stmt %d failed, continuing…", i+1)
 				qp.timer.Refresh()
 				qp.logQuery("执行失败（继续）：%v", err)
-				go func() {
-					defer func() { recover() }()
-					dialog.NewError(err, qp.window).Show()
-				}()
+				// 直接在 UI 线程 Show：Fyne 2.8 的 overlay/窗口操作不许离开主线程，
+				// 裸 goroutine 里的空 recover 还会把 panic 无声吞掉（绕过 crash.go 的全量记录）。
+				dialog.NewError(err, qp.window).Show()
 				qp.runChainAt(all, i+1)
 				return
 			}

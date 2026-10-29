@@ -588,7 +588,7 @@ func (ws *workspace) writeKVEdit(w db.ValueWriter, edit db.ValueEdit) {
 		err := w.SetValue(edit)
 		safeDo(func() {
 			if err != nil {
-				dialog.NewError(err, ws.window).Show()
+				dialog.NewError(friendlyErr(err), ws.window).Show()
 				return
 			}
 			ws.logf("已写入 %s（%s）", edit.Key, edit.Column)
@@ -717,11 +717,16 @@ func (ws *workspace) commitEdits() {
 
 // commitGated applies one already-gated commit batch and reloads the page.
 func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates []rowUpdate, deletes, inserts []map[string]*string, ddl []string) {
+	// Session snapshot, taken on the UI thread like `up` was: the workers' rule
+	// is "never read ws.sess" — a database switch or a close replaces it while
+	// this background commit runs, and the batch must land on the session its
+	// edits were queued against, not on whatever the workspace points at now.
+	sess := ws.sess
 	progress := dialog.NewProgressInfinite("Commit", "Saving changes…", ws.window)
 	progress.Show()
 	safeGo("commit", func() {
 		var ferr error
-		if batcher, batched := db.AsBatchUpdater(ws.sess); batched && ok {
+		if batcher, batched := db.AsBatchUpdater(sess); batched && ok {
 			// Atomic path: all row edits + DDL run in one transaction, so a
 			// mid-batch error rolls back everything instead of leaving a partial
 			// commit.
@@ -761,7 +766,7 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 			// Then the queued structural DDL (ALTER statements).
 			if ferr == nil && len(ddl) > 0 {
 				for _, stmt := range ddl {
-					if _, err := ws.sess.Query(stmt, 1); err != nil {
+					if _, err := sess.Query(stmt, 1); err != nil {
 						ferr = fmt.Errorf("DDL: %w", err)
 						break
 					}
@@ -775,7 +780,7 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 					ferr = fmt.Errorf("%w（排队的 %d 条 DDL 已丢弃，请手动重新排队）", ferr, len(ddl))
 				}
 				ws.pendingDDL = nil // failed commit: drop the queue, re-queue manually
-				dialog.NewError(ferr, ws.window).Show()
+				dialog.NewError(friendlyErr(ferr), ws.window).Show()
 				return
 			}
 			ws.pendingDDL = nil
@@ -898,7 +903,7 @@ func (ws *workspace) writeKVDelete(d db.ValueDeleter, edit db.ValueEdit) {
 		}
 		safeDo(func() {
 			if err != nil {
-				dialog.NewError(err, ws.window).Show()
+				dialog.NewError(friendlyErr(err), ws.window).Show()
 				return
 			}
 			ws.logf("已删除 %s 的 %s=%s", edit.Key, edit.Identity, edit.ID)

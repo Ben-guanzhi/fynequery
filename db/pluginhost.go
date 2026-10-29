@@ -408,7 +408,14 @@ func (p *pluginProc) ConnIDs() []string {
 // here at the boundary. The transaction mirror the UI reads lives in the kernel
 // too (it is a property of the connection, not of this view of it).
 type remoteSession struct {
-	p      *pluginProc
+	p *pluginProc
+	// mu guards the three fields a lazy restart rewrites (connID/server/wide).
+	// live() repairs under the write lock with a re-check; readers snapshot
+	// under RLock and release before the actual call, so a long query never
+	// blocks the keepalive. Without this, two goroutines hitting a dead
+	// process both re-opened the connection (leaking one inside the plugin
+	// process) and overwrote each other's connection id mid-call.
+	mu     sync.RWMutex
 	connID string
 	server string
 	wide   *plugindriver.Conn
@@ -424,7 +431,7 @@ type remoteSession struct {
 	cancelAsked atomic.Bool
 }
 
-func (s *remoteSession) Server() string { return s.server }
+func (s *remoteSession) Server() string { return s.serverView() }
 
 // live makes sure the session's connection is usable: while the plugin process
 // is alive it is a cheap flag read; after a restart (or before the first use,
@@ -433,6 +440,16 @@ func (s *remoteSession) Server() string { return s.server }
 // view. Every process-touching session method goes through it first, so a
 // crashed plugin heals on the next call instead of erroring forever.
 func (s *remoteSession) live(ctx context.Context) error {
+	s.mu.RLock()
+	wide := s.wide
+	s.mu.RUnlock()
+	if wide != nil && !wide.Dead() {
+		return nil
+	}
+	// Repair under the write lock, re-checking: the loser of a race sees the
+	// winner's fresh wide view and returns without re-opening.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.wide != nil && !s.wide.Dead() {
 		return nil
 	}
@@ -449,14 +466,31 @@ func (s *remoteSession) live(ctx context.Context) error {
 	return nil
 }
 
+// connView snapshots the connection id and wide view after live() has made
+// them usable; the pair is read under the session's lock so a concurrent
+// restart cannot tear it.
+func (s *remoteSession) connView() (string, *plugindriver.Conn) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.connID, s.wide
+}
+
+// serverView snapshots the server label.
+func (s *remoteSession) serverView() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.server
+}
+
 func (s *remoteSession) Tables() ([]proto.ObjectInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	if err := s.live(ctx); err != nil {
 		return nil, err
 	}
+	connID, _ := s.connView()
 	var res proto.TablesResult
-	err := s.p.call(ctx, proto.MethodTables, proto.TablesParams{ConnID: s.connID}, &res)
+	err := s.p.call(ctx, proto.MethodTables, proto.TablesParams{ConnID: connID}, &res)
 	return res.Objects, err
 }
 
@@ -466,8 +500,9 @@ func (s *remoteSession) Columns(table string) ([]proto.ColumnInfo, error) {
 	if err := s.live(ctx); err != nil {
 		return nil, err
 	}
+	connID, _ := s.connView()
 	var res proto.ColumnsResult
-	err := s.p.call(ctx, proto.MethodColumns, proto.ColumnsParams{ConnID: s.connID, Table: table}, &res)
+	err := s.p.call(ctx, proto.MethodColumns, proto.ColumnsParams{ConnID: connID, Table: table}, &res)
 	return res.Columns, err
 }
 
@@ -478,8 +513,9 @@ func (s *remoteSession) Query(sqlText string, maxRows int) (proto.QueryResult, e
 		return proto.QueryResult{}, err
 	}
 	s.cancelAsked.Store(false)
+	connID, _ := s.connView()
 	var res proto.QueryResult
-	err := s.p.call(ctx, proto.MethodQuery, proto.QueryParams{ConnID: s.connID, SQL: sqlText, MaxRows: maxRows}, &res)
+	err := s.p.call(ctx, proto.MethodQuery, proto.QueryParams{ConnID: connID, SQL: sqlText, MaxRows: maxRows}, &res)
 	if err != nil && s.cancelAsked.Load() {
 		// The user cancelled this statement: surface the clean sentinel.
 		return proto.QueryResult{}, ErrQueryCancelled
@@ -493,8 +529,9 @@ func (s *remoteSession) Browse(table string, limit int) (proto.QueryResult, erro
 	if err := s.live(ctx); err != nil {
 		return proto.QueryResult{}, err
 	}
+	connID, _ := s.connView()
 	var res proto.QueryResult
-	err := s.p.call(ctx, proto.MethodBrowse, proto.BrowseParams{ConnID: s.connID, Table: table, Limit: limit}, &res)
+	err := s.p.call(ctx, proto.MethodBrowse, proto.BrowseParams{ConnID: connID, Table: table, Limit: limit}, &res)
 	return res, err
 }
 
@@ -511,7 +548,8 @@ func (s *remoteSession) KillQuery() error {
 	if err := s.live(ctx); err != nil {
 		return fmt.Errorf("cancel: %w", err)
 	}
-	if err := s.p.call(ctx, proto.MethodCancel, proto.CancelParams{ConnID: s.connID}, nil); err != nil {
+	connID, _ := s.connView()
+	if err := s.p.call(ctx, proto.MethodCancel, proto.CancelParams{ConnID: connID}, nil); err != nil {
 		return fmt.Errorf("cancel: %w", err)
 	}
 	return nil
@@ -520,7 +558,8 @@ func (s *remoteSession) KillQuery() error {
 func (s *remoteSession) Close() {
 	// A session on a dead process has nothing to close: the connection died
 	// with the process, and live() would only open a new one to close it.
-	if s.wide != nil && s.wide.Dead() {
+	connID, wide := s.connView()
+	if wide != nil && wide.Dead() {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -528,11 +567,11 @@ func (s *remoteSession) Close() {
 	// Roll back any transaction left open so the connection goes back to a
 	// clean state before it is dropped or returned to the pool. The mirror the
 	// kernel keeps is what says whether one is open.
-	if s.wide.InTransaction() {
-		_ = s.wide.RollbackTx(ctx)
+	if wide.InTransaction() {
+		_ = wide.RollbackTx(ctx)
 	}
 	// Best effort: a failed close just leaves the conn to die with the process.
-	_ = s.p.call(ctx, proto.MethodClose, proto.CloseParams{ConnID: s.connID}, nil)
+	_ = s.p.call(ctx, proto.MethodClose, proto.CloseParams{ConnID: connID}, nil)
 }
 
 // ---- manual transactions (implements db.Transactional) ---------------------
@@ -547,7 +586,8 @@ func (s *remoteSession) Begin() error {
 	if err := s.live(ctx); err != nil {
 		return err
 	}
-	return s.wide.BeginTx(ctx)
+	_, wide := s.connView()
+	return wide.BeginTx(ctx)
 }
 
 func (s *remoteSession) Commit() error {
@@ -556,7 +596,8 @@ func (s *remoteSession) Commit() error {
 	if err := s.live(ctx); err != nil {
 		return err
 	}
-	return s.wide.CommitTx(ctx)
+	_, wide := s.connView()
+	return wide.CommitTx(ctx)
 }
 
 func (s *remoteSession) Rollback() error {
@@ -565,14 +606,16 @@ func (s *remoteSession) Rollback() error {
 	if err := s.live(ctx); err != nil {
 		return err
 	}
-	return s.wide.RollbackTx(ctx)
+	_, wide := s.connView()
+	return wide.RollbackTx(ctx)
 }
 
 // InTransaction reports the mirrored transaction state the kernel keeps for
 // this connection. A dead process holds no transaction — the restart dropped
 // it with the connection.
 func (s *remoteSession) InTransaction() bool {
-	return s.wide != nil && !s.wide.Dead() && s.wide.InTransaction()
+	_, wide := s.connView()
+	return wide != nil && !wide.Dead() && wide.InTransaction()
 }
 
 // Metrics forwards a server-metrics request to the plugin, reusing the already
@@ -583,7 +626,8 @@ func (s *remoteSession) Metrics() ([]proto.Metric, error) {
 	if err := s.live(ctx); err != nil {
 		return nil, err
 	}
-	metrics, err := s.wide.ServerMetrics(ctx)
+	_, wide := s.connView()
+	metrics, err := wide.ServerMetrics(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -605,7 +649,10 @@ func (s *remoteSession) QueryStream(sqlText string, batch int, emit func(cols []
 	if err := s.live(ctx); err != nil {
 		return proto.QueryResult{}, err
 	}
-	result, err := s.wideQueryStream(ctx, sqlText, batch, emit)
+	_, wide := s.connView()
+	result, err := wide.QueryStream(ctx, sqlText, batch, func(b dbcore.StreamBatch) (bool, error) {
+		return emit(columnsOf(b.Columns), stringsOf(b.Rows))
+	})
 	if err != nil {
 		if s.cancelAsked.Load() {
 			return proto.QueryResult{}, ErrQueryCancelled
@@ -613,17 +660,6 @@ func (s *remoteSession) QueryStream(sqlText string, batch int, emit func(cols []
 		return proto.QueryResult{}, err
 	}
 	return proto.QueryResult{RowsAffected: result.AffectedRows, DurationMS: result.DurationMS}, nil
-}
-
-// wideQueryStream is QueryStream's body after the recovery point: the kernel's
-// wide session owns the streaming protocol; this is only the shape adaptation
-// back to the UI (see stringsOf / columnsOf). DurationMS comes from the
-// session's own terminal frame when it reports one; otherwise it stays 0 and
-// the caller falls back to the elapsed time it measured itself (query.go).
-func (s *remoteSession) wideQueryStream(ctx context.Context, sqlText string, batch int, emit func(cols []proto.ColumnInfo, rows [][]*string) (bool, error)) (*dbcore.StreamResult, error) {
-	return s.wide.QueryStream(ctx, sqlText, batch, func(b dbcore.StreamBatch) (bool, error) {
-		return emit(columnsOf(b.Columns), stringsOf(b.Rows))
-	})
 }
 
 // valuesOf renders the UI's nullable strings as the kernel's values. A nil

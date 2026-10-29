@@ -55,9 +55,9 @@ func (ws *workspace) showItemMenu(name string, pos fyne.Position) {
 		pinItem,
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("打开", func() { ws.openObjectByName(name) }),
-		fyne.NewMenuItem("查県 DDL", func() { ws.openObjectDDL(name, kind) }),
+		fyne.NewMenuItem("查看 DDL", func() { ws.openObjectDDL(name, kind) }),
 		fyne.NewMenuItem("编辑结构…", func() { ws.editStructure(name) }),
-		fyne.NewMenuItem("查県结构", func() {
+		fyne.NewMenuItem("查看结构", func() {
 			ws.openTable(name)
 			if ws.segment != nil {
 				ws.segment.set(1)

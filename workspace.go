@@ -105,10 +105,10 @@ type workspace struct {
 	findCounterLabel *widget.Label     // "cur/total" counter for the data-grid find box
 	filterBtn        *flatButton       // bottom-bar Filter button (shows an active-filter dot)
 	loadingMu        sync.Mutex
-	loadingGen       int         // generation counter to discard stale async results
-	searchTimer      *time.Timer // pending KV key-filter debounce
-	searchSeq        int         // drops a debounced filter overtaken by newer typing
-	keepAliveStop    chan struct{} // closed when the workspace closes, ending the keep-alive ticker
+	loadingGen       int                // generation counter to discard stale async results
+	searchTimer      *time.Timer        // pending KV key-filter debounce
+	searchSeq        int                // drops a debounced filter overtaken by newer typing
+	keepAliveStop    chan struct{}      // closed when the workspace closes, ending the keep-alive ticker
 	invCache         []proto.ObjectInfo // last fetched catalog (approxRows lookup); guarded by loadingMu
 	// toolbar
 	ribbon        *serverRibbon     // connection ribbon (opens the connection picker)
@@ -799,12 +799,17 @@ func (ws *workspace) fetchFunctions(sess db.Session, driver, curDB string) []Tab
 			"WHERE routine_schema = current_schema() AND routine_type = 'FUNCTION' ORDER BY routine_name"
 	case "mssql":
 		q = "SELECT name FROM sys.objects WHERE type IN ('FN','IF','TF') ORDER BY name"
+	case "oracle":
+		// Oracle 没有 information_schema；此前落进 default 的 MySQL 配方必然
+		// 失败且被静默吞掉——Oracle 的侧栏从此没有函数列表。
+		q = "SELECT object_name FROM all_objects WHERE object_type = 'FUNCTION' AND owner = USER ORDER BY object_name"
 	default: // mysql / mariadb
 		q = "SELECT routine_name FROM information_schema.routines " +
 			"WHERE routine_schema = DATABASE() AND routine_type = 'FUNCTION' ORDER BY routine_name"
 	}
 	res, err := sess.Query(q, 5000)
 	if err != nil {
+		ws.logf("函数列表：%v", err)
 		return nil
 	}
 	var out []TableInfo
@@ -1993,8 +1998,8 @@ func (ws *workspace) loadTablePage(t *dataTableTab, off int) {
 	t.gen++
 	gen := t.gen
 	safeGo("page "+name, func() {
-		sql := fmt.Sprintf("SELECT * FROM %s%s LIMIT %d OFFSET %d",
-			ws.quoteTable(name), ws.whereClause(), browseLimit+1, off)
+		sql := fmt.Sprintf("SELECT * FROM %s%s%s",
+			ws.quoteTable(name), ws.whereClause(), ws.pageSuffix(browseLimit+1, off))
 		res, err := sess.Query(sql, browseLimit+1)
 		safeDo(func() {
 			if ws.liveSession() != sess || gen != t.gen || !ws.tabOpen(t) {
@@ -2146,10 +2151,27 @@ func indexRows(data *TableData) [][]string {
 
 func (ws *workspace) pageSupported() bool {
 	switch ws.conn.Driver {
-	case "mysql", "mariadb", "postgres", "postgresql":
+	case "mysql", "mariadb", "postgres", "postgresql", "mssql", "sqlserver", "oracle", "sqlite":
 		return true
 	}
 	return false
+}
+
+// pageSuffix renders the dialect's paging tail. T-SQL has no LIMIT/OFFSET; its
+// OFFSET/FETCH requires an ORDER BY, which the synthetic (SELECT NULL)
+// provides when the user did not pick one. Oracle 12c+ shares the OFFSET/FETCH
+// shape (no ORDER BY needed). Everything else here speaks LIMIT/OFFSET. Before
+// this existed, a filtered browse on MSSQL emitted LIMIT and failed with a
+// syntax error every time.
+func (ws *workspace) pageSuffix(limit, offset int) string {
+	switch ws.conn.Driver {
+	case "mssql", "sqlserver":
+		return fmt.Sprintf(" ORDER BY (SELECT NULL) OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", offset, limit)
+	case "oracle":
+		return fmt.Sprintf(" OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", offset, limit)
+	default:
+		return fmt.Sprintf(" LIMIT %d OFFSET %d", limit, offset)
+	}
 }
 
 func (ws *workspace) quoteTable(name string) string {

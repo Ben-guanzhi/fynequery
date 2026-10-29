@@ -727,3 +727,47 @@ func TestRedisBrowseBounded(t *testing.T) {
 		t.Fatalf("Browse(small,10).Truncated = true, want false")
 	}
 }
+
+// 缓存 TTL 过期后的刷新必须续扫而不是从游标 0 重扫：侧栏每次刷新（改键名、
+// 删除、手动）都会走到这里，重扫会把用户已翻出的第 2..N 页键整页清掉、游标
+// 归零。续扫合并进现有清单；应用内的增删改走 invalidateKeys 全量失效。
+func TestRedisKeyListRefreshContinuesCursor(t *testing.T) {
+	keys := make([]string, 0, 2*redisKeyPageLimit+3*redisScanPageSize)
+	for i := 0; i < 2*redisKeyPageLimit+3*redisScanPageSize; i++ {
+		keys = append(keys, "k:"+strconv.Itoa(i))
+	}
+	sess := &redisSession{kv: &pagingKV{keys: keys}}
+
+	first, err := sess.keyList()
+	if err != nil {
+		t.Fatalf("first keyList: %v", err)
+	}
+	if len(first) != redisKeyPageLimit {
+		t.Fatalf("first page = %d, want %d", len(first), redisKeyPageLimit)
+	}
+
+	// 缓存过期（时间倒拨到 TTL 之前）：刷新必须保住第一页并续出第二页。
+	sess.mu.Lock()
+	sess.keysAt = time.Now().Add(-2 * redisKeyCacheTTL)
+	sess.mu.Unlock()
+
+	second, err := sess.keyList()
+	if err != nil {
+		t.Fatalf("refresh keyList: %v", err)
+	}
+	if len(second) <= len(first) {
+		t.Fatalf("refresh returned %d keys, want more than the first page's %d", len(second), len(first))
+	}
+	seen := make(map[string]bool, len(second))
+	for _, key := range second {
+		seen[key] = true
+	}
+	for _, key := range first {
+		if !seen[key] {
+			t.Fatalf("refresh dropped a paged-in key %q", key)
+		}
+	}
+	if !sess.MoreKeys() {
+		t.Fatal("MoreKeys() = false while the keyspace is not exhausted")
+	}
+}
