@@ -63,7 +63,7 @@ type queryPane struct {
 	// (and closes the old session) when the user picks a database, so the pane
 	// must not keep a stale session captured at build time.
 	sessFn        func() db.Session
-	onReconnect   func() db.Session              // workspace dials a fresh session (timeout dialog)
+	onReconnect   func(func(db.Session))         // workspace dials a fresh session, then calls back (timeout dialog)
 	onRowSelect   func(data *TableData, row int) // a result row was selected
 	onLog         func(string)                   // workspace console sink (optional)
 	colCache      map[string][]string            // table -> column names (completion)
@@ -1024,9 +1024,11 @@ func (qp *queryPane) showTimeoutDialog(stmt string, all []string, i int) {
 		if qp.onReconnect == nil {
 			return
 		}
-		if sess := qp.onReconnect(); sess != nil {
-			qp.sendStatement(stmt, all, i)
-		}
+		qp.onReconnect(func(sess db.Session) {
+			if sess != nil {
+				qp.sendStatement(stmt, all, i)
+			}
+		})
 	})
 	body := container.NewVBox(
 		widget.NewLabel("The server is taking too long to respond."),

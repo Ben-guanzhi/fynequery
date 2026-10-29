@@ -63,26 +63,29 @@ type docTab struct {
 }
 
 type workspace struct {
-	window           fyne.Window
-	conn             Connection
-	sess             db.Session
-	dbType           DBType
-	side             *sidebar
-	tabs             *tabBar
-	content          *fyne.Container // stacked tab contents
-	status           *statusBar
-	segment          *segmented
-	structPane       *fyne.Container
-	indexPane        *fyne.Container   // 索引 segment content
-	dataStack        *fyne.Container   // dataSlot + struct + index (tab 0 content)
-	queryTabs        []*queryPane      // one independent query pane per SQL tab
-	docs             []*docTab         // parallel to ws.tabs.tabs (data or query)
-	dataTabs         []*dataTableTab   // open table views (multi-tab browsing)
-	activeData       *dataTableTab     // the table tab currently on screen
-	details          *detailsPane      // right sidebar
-	detailWrap       fyne.CanvasObject // toggled by the toolbar button
-	currentDB        string            // selected database ("" = none yet)
-	dataSlot         *fyne.Container   // holds the current data grid (replaced per table)
+	window     fyne.Window
+	conn       Connection
+	sess       db.Session
+	dbType     DBType
+	side       *sidebar
+	tabs       *tabBar
+	content    *fyne.Container // stacked tab contents
+	status     *statusBar
+	segment    *segmented
+	structPane *fyne.Container
+	indexPane  *fyne.Container   // 索引 segment content
+	dataStack  *fyne.Container   // dataSlot + struct + index (tab 0 content)
+	queryTabs  []*queryPane      // one independent query pane per SQL tab
+	docs       []*docTab         // parallel to ws.tabs.tabs (data or query)
+	dataTabs   []*dataTableTab   // open table views (multi-tab browsing)
+	activeData *dataTableTab     // the table tab currently on screen
+	details    *detailsPane      // right sidebar
+	detailWrap fyne.CanvasObject // toggled by the toolbar button
+	currentDB  string            // selected database ("" = none yet)
+	// dbSwitchSeq guards the background database dial: a switch superseded by a
+	// newer one drops its result instead of swapping the session underneath it.
+	dbSwitchSeq      uint64
+	dataSlot         *fyne.Container // holds the current data grid (replaced per table)
 	grid             *dataTable
 	tableName        string
 	tableCols        []ColumnInfo // structure of the open table (for the 详情 pane)
@@ -464,29 +467,48 @@ func (ws *workspace) switchDatabase(name string) {
 	}
 	newConn := ws.conn
 	newConn.Database = name
-	sess, err := dialConn(newConn)
-	if err != nil {
-		showInfo(ws.window, "打开数据库", "无法连接到数据库 "+name+":\n"+err.Error())
-		return
-	}
-	if ws.liveSession() != nil {
-		ws.liveSession().Close()
-	}
-	ws.setSession(sess)
-	ws.conn = newConn
-	ws.currentDB = name
-	ws.closeAllDataTabs() // open table grids belong to the old database
-	ws.updateBanner()
-	ws.logf("已选择数据库 %s", name)
-	ws.syncChrome() // blank center until a table is opened
-	if ws.conn.Driver == "redis" {
-		// The new session starts with an empty pattern; silently clearing the
-		// box avoids a search text that no longer filters anything.
-		ws.side.resetSearch()
-	}
-	ws.loadInventory()
-	ws.loadDatabases()
-	ws.loadTLS()
+	ws.dbSwitchSeq++
+	seq := ws.dbSwitchSeq
+	// 拨号可能很慢（Redis 10s 超时、插件冷启动 10s+5s）：同步做会冻结整个
+	// 窗口。与 connpicker 同一范式——后台拨号 + 进度框，结果回 UI 线程。
+	progress := dialog.NewProgressInfinite("打开数据库", "正在连接数据库 "+name+"…", ws.window)
+	progress.Show()
+	safeGo("switchDatabase", func() {
+		sess, err := dialConn(newConn)
+		safeDo(func() {
+			progress.Hide()
+			if seq != ws.dbSwitchSeq {
+				// A newer switch superseded this dial: drop its session rather
+				// than swapping it in under the user's newer choice.
+				if err == nil {
+					sess.Close()
+				}
+				return
+			}
+			if err != nil {
+				showInfo(ws.window, "打开数据库", "无法连接到数据库 "+name+":\n"+err.Error())
+				return
+			}
+			if ws.liveSession() != nil {
+				ws.liveSession().Close()
+			}
+			ws.setSession(sess)
+			ws.conn = newConn
+			ws.currentDB = name
+			ws.closeAllDataTabs() // open table grids belong to the old database
+			ws.updateBanner()
+			ws.logf("已选择数据库 %s", name)
+			ws.syncChrome() // blank center until a table is opened
+			if ws.conn.Driver == "redis" {
+				// The new session starts with an empty pattern; silently clearing the
+				// box avoids a search text that no longer filters anything.
+				ws.side.resetSearch()
+			}
+			ws.loadInventory()
+			ws.loadDatabases()
+			ws.loadTLS()
+		})
+	})
 }
 
 // sideWidth is the initial width of the sidebar column (~18% of the window).
@@ -568,22 +590,33 @@ func (ws *workspace) startKeepAlive() {
 // reconnect dials a fresh session for the workspace's connection and swaps it
 // in (the timeout dialog's "Reconnect & Retry" action). It reports nil and
 // shows an error when the re-dial fails.
-func (ws *workspace) reconnect() db.Session {
+// reconnect dials a fresh session in the background and hands it to done on
+// the UI thread (nil on failure). The old synchronous return froze the window
+// for the whole dial — up to 10–15s on a slow network or a cold plugin.
+func (ws *workspace) reconnect(done func(db.Session)) {
 	newConn := ws.conn
 	newConn.Database = ws.currentDB
-	sess, err := dialConn(newConn)
-	if err != nil {
-		showInfo(ws.window, "重连", "Reconnect failed:\n"+err.Error())
-		return nil
-	}
-	if old := ws.liveSession(); old != nil {
-		old.Close()
-	}
-	ws.setSession(sess)
-	ws.conn = newConn
-	ws.applyKeyFilter(sess)
-	ws.loadTLS()
-	return sess
+	progress := dialog.NewProgressInfinite("重连", "正在重新连接…", ws.window)
+	progress.Show()
+	safeGo("reconnect", func() {
+		sess, err := dialConn(newConn)
+		safeDo(func() {
+			progress.Hide()
+			if err != nil {
+				showInfo(ws.window, "重连", "Reconnect failed:\n"+err.Error())
+				done(nil)
+				return
+			}
+			if old := ws.liveSession(); old != nil {
+				old.Close()
+			}
+			ws.setSession(sess)
+			ws.conn = newConn
+			ws.applyKeyFilter(sess)
+			ws.loadTLS()
+			done(sess)
+		})
+	})
 }
 
 // ---- manual transactions (TablePlus "Begin Transaction" mode) --------------
