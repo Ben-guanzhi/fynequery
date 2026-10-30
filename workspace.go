@@ -602,10 +602,26 @@ func (ws *workspace) reconnect(done func(db.Session)) {
 	newConn.Database = ws.currentDB
 	progress := dialog.NewProgressInfinite("重连", "正在重新连接…", ws.window)
 	progress.Show()
+	// The dial may take 10s+; a database switch started meanwhile supersedes
+	// it (same guard as switchDatabase). Without this check the stale dial's
+	// completion would close the NEW database's session and roll ws.conn
+	// back — silently undoing the user's switch and sending later queries
+	// to the old database.
+	ws.dbSwitchSeq++
+	seq := ws.dbSwitchSeq
 	safeGo("reconnect", func() {
 		sess, err := dialConn(newConn)
 		safeDo(func() {
 			progress.Hide()
+			if seq != ws.dbSwitchSeq {
+				// A newer switch superseded this reconnect: drop the stale
+				// session instead of swapping it in under the user's choice.
+				if err == nil {
+					sess.Close()
+				}
+				done(nil)
+				return
+			}
 			if err != nil {
 				showInfo(ws.window, "重连", "Reconnect failed:\n"+err.Error())
 				done(nil)
