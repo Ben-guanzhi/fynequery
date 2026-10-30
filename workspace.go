@@ -1973,6 +1973,10 @@ func (ws *workspace) loadTableData(t *dataTableTab, offset int) {
 	filter := t.filterSQL
 	t.gen++
 	gen := t.gen
+	// Snapshot the driver before the goroutine: ws.conn is swapped by
+	// switchDatabase/reconnect on the UI thread, and reading it inside
+	// safeGo races with that write.
+	driver := ws.conn.Driver
 	safeGo("loadTable "+name, func() {
 		var res proto.QueryResult
 		var err error
@@ -1982,7 +1986,7 @@ func (ws *workspace) loadTableData(t *dataTableTab, offset int) {
 			// value pager when the driver has it: the bounded whole read knew
 			// only "truncated", never how to continue — a million-member key
 			// was its first 300 rows forever.
-			if ws.conn.Driver == "redis" {
+			if driver == "redis" {
 				if pager, pok := db.AsValuePager(sess); pok {
 					res, _, kvNext, _, err = pager.BrowseValuePage(name, "", browseLimit)
 				} else {
@@ -2171,8 +2175,12 @@ func (ws *workspace) loadIndexesTab(t *dataTableTab, sess db.Session) {
 	}
 	name := t.name
 	gen := t.gen
+	// Snapshot the database before the goroutine: ws.conn is swapped by
+	// switchDatabase/reconnect on the UI thread, and reading it inside
+	// safeGo races with that write.
+	curDB := ws.conn.Database
 	safeGo("indexes "+name, func() {
-		idx := fetchIndexes(sess, ws.conn.Database, name)
+		idx := fetchIndexes(sess, curDB, name)
 		safeDo(func() {
 			if gen != t.gen || !ws.tabOpen(t) {
 				return
