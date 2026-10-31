@@ -221,8 +221,14 @@ func (ws *workspace) showUserDialog(users []userRow) {
 // refreshes the dialog's user list in place.
 func (ws *workspace) execUserDDL(title, stmt string, users *[]userRow, names *[]string, isMySQL bool, list *widget.List) {
 	gen := ws.nextGen()
+	// Snapshot: the worker must not read ws.sess (commitGated rule) — and
+	// unlike the other callers this one never nil-checked it at all.
+	sess := ws.sess
+	if sess == nil {
+		return
+	}
 	safeGo("userddl "+title, func() {
-		_, err := ws.sess.Query(stmt, 1)
+		_, err := sess.Query(stmt, 1)
 		safeDo(func() {
 			if !ws.current(gen) || ws.sess == nil {
 				return

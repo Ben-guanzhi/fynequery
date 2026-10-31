@@ -227,8 +227,11 @@ func (ws *workspace) copyCreateScript(name string) {
 	}
 	driver := ws.conn.Driver
 	quote := ws.quoteTable(name)
+	// Snapshot the session before the worker: ws.sess is swapped by
+	// setSession on the UI thread (commitGated rule — workers never read it).
+	sess := ws.sess
 	safeGo("copyCreate "+name, func() {
-		cols, err := ws.sess.Columns(name)
+		cols, err := sess.Columns(name)
 		if err != nil {
 			safeDo(func() { showInfo(ws.window, "Copy as CREATE", err.Error()) })
 			return
@@ -347,8 +350,11 @@ func (ws *workspace) runObjectSQL(title, sql string) {
 	if ws.sess == nil {
 		return
 	}
+	// Snapshot: the worker must not read ws.sess (setSession swaps it on the
+	// UI thread) — a DDL racing a reconnect would land on the closed session.
+	sess := ws.sess
 	safeGo("objSQL "+title, func() {
-		_, err := ws.sess.Query(sql, 1)
+		_, err := sess.Query(sql, 1)
 		safeDo(func() {
 			if err != nil {
 				showInfo(ws.window, title, err.Error())
