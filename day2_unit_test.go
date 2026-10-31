@@ -238,6 +238,13 @@ func TestAutoLimit(t *testing.T) {
 	if got := autoLimit("WITH c AS (SELECT 1) SELECT * FROM c", "mysql", 100); got != "WITH c AS (SELECT 1) SELECT * FROM c\nLIMIT 100" {
 		t.Fatalf("read CTE should cap: %q", got)
 	}
+	// A leading comment must not blind the WITH guard (wave 42: stripSQLNoise
+	// blanks the comment into spaces, and an untrimmed HasPrefix skipped the
+	// check — the cap then truncated a WITH ... DELETE to its first rows).
+	lead := autoLimit("-- name: cleanup\nWITH c AS (SELECT 1) DELETE FROM t", "mysql", 200)
+	if lead != "-- name: cleanup\nWITH c AS (SELECT 1) DELETE FROM t" {
+		t.Fatalf("comment-led DML CTE must run untouched: %q", lead)
+	}
 	if got := autoLimit("SELECT TOP 5 * FROM t", "mysql", 100); got != "SELECT TOP 5 * FROM t" {
 		t.Errorf("TOP statements must be left alone, got %q", got)
 	}

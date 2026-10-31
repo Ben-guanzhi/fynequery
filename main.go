@@ -237,7 +237,10 @@ func main() {
 		// the dial took. fyne.Do from before Run queues the UI work and it
 		// drains once the loop is up (glfw runOnMainWithWait).
 		launchDirect := func() {
-			go func() {
+			// safeGo, not bare go: dialConn panics happen (wave 27 evidence),
+			// and an unrecovered panic here takes down the whole process
+			// instead of falling back to the welcome page.
+			safeGo("directConn", func() {
 				conns, _ := loadConnections()
 				if len(conns) == 0 {
 					safeDo(showWelcome)
@@ -253,7 +256,7 @@ func main() {
 					}
 					openWorkspace(a, c, sess, darkMode, showWelcome)
 				})
-			}()
+			})
 		}
 		if hasPasscode() {
 			showLockWindow(a, launchDirect)

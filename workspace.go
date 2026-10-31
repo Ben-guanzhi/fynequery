@@ -205,8 +205,13 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 		safeGo("serverDial", func() {
 			ss, err := dialConn(serverConn)
 			safeDo(func() {
-				if seq != ws.dbSwitchSeq {
-					// A switch/reconnect superseded this dial.
+				// liveSession()==nil means the workspace window was closed
+				// while the dial was in flight (CloseIntercept closed the
+				// db-bound session) — the landed session must not attach.
+				if seq != ws.dbSwitchSeq || ws.liveSession() == nil {
+					// A switch/reconnect superseded this dial, or the user
+					// closed the workspace while it was in flight — the
+					// landed session would otherwise never be closed.
 					if err == nil {
 						ss.Close()
 					}
@@ -609,12 +614,14 @@ func (ws *workspace) startKeepAlive() {
 			safeGo("keepalive", func() {
 				if p, ok := db.AsPinger(sess); ok {
 					if err := p.Ping(); err != nil {
-						ws.logf("keepalive: %v", err)
+						// logf 触碰 Fyne widget，只能从 UI 线程调——此处是
+						// 后台 goroutine，须经 safeDo。
+						safeDo(func() { ws.logf("keepalive: %v", err) })
 					}
 					return
 				}
 				if _, err := sess.Query("SELECT 1", 1); err != nil {
-					ws.logf("keepalive: %v", err)
+					safeDo(func() { ws.logf("keepalive: %v", err) })
 				}
 			})
 		}
