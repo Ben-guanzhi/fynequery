@@ -232,17 +232,28 @@ func main() {
 
 	if directConn {
 		// Open the first saved connection; on failure fall back to welcome.
+		// The dial runs in a goroutine: nothing can render before a.Run(),
+		// and a synchronous dial here meant a blank launch for as long as
+		// the dial took. fyne.Do from before Run queues the UI work and it
+		// drains once the loop is up (glfw runOnMainWithWait).
 		launchDirect := func() {
-			if conns, _ := loadConnections(); len(conns) > 0 {
-				c := conns[0]
-				sess, err := dialConn(c)
-				if err == nil {
-					openWorkspace(a, c, sess, darkMode, showWelcome)
+			go func() {
+				conns, _ := loadConnections()
+				if len(conns) == 0 {
+					safeDo(showWelcome)
 					return
 				}
-				fmt.Fprintf(os.Stderr, "open %q: %v\n", c.Name, err)
-			}
-			showWelcome()
+				c := conns[0]
+				sess, err := dialConn(c)
+				safeDo(func() {
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "open %q: %v\n", c.Name, err)
+						showWelcome()
+						return
+					}
+					openWorkspace(a, c, sess, darkMode, showWelcome)
+				})
+			}()
 		}
 		if hasPasscode() {
 			showLockWindow(a, launchDirect)

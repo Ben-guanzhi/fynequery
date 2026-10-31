@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -34,8 +35,18 @@ func (ws *workspace) openServerMetrics() {
 }
 
 // showMetricsWindow builds the metrics window: a label/value list with a manual
-// refresh plus a 3s auto-refresh that stops when the window closes.
+// refresh plus a 3s auto-refresh that stops when the window closes. The
+// Metricser is resolved per tick through resolve — the window outlives
+// reconnects, and querying a closed old session would report errors forever.
 func (ws *workspace) showMetricsWindow(m db.Metricser) {
+	resolve := func() db.Metricser {
+		if sess := ws.liveSession(); sess != nil {
+			if p, ok := db.AsMetricser(sess); ok {
+				return p
+			}
+		}
+		return m
+	}
 	app := fyne.CurrentApp()
 	w := app.NewWindow(fmt.Sprintf("Server Metrics — %s", ws.conn.Name))
 	w.Resize(fyne.NewSize(480, 560))
@@ -45,9 +56,17 @@ func (ws *workspace) showMetricsWindow(m db.Metricser) {
 	status := widget.NewLabel("Loading…")
 	status.Importance = widget.LowImportance
 
+	var inFlight atomic.Bool
 	refresh := func() {
+		// A slow Metrics() used to let the 3s ticker stack unbounded
+		// goroutines, each holding the previous one's results in memory.
+		// One in flight: skip this tick.
+		if !inFlight.CompareAndSwap(false, true) {
+			return
+		}
 		safeGo("metrics", func() {
-			ms, err := m.Metrics()
+			defer inFlight.Store(false)
+			ms, err := resolve().Metrics()
 			safeDo(func() {
 				if err != nil {
 					status.SetText("Error: " + err.Error())

@@ -150,24 +150,10 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 	want := fyne.NewSize(1360, 860)
 	w.Resize(want)
 
-	// TablePlus opens at the server level with no database selected. Re-dial
-	// without a default database so the workspace starts in the "未选择数据库"
-	// state; fall back to the given (database-bound) session if that fails
-	// (e.g. drivers that require a database to connect).
-	// Redis has no server-level connection distinct from DB 0; re-dialing
-	// without the database would silently drop the requested logical DB.
-	if conn.Database != "" && conn.Driver != "redis" {
-		serverConn := conn
-		serverConn.Database = ""
-		if ss, err := dialConn(serverConn); err == nil {
-			if sess != nil {
-				sess.Close()
-			}
-			sess = ss
-			conn = serverConn
-		}
-	}
-
+	// The server-level re-dial (TablePlus opens at the server with no
+	// database selected) moved below the workspace build: it used to run
+	// here on the UI thread with the window already on screen, and a slow
+	// dial froze the half-built workspace for the whole round trip.
 	ws := &workspace{
 		window: w, conn: conn, sess: sess,
 		dbType: dbTypeByDriver(conn.Driver), currentDB: conn.Database,
@@ -204,6 +190,44 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 	ws.loadInventory()
 	ws.loadDatabases()
 	ws.loadTLS()
+
+	// Server-level re-dial, now async: land on the db-bound session (the
+	// documented fallback for drivers that require a database) and swap in
+	// the server-level one when the dial completes. Same dbSwitchSeq guard
+	// as switchDatabase/reconnect — a user switch or reconnect supersedes
+	// this dial. Redis is skipped: it has no server-level connection
+	// distinct from DB 0.
+	if conn.Database != "" && conn.Driver != "redis" {
+		serverConn := conn
+		serverConn.Database = ""
+		ws.dbSwitchSeq++
+		seq := ws.dbSwitchSeq
+		safeGo("serverDial", func() {
+			ss, err := dialConn(serverConn)
+			safeDo(func() {
+				if seq != ws.dbSwitchSeq {
+					// A switch/reconnect superseded this dial.
+					if err == nil {
+						ss.Close()
+					}
+					return
+				}
+				if err != nil {
+					return // the db-bound fallback stands
+				}
+				if old := ws.liveSession(); old != nil {
+					old.Close()
+				}
+				ws.setSession(ss)
+				ws.conn = serverConn
+				ws.applyKeyFilter(ss)
+				ws.updateBanner()
+				ws.loadInventory()
+				ws.loadDatabases()
+				ws.loadTLS()
+			})
+		})
+	}
 	// Ctrl+K opens the quick-open palette (TablePlus OpenAnything). The
 	// database picker remains reachable from the toolbar database pill.
 	w.Canvas().AddShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyK, Modifier: fyne.KeyModifierControl},
@@ -584,10 +608,14 @@ func (ws *workspace) startKeepAlive() {
 			// "SELECT 1" would mean something else entirely in Redis.
 			safeGo("keepalive", func() {
 				if p, ok := db.AsPinger(sess); ok {
-					_ = p.Ping()
+					if err := p.Ping(); err != nil {
+						ws.logf("keepalive: %v", err)
+					}
 					return
 				}
-				_, _ = sess.Query("SELECT 1", 1)
+				if _, err := sess.Query("SELECT 1", 1); err != nil {
+					ws.logf("keepalive: %v", err)
+				}
 			})
 		}
 	}()
