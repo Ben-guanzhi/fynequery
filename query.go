@@ -1017,10 +1017,16 @@ func (qp *queryPane) currentStatementRange() (int, int) {
 // showTimeoutDialog offers Wait & Retry and Reconnect & Retry after a query
 // times out (TablePlus "The server is taking too long").
 func (qp *queryPane) showTimeoutDialog(stmt string, all []string, i int) {
+	// Both actions hide the dialog first: without this it stayed on screen
+	// under the reconnect progress box and after the retry re-ran, and the
+	// user had to close it by hand.
+	var d *dialog.CustomDialog
 	retry := widget.NewButton("等待并重试", func() {
+		d.Hide()
 		qp.sendStatement(stmt, all, i)
 	})
 	reconnect := widget.NewButton("重连并重试", func() {
+		d.Hide()
 		if qp.onReconnect == nil {
 			return
 		}
@@ -1034,7 +1040,7 @@ func (qp *queryPane) showTimeoutDialog(stmt string, all []string, i int) {
 		widget.NewLabel("The server is taking too long to respond."),
 		container.NewHBox(retry, reconnect),
 	)
-	d := dialog.NewCustom("查询超时", "", body, qp.window)
+	d = dialog.NewCustom("查询超时", "", body, qp.window)
 	d.Resize(fyne.NewSize(420, 160))
 	d.Show()
 }

@@ -478,9 +478,11 @@ func (ws *workspace) switchDatabase(name string) {
 	progress := dialog.NewProgressInfinite("打开数据库", "正在连接数据库 "+name+"…", ws.window)
 	progress.Show()
 	safeGo("switchDatabase", func() {
+		// Same defer as reconnect: a panicking dialConn must still retire the
+		// progress dialog.
+		defer safeDo(func() { progress.Hide() })
 		sess, err := dialConn(newConn)
 		safeDo(func() {
-			progress.Hide()
 			if seq != ws.dbSwitchSeq {
 				// A newer switch superseded this dial: drop its session rather
 				// than swapping it in under the user's newer choice.
@@ -610,9 +612,12 @@ func (ws *workspace) reconnect(done func(db.Session)) {
 	ws.dbSwitchSeq++
 	seq := ws.dbSwitchSeq
 	safeGo("reconnect", func() {
+		// The progress dialog is hidden on the goroutine's defer: safeDo below
+		// never runs when dialConn panics (safeGo recovers), and an infinite
+		// progress left behind freezes the reconnect affordance forever.
+		defer safeDo(func() { progress.Hide() })
 		sess, err := dialConn(newConn)
 		safeDo(func() {
-			progress.Hide()
 			if seq != ws.dbSwitchSeq {
 				// A newer switch superseded this reconnect: drop the stale
 				// session instead of swapping it in under the user's choice.
