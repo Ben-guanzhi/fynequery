@@ -91,12 +91,17 @@ var DefaultPool = NewSessionPool(defaultPoolMaxIdle, defaultPoolIdleTTL)
 func (p *SessionPool) Get(fp string, open func() (Session, error)) (Session, error) {
 	p.mu.Lock()
 	if list := p.byFP[fp]; list != nil {
-		for i, e := range list {
+		// Backward scan: a stale entry is removed in place, and continuing
+		// the scan must not skip the entries that shift after it — the old
+		// `break` abandoned every still-warm session behind the first stale
+		// one and dialed a brand-new session instead.
+		for i := len(list) - 1; i >= 0; i-- {
+			e := list[i]
 			if e.ref == 0 && !e.dead {
 				if time.Since(e.idleAt) > p.idleTTL {
-					// Stale: drop and fall through to open a fresh session.
+					// Stale: drop it and keep looking for a warm session.
 					p.removeLocked(fp, i)
-					break
+					continue
 				}
 				e.ref = 1
 				p.idleCnt--
