@@ -114,32 +114,41 @@ func showRestoreDialog(w fyne.Window, c Connection, sess db.Session) {
 		if u := rc.URI(); u != nil {
 			fname = u.Name()
 		}
-		data, rerr := io.ReadAll(rc)
-		rc.Close()
-		if rerr != nil {
-			dialog.NewError(rerr, w).Show()
-			return
-		}
-		dialog.NewConfirm("Restore",
-			fmt.Sprintf("Run %s against %q?\n\nThis executes every statement in the file and cannot be undone.", fname, c.Name),
-			func(ok bool) {
-				if !ok {
-					return
-				}
-				progress := dialog.NewProgressInfinite("Restore", "Running SQL script…", w)
-				progress.Show()
-				safeGo("restore", func() {
-					stmts, rerr := runSQLScript(sess, string(data))
-					safeDo(func() {
-						progress.Hide()
-						if rerr != nil {
-							dialog.NewError(rerr, w).Show()
+		// The read moves to a worker: a mysqldump-sized .sql read
+		// synchronously in the callback froze the window (and string(data)
+		// doubled the residency before the parse even started).
+		safeGo("restoreRead", func() {
+			data, rerr := io.ReadAll(rc)
+			rc.Close()
+			if rerr != nil {
+				safeDo(func() { dialog.NewError(rerr, w).Show() })
+				return
+			}
+			sqlText := string(data)
+			data = nil
+			safeDo(func() {
+				dialog.NewConfirm("Restore",
+					fmt.Sprintf("Run %s against %q?\n\nThis executes every statement in the file and cannot be undone.", fname, c.Name),
+					func(ok bool) {
+						if !ok {
 							return
 						}
-						showInfo(w, "Restore", fmt.Sprintf("Restore complete.\n%d statements executed.", stmts))
-					})
-				})
-			}, w).Show()
+						progress := dialog.NewProgressInfinite("Restore", "Running SQL script…", w)
+						progress.Show()
+						safeGo("restore", func() {
+							stmts, rerr := runSQLScript(sess, sqlText)
+							safeDo(func() {
+								progress.Hide()
+								if rerr != nil {
+									dialog.NewError(rerr, w).Show()
+									return
+								}
+								showInfo(w, "Restore", fmt.Sprintf("Restore complete.\n%d statements executed.", stmts))
+							})
+						})
+					}, w).Show()
+			})
+		})
 	}, w)
 	open.SetTitleText("Restore “" + c.Name + "” — open SQL file")
 	open.SetFilter(storage.NewExtensionFileFilter([]string{".sql"}))
@@ -214,10 +223,15 @@ func dumpDatabase(sess db.Session, driver, database string, includeData bool) (s
 			full = quoteIdent(driver, database) + "." + full
 		}
 
-		if cr, err := sess.Query("SHOW CREATE TABLE "+full, 10); err == nil &&
-			len(cr.Rows) > 0 && len(cr.Rows[0]) > 1 && cr.Rows[0][1].Kind != "null" {
+		// A failed SHOW CREATE must be visible: silently skipping it left the
+		// dump without this table's DDL, so a restore could not recreate it.
+		if cr, err := sess.Query("SHOW CREATE TABLE "+full, 10); err != nil {
+			warnings = append(warnings, fmt.Sprintf("table %q: SHOW CREATE TABLE 失败，DDL 未写入备份：%v", t, err))
+		} else if len(cr.Rows) > 0 && len(cr.Rows[0]) > 1 && cr.Rows[0][1].Kind != "null" {
 			b.WriteString("DROP TABLE IF EXISTS " + quoteIdent(driver, t) + ";\n")
 			b.WriteString(proto.CellText(cr.Rows[0][1]) + ";\n\n")
+		} else {
+			warnings = append(warnings, fmt.Sprintf("table %q: SHOW CREATE TABLE 返回空，DDL 未写入备份", t))
 		}
 
 		if !includeData {

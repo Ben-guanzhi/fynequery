@@ -106,22 +106,27 @@ func (ws *workspace) importData() {
 		if u := rc.URI(); u != nil {
 			name = strings.ToLower(u.Name())
 		}
-		data, rerr := io.ReadAll(rc)
-		rc.Close()
-		if rerr != nil {
-			dialog.NewError(rerr, ws.window).Show()
-			return
-		}
-		rows, headers, perr := parseImport(data, name)
-		if perr != nil {
-			dialog.NewError(perr, ws.window).Show()
-			return
-		}
-		if len(rows) == 0 {
-			showInfo(ws.window, "Import Data", "No data rows found in the file.")
-			return
-		}
-		ws.confirmImport(sess, table, headers, rows)
+		// The read + parse runs on a worker: a large dump (hundreds of MB)
+		// read synchronously in the Fyne callback freezes the whole window
+		// and doubles the resident memory while parsing.
+		safeGo("importRead", func() {
+			data, rerr := io.ReadAll(rc)
+			rc.Close()
+			if rerr != nil {
+				safeDo(func() { dialog.NewError(rerr, ws.window).Show() })
+				return
+			}
+			rows, headers, perr := parseImport(data, name)
+			if perr != nil {
+				safeDo(func() { dialog.NewError(perr, ws.window).Show() })
+				return
+			}
+			if len(rows) == 0 {
+				safeDo(func() { showInfo(ws.window, "Import Data", "No data rows found in the file.") })
+				return
+			}
+			safeDo(func() { ws.confirmImport(sess, table, headers, rows) })
+		})
 	}, ws.window)
 	open.SetFilter(storage.NewExtensionFileFilter([]string{".csv", ".json"}))
 	open.Show()
