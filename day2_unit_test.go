@@ -230,6 +230,14 @@ func TestAutoLimit(t *testing.T) {
 	if got := autoLimit("SELECT * FROM t LIMIT 5", "mysql", 100); got != "SELECT * FROM t LIMIT 5" {
 		t.Errorf("existing limit must be kept, got %q", got)
 	}
+	// WITH ... INSERT must not take a LIMIT (wave 41: the kernel's
+	// CteOuterIsRead verdict now guards the WITH arm here too).
+	if got := autoLimit("WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c", "mysql", 100); got != "WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c" {
+		t.Fatalf("DML CTE must run untouched: %q", got)
+	}
+	if got := autoLimit("WITH c AS (SELECT 1) SELECT * FROM c", "mysql", 100); got != "WITH c AS (SELECT 1) SELECT * FROM c\nLIMIT 100" {
+		t.Fatalf("read CTE should cap: %q", got)
+	}
 	if got := autoLimit("SELECT TOP 5 * FROM t", "mysql", 100); got != "SELECT TOP 5 * FROM t" {
 		t.Errorf("TOP statements must be left alone, got %q", got)
 	}

@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/dbcore/dbcore/sqltext"
 	"regexp"
 	"strconv"
 	"strings"
@@ -273,6 +275,14 @@ func autoLimit(sqlText, driver string, n int) string {
 	}
 	trimmed := strings.TrimRight(sqlText, " \t\r\n;")
 	if trimmed == "" || !isPlainSelect(trimmed) || hasTopLevelLimit(trimmed) {
+		return sqlText
+	}
+	// A WITH statement is only capped when its outermost statement (the
+	// keyword at paren depth 0 after the CTE list) is a read: appending LIMIT
+	// to WITH ... INSERT truncates the write. The verdict comes from the
+	// kernel so both implementations rule identically (wave 40 fixed the
+	// kernel's own LIMIT arm for the same bug).
+	if strings.HasPrefix(strings.ToUpper(stripSQLNoise(trimmed)), "WITH") && !sqltext.CteOuterIsRead(trimmed) {
 		return sqlText
 	}
 	// One noise-stripped copy serves both probes (FOR UPDATE / INTO OUTFILE /
