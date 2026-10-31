@@ -2108,6 +2108,9 @@ func (ws *workspace) loadMoreValueRows(t *dataTableTab) {
 			t.kvNext = next
 			if ws.activeData == t {
 				ws.status.setRows(t.gridRowCount(), t.totalRows, true)
+				// 新追加的行也进右侧行详情的可见集（对齐 loadTableData 的
+				// 刷新口径）；总数未知时状态栏按 total<0 渲染，不再出 "-1"。
+				ws.refreshRowDetails()
 			}
 			ws.updatePaging(t.offset > 0, t.gridRowCount() >= browseLimit)
 			_ = more

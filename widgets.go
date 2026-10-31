@@ -1348,7 +1348,14 @@ func (r *statusBarRenderer) Refresh() {
 		if from < 1 {
 			from = 1
 		}
-		text := fmt.Sprintf("%d-%d of %s rows", from, from+r.s.displayed-1, total)
+		var text string
+		if r.s.total < 0 {
+			// 未知总数（Redis 值页、未计数的目录游标）：不渲染 "of -1"
+			// 尾巴——总数未知不是零，也不是负一行。
+			text = fmt.Sprintf("%d-%d rows", from, from+r.s.displayed-1)
+		} else {
+			text = fmt.Sprintf("%d-%d of %s rows", from, from+r.s.displayed-1, total)
+		}
 		if r.s.columns > 0 {
 			text += fmt.Sprintf(" · %s columns", humanNum(r.s.columns))
 		}
