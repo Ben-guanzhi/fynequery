@@ -63,6 +63,45 @@ func TestBuildAlterDDLNoChange(t *testing.T) {
 	}
 }
 
+// A nullability-only edit leaves the type entry empty. MySQL's MODIFY needs the
+// full type — "MODIFY COLUMN a NOT NULL" is a syntax error — so the old type
+// must be reused.
+func TestAlterColumnTypeNullabilityOnlyMysql(t *testing.T) {
+	e := &colEdit{name: "a", oldType: "VARCHAR(20)", nullable: true}
+	e.typeEntry = newEntryForTest("") // empty: only nullability changed
+	e.nullChk = newCheckForTest(false)
+
+	newEdit := &colEdit{isNew: true}
+	newEdit.nameEntry = newEntryForTest("")
+	newEdit.typeEntry = newEntryForTest("")
+	newEdit.nullChk = newCheckForTest(true)
+
+	stmts := buildAlterDDL("mysql", "users", func(s string) string { return s }, []*colEdit{e}, newEdit)
+	if len(stmts) != 1 {
+		t.Fatalf("expected one statement, got %q", stmts)
+	}
+	want := "ALTER TABLE users MODIFY COLUMN a VARCHAR(20) NOT NULL"
+	if stmts[0] != want {
+		t.Errorf("want %q\ngot  %q", want, stmts[0])
+	}
+}
+
+// The copy-as-SQL path renders literals through the dialect: MySQL escapes
+// backslashes, so a value with one must come out doubled in the INSERT.
+func TestRowInsertEscapesBackslashMysql(t *testing.T) {
+	v := `C:\path`
+	g := newDataTable(&TableData{
+		Cols: []ColumnInfo{{Name: "path"}},
+		Rows: [][]*string{{&v}},
+	}, nil)
+	g.tableName = "files"
+	g.driver = "mysql"
+	got := g.rowInsert(0)
+	if want := `INSERT INTO files (path) VALUES ('C:\\path');`; got != want {
+		t.Errorf("want %s\ngot  %s", want, got)
+	}
+}
+
 // --- pin snapshot clone -------------------------------------------------------
 
 func TestCloneTableDataDeep(t *testing.T) {

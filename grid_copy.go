@@ -171,7 +171,7 @@ func (t *dataTable) rowInsert(row int) string {
 	for i, c := range t.data.Cols {
 		base, _ := splitMagic(c.Name)
 		cols = append(cols, base)
-		ph = append(ph, sqlLiteral(literalOf(vals, i)))
+		ph = append(ph, sqlLiteral(t.driver, literalOf(vals, i)))
 	}
 	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);",
 		table, strings.Join(cols, ", "), strings.Join(ph, ", "))
@@ -271,7 +271,7 @@ func (t *dataTable) inClause(col int) string {
 				continue
 			}
 		}
-		vals = append(vals, sqlLiteral(v))
+		vals = append(vals, sqlLiteral(t.driver, v))
 	}
 	return base + " IN (" + strings.Join(vals, ", ") + ")"
 }

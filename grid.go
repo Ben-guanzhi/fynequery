@@ -87,6 +87,9 @@ type dataTable struct {
 	// copy/Query-Magics context: owning table name ("" for query results) and
 	// the workspace hook behind __format__goto column links.
 	tableName string
+	// driver is the connection's dialect; copy-as-SQL renders literals with it
+	// (MySQL escapes backslashes, the others do not). Set by prepGrid.
+	driver string
 	onGoto    func(table, column, value string)
 	onPin     func() // optional: pin this result (query pane)
 

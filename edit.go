@@ -337,6 +337,7 @@ func (ws *workspace) prepGrid(g *dataTable) {
 	}
 	g.window = ws.window
 	g.tableName = ws.tableName
+	g.driver = ws.conn.Driver
 	g.onGoto = ws.gotoTable
 	g.onDirty = func() {
 		ws.refreshTxnBar()

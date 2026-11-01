@@ -139,7 +139,7 @@ func buildAlterDDL(driver, table string, quote func(string) string, edits []*col
 		newType := strings.TrimSpace(e.typeEntry.Text)
 		typeChanged := newType != "" && !strings.EqualFold(newType, e.oldType)
 		if typeChanged || e.nullChk.Checked != e.nullable {
-			out = append(out, alterColumnType(driver, table, e.name, newType, e.nullChk.Checked, quote))
+			out = append(out, alterColumnType(driver, table, e.name, newType, e.oldType, e.nullChk.Checked, quote))
 		}
 	}
 	if s := strings.TrimSpace(newEdit.nameEntry.Text); s != "" {
@@ -159,10 +159,19 @@ func buildAlterDDL(driver, table string, quote func(string) string, edits []*col
 // alterColumnType renders the "change a column's type/nullability" statement
 // for the driver. quote controls identifier quoting (kept consistent with
 // the DROP/ADD statements in the same batch).
-func alterColumnType(driver, table, col, newType string, nullable bool, quote func(string) string) string {
+//
+// oldType is the column's current type. A nullability-only edit leaves the
+// type entry empty, and MySQL's MODIFY requires the full type — so the old
+// type is reused there instead of emitting "MODIFY COLUMN col NOT NULL",
+// which the server rejects.
+func alterColumnType(driver, table, col, newType, oldType string, nullable bool, quote func(string) string) string {
 	q := quote
 	// MySQL/MariaDB use MODIFY (type + nullability in one statement).
 	if driver == "mysql" || driver == "mariadb" {
+		// MODIFY needs a complete type; a nullability-only edit names none.
+		if newType == "" {
+			newType = oldType
+		}
 		stmt := "ALTER TABLE " + q(table) + " MODIFY COLUMN " + q(col)
 		if newType != "" {
 			stmt += " " + newType

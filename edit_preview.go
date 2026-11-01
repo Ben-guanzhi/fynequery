@@ -16,19 +16,23 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"fynequery/db"
+
+	"github.com/dbcore/dbcore/sqltext"
 )
 
 // sqlLiteral renders one pending cell value as a SQL literal: NULL for nil,
 // the DEFAULT keyword for the db.DefaultMarker sentinel, otherwise a
-// single-quoted literal with quotes doubled.
-func sqlLiteral(v *string) string {
+// single-quoted literal. The escaping comes from the dialect (MySQL also
+// escapes backslashes): a preview that showed `'\'` for a MySQL value the
+// commit would send as `'\\'` would not be the SQL being run.
+func sqlLiteral(driver string, v *string) string {
 	if v == nil {
 		return "NULL"
 	}
 	if *v == db.DefaultMarker {
 		return "DEFAULT"
 	}
-	return "'" + strings.ReplaceAll(*v, "'", "''") + "'"
+	return sqltext.QuotedLiteral(driver, *v)
 }
 
 // buildPreviewSQL renders the pending edits of one grid as statements for the
@@ -42,10 +46,10 @@ func buildPreviewSQL(table, driver string, updates []rowUpdate, deletes, inserts
 	for _, u := range updates {
 		var sets, where []string
 		for c, v := range u.changes {
-			sets = append(sets, quoteCol(c, driver)+" = "+sqlLiteral(v))
+			sets = append(sets, quoteCol(c, driver)+" = "+sqlLiteral(driver, v))
 		}
 		for c, v := range u.pk {
-			where = append(where, quoteCol(c, driver)+" = "+sqlLiteral(v))
+			where = append(where, quoteCol(c, driver)+" = "+sqlLiteral(driver, v))
 		}
 		fmt.Fprintf(&b, "UPDATE %s SET %s WHERE %s;\n",
 			qt, strings.Join(sets, ", "), strings.Join(where, " AND "))
@@ -53,7 +57,7 @@ func buildPreviewSQL(table, driver string, updates []rowUpdate, deletes, inserts
 	for _, pk := range deletes {
 		var where []string
 		for c, v := range pk {
-			where = append(where, quoteCol(c, driver)+" = "+sqlLiteral(v))
+			where = append(where, quoteCol(c, driver)+" = "+sqlLiteral(driver, v))
 		}
 		fmt.Fprintf(&b, "DELETE FROM %s WHERE %s;\n", qt, strings.Join(where, " AND "))
 	}
@@ -67,7 +71,7 @@ func buildPreviewSQL(table, driver string, updates []rowUpdate, deletes, inserts
 		valParts := make([]string, len(cols))
 		for i, c := range cols {
 			colParts[i] = quoteCol(c, driver)
-			valParts[i] = sqlLiteral(ins[c])
+			valParts[i] = sqlLiteral(driver, ins[c])
 		}
 		fmt.Fprintf(&b, "INSERT INTO %s (%s) VALUES (%s);\n",
 			qt, strings.Join(colParts, ", "), strings.Join(valParts, ", "))
