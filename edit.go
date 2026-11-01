@@ -722,6 +722,14 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 	// this background commit runs, and the batch must land on the session its
 	// edits were queued against, not on whatever the workspace points at now.
 	sess := ws.sess
+	// A nil session (connection closed between the gate and the commit) would
+	// panic inside the worker at sess.Query — and a recovered panic never
+	// reaches the safeDo that hides the progress dialog, so it would spin
+	// forever. Check here, on the UI thread, where the error can be shown.
+	if sess == nil {
+		showInfo(ws.window, "Commit", "The connection is gone; the queued changes were not applied.")
+		return
+	}
 	progress := dialog.NewProgressInfinite("Commit", "Saving changes…", ws.window)
 	progress.Show()
 	safeGo("commit", func() {
@@ -889,12 +897,14 @@ func kvDeleteFor(key string, g *dataTable, row int) (db.ValueEdit, bool) {
 // when its last element goes, so a vanished key closes its tab and refreshes
 // the sidebar instead of reloading an empty grid.
 func (ws *workspace) writeKVDelete(d db.ValueDeleter, edit db.ValueEdit) {
+	// Snapshot before the worker: the probe below is a Redis round-trip and the
+	// commitGated rule forbids reading ws.sess inside the goroutine.
+	sess := ws.liveSession()
 	safeGo("kv delete", func() {
 		err := d.DeleteValue(edit)
 		// The "did the key vanish?" probe is a Redis round-trip: it stays in
 		// this background goroutine — issuing it from the safeDo block below
 		// froze the UI for the length of the call.
-		sess := ws.liveSession()
 		gone := false
 		if err == nil && sess != nil {
 			if _, cerr := sess.Columns(edit.Key); cerr != nil {
