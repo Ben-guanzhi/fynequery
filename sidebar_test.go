@@ -231,3 +231,20 @@ func TestCloneAndTruncateSQL(t *testing.T) {
 		t.Fatalf("sqlite clone = %q", got)
 	}
 }
+
+// A view or routine is not a table: "DROP TABLE view" is a syntax error on
+// every engine, so the statement follows the object's kind.
+func TestDropSQLFollowsKind(t *testing.T) {
+	cases := []struct{ kind, want string }{
+		{"table", "DROP TABLE `t`;"},
+		{"view", "DROP VIEW `t`;"},
+		{"function", "DROP FUNCTION `t`;"},
+		{"procedure", "DROP PROCEDURE `t`;"},
+		{"", "DROP TABLE `t`;"}, // unknown kind defaults to table
+	}
+	for _, tc := range cases {
+		if got := dropSQL(tc.kind, "`t`"); got != tc.want {
+			t.Errorf("dropSQL(%q) = %q, want %q", tc.kind, got, tc.want)
+		}
+	}
+}

@@ -70,7 +70,7 @@ func (ws *workspace) showItemMenu(name string, pos fyne.Position) {
 			ws.copyText("SELECT * FROM " + quote + " LIMIT 100;")
 		}),
 		fyne.NewMenuItem("复制为 TRUNCATE", func() { ws.copyText(ws.truncateSQL(name, quote)) }),
-		fyne.NewMenuItem("复制为 DROP", func() { ws.copyText("DROP TABLE " + quote + ";") }),
+		fyne.NewMenuItem("复制为 DROP", func() { ws.copyText(dropSQL(kind, quote)) }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("克隆...", func() { ws.cloneTable(name, quote) }),
 		fyne.NewMenuItem("清空...", func() { ws.confirmTruncate(name, quote) }),
@@ -335,13 +335,33 @@ func (ws *workspace) confirmTruncate(name, quote string) {
 
 // confirmDrop drops the table.
 func (ws *workspace) confirmDrop(name, quote string) {
+	kind := "table"
+	for _, o := range ws.side.objects {
+		if o.Name == name {
+			kind = o.Kind
+			break
+		}
+	}
 	dialog.NewConfirm("Delete "+name,
-		fmt.Sprintf("Drop table %s? This cannot be undone.", name),
+		fmt.Sprintf("Drop %s %s? This cannot be undone.", kind, name),
 		func(ok bool) {
 			if ok {
-				ws.runObjectSQL("Delete "+name, "DROP TABLE "+quote+";")
+				ws.runObjectSQL("Delete "+name, dropSQL(kind, quote))
 			}
 		}, ws.window).Show()
+}
+
+// dropSQL renders the DROP statement for an object of a given kind. Views and
+// routines are not tables: "DROP TABLE view" is a syntax error on every engine.
+func dropSQL(kind, quote string) string {
+	switch kind {
+	case "view":
+		return "DROP VIEW " + quote + ";"
+	case "function", "procedure":
+		return "DROP " + strings.ToUpper(kind) + " " + quote + ";"
+	default:
+		return "DROP TABLE " + quote + ";"
+	}
 }
 
 // runObjectSQL executes a DDL/DML statement and refreshes the sidebar (and the
