@@ -62,6 +62,14 @@ func TestQueryTabs(t *testing.T) {
 	if p0 == p1 {
 		t.Fatal("query panes are not distinct instances")
 	}
+	// Suppress + invalidate the debounced completion BEFORE any SetText: its
+	// AfterFunc timer fires on a goroutine whose safeDo callback runs inline
+	// under the test driver, racing this test's own hideAuto (showTab) on
+	// the auto fields. Suppression alone misses timers already scheduled;
+	// the autoGen bump invalidates those too.
+	p0.autoSuppress, p1.autoSuppress = true, true
+	p0.autoGen++
+	p1.autoGen++
 	ensureEditor(p0)
 	ensureEditor(p1)
 	if p0.editor == p1.editor {
