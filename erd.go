@@ -417,10 +417,10 @@ func (n *erNodeWidget) colIndex(col string) int {
 func (n *erNodeWidget) Dragged(e *fyne.DragEvent) {
 	pos := fyne.NewPos(n.Position().X+e.Dragged.DX, n.Position().Y+e.Dragged.DY)
 	n.moveTo(pos)
-	for i := range n.d.model.Tables {
-		if n.d.model.Tables[i].Name == n.name {
-			n.d.model.Tables[i].Pos = pos
-		}
+	// tableIdx (not a scan over model.Tables): drag ticks fire per pixel, and
+	// the naive scan made each tick O(tables) with the FK relayout on top.
+	if i, ok := n.d.tableIdx[n.name]; ok {
+		n.d.model.Tables[i].Pos = pos
 	}
 	n.d.layoutLines()
 }

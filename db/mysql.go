@@ -661,5 +661,11 @@ func (s *mysqlSession) ListIndexes(schema, table string) ([]dbcore.IndexInfo, er
 	if !ok {
 		return nil, dbcore.ErrNotSupported
 	}
-	return drv.ListIndexes(context.Background(), schema, table)
+	// catalogCtx, not context.Background(): ListIndexes serves the Indexes pane
+	// from a background refresh, and an unbounded information_schema query
+	// against a slow server parked the worker forever (every other metadata
+	// path in this file already bounds itself).
+	ctx, cancel := catalogCtx()
+	defer cancel()
+	return drv.ListIndexes(ctx, schema, table)
 }
