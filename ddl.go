@@ -32,12 +32,18 @@ func viewDDL(sess db.Session, driver, name string) (string, error) {
 	q := ""
 	switch driver {
 	case "mysql", "mariadb":
-		q = "SELECT CONCAT('CREATE OR REPLACE VIEW `" + sqlQuote.Replace(name) + "' AS\n', IFNULL(VIEW_DEFINITION,''), ';') " +
+		// CONCAT builds the full DDL server-side: the identifier re-opens its
+		// backticks and the definition arrives as the second argument.
+		q = "SELECT CONCAT('CREATE OR REPLACE VIEW `" + sqlQuote.Replace(name) +
+			"` AS\n', IFNULL(VIEW_DEFINITION, ''), ';') " +
 			"FROM information_schema.VIEWS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '" +
 			sqlQuote.Replace(name) + "'"
 	case "postgres", "postgresql":
-		q = "SELECT 'CREATE OR REPLACE VIEW ' || current_schema() || '.' || '" +
-			sqlQuote.Replace(name) + "' AS\n' || view_definition || ';' " +
+		// One concatenation produces the whole DDL: schema-qualified quoted
+		// name, AS, then the definition — the previous spelling buried the
+		// definition inside an alias literal and the query returned nothing.
+		q = "SELECT 'CREATE OR REPLACE VIEW ' || current_schema() || '.\"' || '" +
+			sqlQuote.Replace(name) + "' || '\" AS ' || view_definition || ';' " +
 			"FROM information_schema.views WHERE table_schema = current_schema() AND table_name = '" +
 			sqlQuote.Replace(name) + "'"
 	case "mssql":

@@ -60,7 +60,7 @@ func erBoxSize(t erTable) fyne.Size {
 }
 
 // fetchERModel builds the diagram model: tables + columns, plus FKs.
-func (ws *workspace) fetchERModel(sess db.Session) (*erModel, error) {
+func (ws *workspace) fetchERModel(sess db.Session, driver string) (*erModel, error) {
 	objs, err := sess.Tables()
 	if err != nil {
 		return nil, err
@@ -87,7 +87,7 @@ func (ws *workspace) fetchERModel(sess db.Session) (*erModel, error) {
 	for i, t := range m.Tables {
 		names[i] = t.Name
 	}
-	m.FKs = fetchERForeignKeys(sess, ws.conn.Driver, names)
+	m.FKs = fetchERForeignKeys(sess, driver, names)
 	layoutERModel(m)
 	return m, nil
 }
@@ -188,9 +188,11 @@ func (ws *workspace) openERDiagram() {
 		return
 	}
 	sess := ws.sess
+	// Snapshot: the worker must not read ws.conn (commitGated rule).
+	driver := ws.conn.Driver
 	gen := ws.nextGen()
 	safeGo("erd", func() {
-		m, err := ws.fetchERModel(sess)
+		m, err := ws.fetchERModel(sess, driver)
 		safeDo(func() {
 			if !ws.current(gen) || ws.sess == nil {
 				return

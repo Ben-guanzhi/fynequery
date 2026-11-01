@@ -37,9 +37,11 @@ func (ws *workspace) openUserManagement() {
 		return
 	}
 	sess := ws.sess
+	// Snapshot: the worker must not read ws.conn (commitGated rule).
+	driver := ws.conn.Driver
 	gen := ws.nextGen()
 	safeGo("userlist", func() {
-		rows, err := ws.fetchUserRows(sess)
+		rows, err := ws.fetchUserRows(sess, driver)
 		safeDo(func() {
 			if !ws.current(gen) || ws.sess == nil {
 				return
@@ -54,7 +56,7 @@ func (ws *workspace) openUserManagement() {
 }
 
 // fetchUserRows returns the login users for the connection's driver.
-func (ws *workspace) fetchUserRows(sess db.Session) ([]userRow, error) {
+func (ws *workspace) fetchUserRows(sess db.Session, driver string) ([]userRow, error) {
 	var q string
 	one := func(row []*string) userRow {
 		if len(row) > 0 && row[0] != nil {
@@ -73,7 +75,7 @@ func (ws *workspace) fetchUserRows(sess db.Session) ([]userRow, error) {
 		return userRow{}
 	}
 	var pick func([]*string) userRow
-	switch ws.conn.Driver {
+	switch driver {
 	case "mysql", "mariadb":
 		q = "SELECT user, host FROM mysql.user ORDER BY user, host"
 		pick = two
@@ -237,7 +239,7 @@ func (ws *workspace) execUserDDL(title, stmt string, users *[]userRow, names *[]
 				showInfo(ws.window, title, "Failed:\n"+err.Error())
 				return
 			}
-			if refresh, ferr := ws.fetchUserRows(ws.sess); ferr == nil {
+			if refresh, ferr := ws.fetchUserRows(ws.sess, ws.conn.Driver); ferr == nil {
 				*users = refresh
 				*names = (*names)[:0]
 				for _, u := range *users {
