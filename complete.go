@@ -625,14 +625,19 @@ func autoPrefixOK(seg string) bool {
 
 // scheduleAutoComplete debounces the inline completion popup after an edit.
 // autoGen invalidates stale timers and background lookups when the user keeps
-// typing.
+// typing; the pending timer is also stopped so the old tick can never fire.
 func (qp *queryPane) scheduleAutoComplete() {
 	if qp.autoSuppress || qp.editor == nil {
 		return
 	}
+	// FQ-10: stop the previous debounce timer before arming a new one instead
+	// of stacking one timer per keystroke.
+	if qp.autoTimer != nil {
+		qp.autoTimer.Stop()
+	}
 	qp.autoGen++
 	gen := qp.autoGen
-	time.AfterFunc(autoCompleteDelay, func() {
+	qp.autoTimer = time.AfterFunc(autoCompleteDelay, func() {
 		safeDo(func() {
 			if gen != qp.autoGen {
 				return
@@ -640,6 +645,15 @@ func (qp *queryPane) scheduleAutoComplete() {
 			qp.autoComplete()
 		})
 	})
+}
+
+// stopAutoTimer cancels the pending debounce timer, if any. Safe to call when
+// none is pending or the timer already fired.
+func (qp *queryPane) stopAutoTimer() {
+	if qp.autoTimer != nil {
+		qp.autoTimer.Stop()
+		qp.autoTimer = nil
+	}
 }
 
 // Test seams for asynchronous UI settling. Both are inert in production.
@@ -809,6 +823,7 @@ func (qp *queryPane) acceptAuto(i int) {
 	ins := qp.autoWords[i]
 	start, n := qp.autoStart, qp.autoWordLen
 	qp.autoGen++ // cancel pending refreshes
+	qp.stopAutoTimer()
 	qp.hideAuto()
 	qp.autoSuppress = true
 	qp.insertCompletion(start, n, ins)

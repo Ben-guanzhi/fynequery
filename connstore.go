@@ -4,6 +4,7 @@ package main
 // dir) and the display metadata (badges, tag colors) that goes with it.
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,18 @@ import (
 
 	"fynequery/db"
 )
+
+// hexDigest renders bytes as lowercase hex without importing the package name
+// into the file's identifier space (theme.go already owns a `hex` value).
+func hexDigest(b []byte) string {
+	const digits = "0123456789abcdef"
+	out := make([]byte, len(b)*2)
+	for i, v := range b {
+		out[i*2] = digits[v>>4]
+		out[i*2+1] = digits[v&0xf]
+	}
+	return string(out)
+}
 
 // Connection is one saved connection entry. Passwords default to plain text
 // in this file (local developer tool); when UseKeyring is set the password
@@ -61,23 +74,33 @@ func (c *Connection) Params() db.ConnectParams {
 // host/port/user/database, credentials, and SSH settings map to the same
 // cached session. Two distinct connections (or a changed password) never share
 // a session.
+//
+// Two properties matter here, because the result is a map key that may end up
+// in a log line or a pprof dump:
+//   - The password is hashed, never embedded. A plaintext join would put the
+//     secret into any key that gets printed.
+//   - Every field is length-prefixed, so a value containing the separator
+//     cannot forge a collision: "user=a|b, db=c" and "user=a, db=b|c" would
+//     otherwise hash to the same key.
 func (c Connection) fingerprint() string {
 	s := c.SSH
-	return strings.Join([]string{
-		"v1",
-		c.Driver,
-		c.Host,
-		c.Port,
-		c.User,
-		c.Database,
-		c.Password,
-		"ssh",
-		strconv.FormatBool(s.Enabled),
-		s.Host,
-		s.Port,
-		s.User,
-		s.AuthMode,
-	}, "|")
+	var b strings.Builder
+	write := func(parts ...string) {
+		for _, p := range parts {
+			b.WriteString(strconv.Itoa(len(p)))
+			b.WriteByte(':')
+			b.WriteString(p)
+			b.WriteByte('|')
+		}
+	}
+	write("v2", c.Driver, c.Host, c.Port, c.User, c.Database)
+	// The credential enters as a fixed-width digest: same password → same
+	// session (that is the point of the fingerprint), different password →
+	// different key, and the secret itself never appears in the key.
+	sum := sha256.Sum256([]byte(c.Password))
+	write("pw", hexDigest(sum[:]))
+	write("ssh", strconv.FormatBool(s.Enabled), s.Host, s.Port, s.User, s.AuthMode)
+	return b.String()
 }
 
 // dialConn opens a live session for a saved connection using the driver
@@ -160,10 +183,45 @@ func saveConnections(conns []Connection) error {
 	// Keep one generation of the file around: if this write (or a later
 	// reader) produces something unusable, the user can recover the previous
 	// connection list from connections.json.bak instead of losing everything.
+	//
+	// The backup is written with passwords stripped. Keeping the previous
+	// generation verbatim would leave a plaintext snapshot on disk even after
+	// the user enables the keyring — the very secret the JSON copy is
+	// promised to keep out (see upsertConnection: "JSON keeps only the flag,
+	// not the secret"). A .bak is for recovering the connection list (names,
+	// hosts, users, options), never for recovering secrets; a recovered
+	// connection simply asks for its password again.
 	if old, err := os.ReadFile(connectionsPath()); err == nil {
-		_ = os.WriteFile(connectionsPath()+".bak", old, 0o600)
+		if redacted, rerr := redactPasswords(old); rerr == nil {
+			_ = os.WriteFile(connectionsPath()+".bak", redacted, 0o600)
+		}
+		// An unparseable previous generation is not worth backing up: it
+		// cannot be restored anyway, and copying it verbatim is exactly the
+		// plaintext-leak path this avoids.
 	}
 	return os.WriteFile(connectionsPath(), raw, 0o600)
+}
+
+// redactPasswords returns the connection file with every secret field cleared,
+// for the backup copy. Three secrets live in a connection entry, not one: the
+// database password, the SSH password and the SSH key passphrase. Missing the
+// last two would leave a bastion credential recoverable from .bak — the same
+// leak the database password fix closed.
+//
+// The keyring flag and the key path are preserved: a restored entry still
+// knows where its secret lives and which key it used, it just does not carry
+// the secret itself.
+func redactPasswords(raw []byte) ([]byte, error) {
+	var conns []Connection
+	if err := json.Unmarshal(raw, &conns); err != nil {
+		return nil, err
+	}
+	for i := range conns {
+		conns[i].Password = ""
+		conns[i].SSH.Password = ""
+		conns[i].SSH.KeyPassphrase = ""
+	}
+	return json.MarshalIndent(conns, "", "  ")
 }
 
 // upsertConnection inserts or updates by name and persists. When UseKeyring

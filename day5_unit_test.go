@@ -34,6 +34,11 @@ func TestIsReadOnlySQL(t *testing.T) {
 		"SELECT 1", "  select * from t", "SHOW TABLES", "explain select 1",
 		"DESCRIBE t", "PRAGMA table_info(t)", "WITH c AS (SELECT 1) SELECT * FROM c",
 		"TABLE t", "VALUES (1)", "SELECT(select 1)",
+		// 括号内含关键词但不是 CTE 体首词:子查询/普通标识符不误报
+		"WITH c AS (SELECT * FROM (SELECT 1) x) SELECT * FROM c",
+		"WITH c AS (SELECT \"delete\" FROM t) SELECT 1",
+		"WITH c AS (/* DELETE FROM t */ SELECT 1) SELECT * FROM c",
+		"WITH c AS (SELECT 1) , d AS (SELECT 2) SELECT * FROM c JOIN d",
 	}
 	for _, s := range reads {
 		if !isReadOnlySQL(s) {
@@ -43,6 +48,13 @@ func TestIsReadOnlySQL(t *testing.T) {
 	writes := []string{
 		"", "UPDATE t SET a=1", "DELETE FROM t", "INSERT INTO t VALUES (1)",
 		"DROP TABLE t", "TRUNCATE t", "SET foreign_key_checks=0",
+		// PostgreSQL 数据修改型 CTE:主语句是 SELECT,真实写入在 CTE 体里
+		"WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+		"WITH i AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM i",
+		"WITH u AS (UPDATE t SET a=1 RETURNING a) SELECT * FROM u",
+		"WITH r AS (REPLACE INTO t VALUES (1)) SELECT 1",
+		"WITH m AS (MERGE INTO t USING s ON t.id=s.id WHEN MATCHED THEN UPDATE SET t.a=s.a) SELECT 1",
+		"WITH x AS ( /* 注释 */ DELETE FROM t) SELECT 1",
 	}
 	for _, s := range writes {
 		if isReadOnlySQL(s) {
@@ -133,15 +145,15 @@ func TestERBoxSize(t *testing.T) {
 func TestLayoutERModel(t *testing.T) {
 	m := &erModel{Tables: []erTable{{Name: "a"}, {Name: "b"}, {Name: "c"}, {Name: "d"}}}
 	layoutERModel(m)
-	// 3 per row: first three share a Y, the fourth wraps to the next row.
-	if m.Tables[0].Pos.Y != m.Tables[1].Pos.Y || m.Tables[1].Pos.Y != m.Tables[2].Pos.Y {
-		t.Error("first row should be aligned")
-	}
-	if m.Tables[3].Pos.Y <= m.Tables[0].Pos.Y {
-		t.Error("4th table should wrap to the next row")
-	}
-	if m.Tables[1].Pos.X-m.Tables[0].Pos.X != erdBoxW+erdGap {
-		t.Errorf("column pitch should be box+gap, got %v", m.Tables[1].Pos.X-m.Tables[0].Pos.X)
+	// Layered layout: no FKs => all tables at level 0 => single column,
+	// stacked vertically (alphabetical seed order).
+	for i := 1; i < len(m.Tables); i++ {
+		if m.Tables[i].Pos.X != m.Tables[0].Pos.X {
+			t.Errorf("table %q should share the single column, got x=%v vs %v", m.Tables[i].Name, m.Tables[i].Pos.X, m.Tables[0].Pos.X)
+		}
+		if m.Tables[i].Pos.Y <= m.Tables[i-1].Pos.Y {
+			t.Errorf("table %q should stack below %q, got y=%v vs %v", m.Tables[i].Name, m.Tables[i-1].Name, m.Tables[i].Pos.Y, m.Tables[i-1].Pos.Y)
+		}
 	}
 }
 

@@ -272,11 +272,17 @@ func buildCreateScript(name, quote string, cols []proto.ColumnInfo, driver strin
 }
 
 // quoteCol quotes one identifier for the given driver.
+//
+// The fallback keeps the statement a syntactically valid identifier for the
+// driver instead of always spelling it ANSI: MySQL parses `"x"` as a string
+// literal, so an ANSI fallback would change `"t".col` into a type error rather
+// than a plain failure. sqltext.QuoteIdentLoose supplies the dialect's own
+// delimiters.
 func quoteCol(name, driver string) string {
 	if q, err := sqltext.QuoteIdent(driver, name); err == nil {
 		return q
 	}
-	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	return sqltext.QuoteIdentLoose(driver, name)
 }
 
 // truncateSQL is the empty-table statement for the session's dialect.

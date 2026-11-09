@@ -35,10 +35,12 @@ SQLite 通过独立 exe 插件进程提供，主程序启动时自动发现，�
      └────────────────────┴────────────────┴──────────────────┴──────────────┘
 ```
 
-- **插件协议**（`proto/`）：子进程方式。插件启动输出 banner
-  `{"proto":"fynequery-plugin","version":1,"code":...}`，宿主校验后按
-  `{"id":N,"method":"meta|open|tables|columns|query|browse|close","params":{...}}`
-  请求，插件逐条回 `{"id":N,"result":...}` 或 `{"id":N,"error":...}`。
+- **插件协议**（`proto/`，实现下沉在兄弟内核 `dbcore/plugindriver`）：子进程
+  方式。插件启动输出 banner（同时接受内核名与旧名 `fynequery-plugin`），
+  宿主校验后按
+  `{"id":N,"method":"meta|open|tables|columns|query|browse|createDatabase|close|update|insert|delete|applyBatch|begin|commit|rollback|queryStream|metrics|cancel","params":{...}}`
+  请求（方法集只增不改，向后兼容已部署插件），插件逐条回
+  `{"id":N,"result":...}` 或 `{"id":N,"error":...}`。
   新增数据库类型 = 实现一个 `Dialect`（`plugins/internal/pluginkit`）+
   `go build` 出一个 `fq-plugin-<name>.exe` 放进 `plugins/` 目录，主程序
   零改动。
@@ -130,10 +132,14 @@ go test ./...
 
 ## 说明与限制
 
-- **密码明文存储**在 connections.json（本地开发工具惯例）；如需部署请自行
-  换成 OS keyring 等方案。
-- 行级编辑写回目前由内置 MySQL 驱动实现（`db.Updater` 可选接口）；插件驱动
-  暂为只读，多行批量编辑、SSH 隧道、导出为后续计划。
+- **密码默认明文**存在 connections.json（本地开发工具惯例）；新建/编辑连接时
+  可勾选存入 OS keyring（Windows 凭据管理器，`keyring_windows.go` 直调
+  ADVAPI32），JSON 只留标志位。
+- 行级编辑写回内置 MySQL 与全部插件驱动均支持：内置走 `db.Updater`/
+  `BatchUpdater`（事务原子提交 + 每条恰好影响 1 行的强校验），插件侧集中在
+  `plugins/internal/pluginkit/dml.go`（协议方法
+  `update|insert|delete|applyBatch|begin|commit|rollback`）。SSH 隧道
+  （`db/ssh.go` 本地端口转发）已支持；大文件流式导入导出为后续计划。
 - SQLite 连接不涉及主机/账号，Database 直接填文件路径；插件为纯 Go，免 CGO。
 - 视觉回归截图在 `shots/`；`design-ref/` 是 TablePlus 官方截图参考；
   `.design-tools/` 是截图/像素采样辅助工具，不参与构建。

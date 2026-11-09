@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbcore/dbcore"
+	"github.com/dbcore/dbcore/plugindriver"
+
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 )
 
@@ -46,7 +49,11 @@ func TestFormatCellKeepsEveryKindDistinct(t *testing.T) {
 		{"float", 1.5, "float", "1.5"},
 		{"bool", true, "bool", "true"},
 		{"blob", []byte{1, 2, 3}, "blob", "\x01\x02\x03"},
-		{"time", time.Date(2026, 10, 24, 12, 0, 0, 123456789, time.UTC), "time", "2026-10-24 12:00:00.123456789"},
+		// The wire spelling is the protocol's RFC3339-with-nanos (the host
+		// decodes with that exact layout), while cellText re-renders it for
+		// display in local time — see formatDisplayTime. UTC input therefore
+		// prints as whatever local offset the test machine has, so this case
+		// only pins the kind; the spelling is covered by the display test.
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,6 +65,61 @@ func TestFormatCellKeepsEveryKindDistinct(t *testing.T) {
 				t.Fatalf("text = %q, want %q", got, tc.text)
 			}
 		})
+	}
+}
+
+// The grid shows local, human-readable times; the wire keeps RFC3339. Both
+// spellings are checked here so a change to either side is visible.
+func TestTimeCellDisplaySpelling(t *testing.T) {
+	instant := time.Date(2026, 10, 24, 12, 0, 0, 123456789, time.UTC)
+	cell := FormatCell(instant)
+	// Wire: RFC3339-with-nanos in UTC.
+	if want := "2026-10-24T12:00:00.123456789Z"; cell.Time != want {
+		t.Fatalf("wire = %q, want %q", cell.Time, want)
+	}
+	// Display: local time, same instant, fractional digits preserved.
+	wantDisplay := instant.Local().Format("2006-01-02 15:04:05.999999999")
+	if got := cellText(cell); got != wantDisplay {
+		t.Fatalf("display = %q, want %q", got, wantDisplay)
+	}
+	// A whole-second value shows no fractional tail.
+	whole := FormatCell(time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC))
+	wantWhole := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC).Local().Format("2006-01-02 15:04:05")
+	if got := cellText(whole); got != wantWhole {
+		t.Fatalf("whole-second display = %q, want %q", got, wantWhole)
+	}
+	// An unparseable wire value still shows something rather than nothing.
+	if got := cellText(plugindriver.CellPayload{Kind: "time", Time: "not-a-time"}); got != "not-a-time" {
+		t.Fatalf("unparseable time display = %q, want the raw wire text", got)
+	}
+}
+
+// Every cell FormatCell produces must survive the host's DecodeValue. The two
+// live in different packages (a plugin and the kernel), so nothing but this
+// test ties the encoders and decoders together — the time layout drifted once
+// already and every plugin query carrying a datetime failed to decode.
+func TestFormatCellRoundTripsThroughDecodeValue(t *testing.T) {
+	values := []any{
+		nil, "hello", int64(42), 1.5, true, []byte{1, 2, 3},
+		time.Date(2026, 10, 24, 12, 0, 0, 123456789, time.UTC),
+		time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC),
+		// A non-UTC instant keeps its exact moment across the boundary.
+		time.Date(2026, 10, 24, 12, 0, 0, 123456789, time.FixedZone("CST", 8*3600)),
+	}
+	for _, v := range values {
+		cell := FormatCell(v)
+		decoded, err := plugindriver.DecodeValue(cell)
+		if err != nil {
+			t.Errorf("DecodeValue(FormatCell(%v)) failed: %v (cell kind %q)", v, err, cell.Kind)
+			continue
+		}
+		if want, ok := v.(time.Time); ok {
+			if decoded.Kind != dbcore.ValTime {
+				t.Errorf("%v decoded to kind %v, want time", v, decoded.Kind)
+			} else if !decoded.T.Equal(want) {
+				t.Errorf("time round-trip = %v, want %v", decoded.T, want)
+			}
+		}
 	}
 }
 

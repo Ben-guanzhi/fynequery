@@ -26,11 +26,15 @@ func FormatCell(v interface{}) plugindriver.CellPayload {
 	case string:
 		return plugindriver.CellPayload{Kind: "text", Text: x}
 	case time.Time:
-		// Keep fractional seconds (MySQL datetime(6)/timestamp(6)) so an edited
-		// cell round-trips without silently truncating precision.
+		// The wire format is the protocol's RFC3339-with-nanos (see
+		// plugindriver.DecodeValue's timeFormat), NOT Go's default layout: the
+		// host parses with that exact layout, so a space-separated local
+		// spelling fails to decode and the whole result errors out. UTC keeps
+		// the instant unambiguous across the process boundary; fractional
+		// seconds survive so MySQL datetime(6)/timestamp(6) round-trip.
 		return plugindriver.CellPayload{
 			Kind: "time",
-			Time: x.Format("2006-01-02 15:04:05.999999999"),
+			Time: x.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 		}
 	case int:
 		return plugindriver.CellPayload{Kind: "int", Int: int64(x)}
@@ -70,6 +74,13 @@ func FormatCell(v interface{}) plugindriver.CellPayload {
 
 // cellText is the text a cell shows. A NULL has no text at all — it is not the
 // empty string, and the grid says so.
+//
+// The time cell is the one kind whose wire and display spellings differ: the
+// wire is RFC3339-with-nanos (that is what the host decodes with), while a grid
+// should show something a human reads. Parse and re-render here — the display
+// conversion lives at the display edge, so the protocol keeps one format.
+// A value that does not parse falls through as its wire text rather than
+// vanishing: showing the raw instant beats showing an empty cell.
 func cellText(cell plugindriver.CellPayload) string {
 	switch cell.Kind {
 	case "int":
@@ -83,10 +94,24 @@ func cellText(cell plugindriver.CellPayload) string {
 	case "blob":
 		return string(cell.Blob)
 	case "time":
+		if t, err := time.Parse("2006-01-02T15:04:05.999999999Z07:00", cell.Time); err == nil {
+			return formatDisplayTime(t)
+		}
 		return cell.Time
 	default:
 		return ""
 	}
+}
+
+// formatDisplayTime renders an instant for the grid: local time, seconds
+// precision, with fractional digits only when the value actually carries them
+// (a datetime(6) keeps its microseconds; a plain timestamp stays tidy).
+func formatDisplayTime(t time.Time) string {
+	local := t.Local()
+	if local.Nanosecond() == 0 {
+		return local.Format("2006-01-02 15:04:05")
+	}
+	return local.Format("2006-01-02 15:04:05.999999999")
 }
 
 // CellToString renders a cell as the nullable string the UI works with. The

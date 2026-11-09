@@ -443,3 +443,203 @@ func TestRemoteSessionRecoversAfterRestart(t *testing.T) {
 		t.Fatalf("Commit after restart: %v", err)
 	}
 }
+
+// TestPluginProcessRefCount pins FQ-01: the plugin process is a broker (§6.2) —
+// it lives while sessions reference it and is unloaded when the last one
+// leaves. Two connections share one process and hold two references; closing
+// one keeps the process, closing the last kills it.
+func TestPluginProcessRefCount(t *testing.T) {
+	exe := buildFakePlugin(t)
+	p, err := spawnPlugin(exe)
+	if err != nil {
+		t.Fatalf("spawnPlugin: %v", err)
+	}
+	defer p.kill()
+
+	if got := p.Sessions(); got != 0 {
+		t.Fatalf("a never-connected process serves %d sessions, want 0", got)
+	}
+	cfg := proto.ConnectParams{Name: "rc", Host: "localhost", Database: "db"}
+	s1, err := p.Connect(cfg)
+	if err != nil {
+		t.Fatalf("Connect 1: %v", err)
+	}
+	defer s1.Close()
+	if got := p.Sessions(); got != 1 {
+		t.Fatalf("after one Connect, sessions = %d, want 1", got)
+	}
+	s2, err := p.Connect(cfg)
+	if err != nil {
+		t.Fatalf("Connect 2: %v", err)
+	}
+	defer s2.Close()
+	if got := p.Sessions(); got != 2 {
+		t.Fatalf("after two Connects, sessions = %d, want 2", got)
+	}
+
+	// Closing one session keeps the process alive for the other.
+	s1.Close()
+	if got := p.Sessions(); got != 1 {
+		t.Fatalf("after one Close, sessions = %d, want 1", got)
+	}
+	p.mu.Lock()
+	conn := p.conn
+	p.mu.Unlock()
+	if conn == nil || conn.Dead() {
+		t.Fatal("closing one session must not unload a shared plugin process")
+	}
+
+	// The last Close unloads it.
+	s2.Close()
+	p.mu.Lock()
+	conn = p.conn
+	p.mu.Unlock()
+	if conn == nil || !conn.Dead() {
+		t.Fatal("the last session leaving must unload the plugin process")
+	}
+
+	// Idempotent: a second Close on the same session must neither send another
+	// close frame nor release another reference (closed.Swap guard + the
+	// sessions>0 floor keep the count sane).
+	s2.Close()
+	s2.Close()
+	if got := p.Sessions(); got != 0 {
+		t.Fatalf("double Close must not double-release, sessions = %d", got)
+	}
+}
+
+// TestSessionRebuiltAcknowledgesOnce pins the UI's FQ-02 observability surface:
+// after the plugin process dies and a session self-heals onto the replacement,
+// TakeRebuilt() reports true exactly once (acknowledge-on-read) — the rebuild
+// notice must fire once, not on every later call. A rebuild re-opens the
+// server connection, so transactions/temp tables/session variables from
+// before are gone; this flag is how the user finds out.
+func TestSessionRebuiltAcknowledgesOnce(t *testing.T) {
+	exe := buildFakePlugin(t)
+	p, err := spawnPlugin(exe)
+	if err != nil {
+		t.Fatalf("spawnPlugin: %v", err)
+	}
+	defer p.kill()
+
+	cfg := proto.ConnectParams{Name: "rb", Host: "localhost", Database: "db"}
+	s, err := p.Connect(cfg)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer s.Close()
+
+	// A fresh session was never rebuilt — and must expose the capability.
+	if o, ok := AsRebuildObserver(s); !ok || o.TakeRebuilt() {
+		t.Fatal("a fresh session must expose RebuildObserver and report not-rebuilt")
+	}
+
+	// Kill the process behind the session's back; the next session call
+	// self-heals via live() onto the replacement and must raise the flag.
+	p.kill()
+	if _, err := s.Query("SELECT 1", 10); err != nil {
+		t.Fatalf("query after kill must self-heal onto the rebuilt process: %v", err)
+	}
+	o, ok := AsRebuildObserver(s)
+	if !ok {
+		t.Fatal("remoteSession must implement RebuildObserver")
+	}
+	if !o.TakeRebuilt() {
+		t.Fatal("a session re-opened on a replacement process must report rebuilt")
+	}
+	if o.TakeRebuilt() {
+		t.Fatal("TakeRebuilt must acknowledge exactly once (flag cleared on read)")
+	}
+}
+
+// TestCancelBypassesCallGate pins the cancel path: callGate slots are held for
+// a request's whole lifetime (a query can pin one for minutes), so a saturated
+// gate must queue a plain call until its context expires — while the cancel
+// request (callUngated) still reaches the plugin. Gated, 8 concurrent queries
+// would make KillQuery's 10s deadline expire before the frame ever left the
+// host: cancellation failed exactly when the user needed it.
+func TestCancelBypassesCallGate(t *testing.T) {
+	exe := buildFakePlugin(t)
+	p, err := spawnPlugin(exe)
+	if err != nil {
+		t.Fatalf("spawnPlugin: %v", err)
+	}
+	defer p.kill()
+
+	// Stuff every gate slot without releasing them.
+	for i := 0; i < pluginMaxConcurrentCalls; i++ {
+		p.callGate <- struct{}{}
+	}
+
+	// A plain call is bounded by its context and fails while the gate is full.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	if err := p.call(ctx, proto.MethodMeta, nil, &proto.MetaResult{}); err == nil {
+		cancel()
+		t.Fatal("gated call must fail (context deadline) while the gate is saturated")
+	}
+	cancel()
+
+	// The ungated path still reaches the plugin — the road KillQuery drives.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	var meta proto.MetaResult
+	if err := p.callUngated(ctx2, proto.MethodMeta, nil, &meta); err != nil {
+		cancel2()
+		t.Fatalf("ungated call must bypass the saturated gate: %v", err)
+	}
+	cancel2()
+
+	// Tidy up the stuffed slots before kill (kill does not need it, but a
+	// blocked-gate process shutdown stays clean).
+	for i := 0; i < pluginMaxConcurrentCalls; i++ {
+		select {
+		case <-p.callGate:
+		default:
+		}
+	}
+}
+
+// TestUndiscoverPlugins pins FQ-03: the discovery inverse. Discovering a plugin
+// and then undiscovering it must return the registry to the state where the
+// plugin never existed — no registered driver, no resident process — so a hot
+// update / re-scan can revert instead of leaving the old registration behind.
+func TestUndiscoverPlugins(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "fq-plugin-undiscfake.exe")
+	if out, err := exec.Command("go", "build", "-o", exe, "./testdata/fakeplugin").CombinedOutput(); err != nil {
+		t.Fatalf("build fakeplugin: %v\n%s", err, out)
+	}
+	dir := filepath.Dir(exe)
+	DiscoverPlugins(dir)
+
+	d, ok := Driver("undiscfake")
+	if !ok {
+		t.Fatal("discovery did not register the plugin by file name")
+	}
+	p, ok := d.(*pluginProc)
+	if !ok {
+		t.Fatalf("Driver(undiscfake) = %T, want *pluginProc", d)
+	}
+	if _, err := p.Connect(proto.ConnectParams{Name: "u", Host: "localhost", Database: "db"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer p.kill()
+
+	if n := UndiscoverPlugins(dir); n < 1 {
+		t.Fatalf("UndiscoverPlugins removed %d, want at least 1", n)
+	}
+	if _, ok := Driver("undiscfake"); ok {
+		t.Fatal("UndiscoverPlugins must unregister the driver code")
+	}
+	p.mu.Lock()
+	conn := p.conn
+	p.mu.Unlock()
+	if conn == nil || !conn.Dead() {
+		t.Fatal("UndiscoverPlugins must kill the plugin process")
+	}
+
+	// A later re-scan re-registers from the (still present) executable.
+	DiscoverPlugins(dir)
+	if _, ok := Driver("undiscfake"); !ok {
+		t.Fatal("re-scan did not re-register the plugin")
+	}
+	UndiscoverPlugins(dir)
+}

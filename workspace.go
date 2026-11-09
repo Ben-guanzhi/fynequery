@@ -21,6 +21,8 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/dbcore/dbcore/sqltext"
+
 	"fynequery/db"
 	"fynequery/icons"
 	"fynequery/proto"
@@ -82,6 +84,7 @@ type workspace struct {
 	docs       []*docTab         // parallel to ws.tabs.tabs (data or query)
 	dataTabs   []*dataTableTab   // open table views (multi-tab browsing)
 	activeData *dataTableTab     // the table tab currently on screen
+	journal    journalWriter     // serializes pending-edit journal disk writes
 	details    *detailsPane      // right sidebar
 	detailWrap fyne.CanvasObject // toggled by the toolbar button
 	currentDB  string            // selected database ("" = none yet)
@@ -190,6 +193,7 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 	ws.loadInventory()
 	ws.loadDatabases()
 	ws.loadTLS()
+	ws.offerEditRestore()
 
 	// Server-level re-dial, now async: land on the db-bound session (the
 	// documented fallback for drivers that require a database) and swap in
@@ -250,7 +254,9 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 	// client-area sizing first. enableCustomChrome also resizes the native
 	// window to the canvas — a Fyne Resize afterwards would re-add the removed
 	// caption margins and leave a blank band with misaligned pointer hits.
-	time.AfterFunc(300*time.Millisecond, func() {
+	// The one-shot is armed through the window-timer group so a close before it
+	// fires cancels it (FQ-10).
+	armWindowTimer(w, 300*time.Millisecond, func() {
 		safeDo(func() { enableCustomChrome(w) })
 	})
 	// Refresh the theme only now that the window has a native handle; pushing
@@ -1587,6 +1593,12 @@ func (ws *workspace) closeTab(i int) {
 	ws.tabs.setActive(ws.tabs.current)
 	ws.showTab(ws.tabs.current)
 	ws.syncTabStrip()
+	if doc.kind == docData {
+		// Closing a table tab discards its unsaved edits; the journal must not
+		// resurrect them at the next launch. Synchronous flush: this is
+		// teardown, a background task might not run before exit.
+		ws.flushEditJournal()
+	}
 }
 
 // saveActiveData persists the shared data-view state into the active table tab
@@ -2025,6 +2037,13 @@ func (ws *workspace) loadTableData(t *dataTableTab, offset int) {
 	if sess == nil || t == nil {
 		return
 	}
+	// FQ-02: a transparently rebuilt plugin session re-opened the server
+	// connection — server-side state from before the rebuild is gone. The
+	// notice fires once (acknowledge-on-read), right where data is re-read.
+	if o, ok := db.AsRebuildObserver(sess); ok && o.TakeRebuilt() {
+		ws.logf("插件进程已重建：连接已重新打开，此前的事务/临时表/会话变量已丢失")
+		ws.status.setQueryInfo("⚠ 插件进程已重建——服务器端会话状态已丢失")
+	}
 	name := t.name
 	filter := t.filterSQL
 	t.gen++
@@ -2051,6 +2070,13 @@ func (ws *workspace) loadTableData(t *dataTableTab, offset int) {
 			} else {
 				res, err = sess.Browse(name, browseLimit)
 			}
+		} else if driver == "redis" {
+			// A Redis key has no WHERE: the filter dialog must not have let a
+			// filter through (showFilterDialog guards on pageSupported), so a
+			// filter reaching here is a state the UI can no longer produce —
+			// report it instead of leaving as an SQL statement to a driver
+			// that parses Redis commands.
+			err = fmt.Errorf("Redis 键不支持筛选，请清除筛选后浏览")
 		} else {
 			res, err = sess.Query(
 				fmt.Sprintf("SELECT * FROM %s WHERE %s LIMIT %d",
@@ -2159,6 +2185,13 @@ func (ws *workspace) loadTablePage(t *dataTableTab, off int) {
 	if sess == nil || t == nil {
 		return
 	}
+	// Only SQL drivers speak OFFSET/LIMIT. The paging buttons are hidden for
+	// the others (pageSupported gates the toolbar), so reaching here is a
+	// state the UI can no longer produce; the guard keeps a Redis key from
+	// ever leaving as a SELECT statement.
+	if !ws.pageSupported() {
+		return
+	}
 	name := t.name
 	t.gen++
 	gen := t.gen
@@ -2185,6 +2218,12 @@ func (ws *workspace) loadTablePage(t *dataTableTab, off int) {
 			grid := newDataTable(data, ws.status)
 			ws.prepGrid(grid)
 			t.grid = grid
+			// Paging replaces the grid wholesale: the old page's unsaved edits
+			// are dropped with it — paging is explicit navigation, same as
+			// closing the tab. The journal still holds the pre-flip snapshot;
+			// rewriting it here keeps the next launch from offering to
+			// "restore" edits this session already discarded.
+			ws.saveEditJournal()
 			if ws.activeData == t {
 				ws.pushTabGrid(t)
 				ws.updatePaging(off > 0, hasMore)
@@ -2344,12 +2383,15 @@ func (ws *workspace) pageSuffix(limit, offset int) string {
 }
 
 func (ws *workspace) quoteTable(name string) string {
-	switch ws.conn.Driver {
-	case "mysql", "mariadb":
-		return "`" + strings.ReplaceAll(name, "`", "``") + "`"
-	default:
-		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	// Single-sourced with the rest of the client's identifier quoting: the
+	// hand-rolled switch here missed SQL Server, where ANSI double quotes are
+	// only an identifier when QUOTED_IDENTIFIER is on (the driver default),
+	// and could not be trusted once it was off. QuoteIdentLoose picks the
+	// dialect's own delimiters and falls back to ANSI for unknown drivers.
+	if q, err := sqltext.QuoteIdent(ws.conn.Driver, name); err == nil {
+		return q
 	}
+	return sqltext.QuoteIdentLoose(ws.conn.Driver, name)
 }
 
 // quoteSQLString renders v as a single-quoted SQL string literal for the
@@ -2390,7 +2432,11 @@ func (ws *workspace) gotoOffset(off int) {
 	if t == nil || t.name == "" || ws.sess == nil {
 		return
 	}
-	if !ws.pageSupported() && t.filterSQL == "" {
+	// A driver without SQL paging cannot serve a filtered page either: the
+	// filter would reach loadTablePage and leave as a SELECT … LIMIT … OFFSET
+	// statement to a driver that parses Redis commands. Redis keys have no
+	// offset paging and no WHERE, so the guard covers both shapes at once.
+	if !ws.pageSupported() {
 		return
 	}
 	if off < 0 {

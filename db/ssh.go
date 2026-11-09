@@ -7,10 +7,13 @@ package db
 // feature uniform across every engine and out of the plugin protocol.
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,6 +22,91 @@ import (
 
 // sshDialer is the real SSH dial; overridable in tests.
 var sshDialer = ssh.Dial
+
+// hostKeys persists bastion public keys for trust-on-first-use verification:
+// the first connection records the server's key, later connections must
+// present the same one or the dial fails with a key-change warning. The
+// default path mirrors connections.json's location; main() pins it to the
+// same config dir via SetKnownHostsPath so the portable override applies.
+var hostKeys = &hostKeyStore{path: defaultKnownHostsPath()}
+
+// SetKnownHostsPath points the TOFU store at p (created on first write).
+func SetKnownHostsPath(p string) {
+	hostKeys.mu.Lock()
+	defer hostKeys.mu.Unlock()
+	hostKeys.path = p
+}
+
+func defaultKnownHostsPath() string {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		base = "."
+	}
+	return filepath.Join(base, "fynequery", "ssh-known-hosts.json")
+}
+
+// hostKeyStore is a tiny addr→base64(key.Marshal()) map on disk.
+type hostKeyStore struct {
+	mu   sync.Mutex
+	path string
+}
+
+func (s *hostKeyStore) load() (map[string]string, error) {
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]string{}, nil
+		}
+		return nil, err
+	}
+	var m map[string]string
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", s.path, err)
+	}
+	return m, nil
+}
+
+func (s *hostKeyStore) save(m map[string]string) error {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path)
+}
+
+// verify implements the TOFU host-key callback for addr. A stored match
+// passes, a stored mismatch refuses the connection, and a first contact is
+// recorded (a store write failure degrades to trust-on-every-use rather than
+// blocking the dial — this is a local tool, not a bastion farm).
+func (s *hostKeyStore) verify(addr string, key ssh.PublicKey) error {
+	enc := base64.StdEncoding.EncodeToString(key.Marshal())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	known, err := s.load()
+	if err != nil {
+		return fmt.Errorf("ssh known-hosts store: %w", err)
+	}
+	if old, ok := known[addr]; ok {
+		if old == enc {
+			return nil
+		}
+		return fmt.Errorf("ssh: host key for %s has changed since the last connection — "+
+			"this can be a man-in-the-middle attack, or the bastion was rebuilt. "+
+			"If the change is expected, delete %s and reconnect", addr, s.path)
+	}
+	known[addr] = enc
+	if err := s.save(known); err != nil {
+		return nil // best effort: don't block the tunnel on storage trouble
+	}
+	return nil
+}
 
 // SSHConfig carries the bastion connection settings. When Enabled, dialConn
 // opens a tunnel and rewrites the database Host/Port to the local forward.
@@ -63,13 +151,17 @@ func openTunnel(cfg SSHConfig, remoteHost, remotePort string) (*sshTunnel, error
 	if err != nil {
 		return nil, err
 	}
-	sshCfg := &ssh.ClientConfig{
-		User:            cfg.User,
-		Auth:            auths,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // local dev tool; TODO allow a known_hosts file
-		Timeout:         10 * time.Second,
-	}
 	addr := net.JoinHostPort(cfg.Host, port)
+	sshCfg := &ssh.ClientConfig{
+		User: cfg.User,
+		Auth: auths,
+		// Trust on first use: the bastion's key is recorded on first contact
+		// (ssh-known-hosts.json) and must match on every later connection.
+		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			return hostKeys.verify(addr, key)
+		},
+		Timeout: 10 * time.Second,
+	}
 	client, err := sshDialer("tcp", addr, sshCfg)
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)

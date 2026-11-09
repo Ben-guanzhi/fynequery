@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/dbcore/dbcore/plugindriver"
 )
@@ -96,6 +97,8 @@ type (
 	ConnMetric    = plugindriver.ConnMetric
 	ConnDMLRow    = plugindriver.ConnDMLRow
 	CellPayload   = plugindriver.CellPayload
+	FilterArg     = plugindriver.FilterArg
+	SortArg       = plugindriver.SortArg
 )
 
 // The kernel's method names for the connection-oriented calls. They are the same
@@ -235,10 +238,17 @@ type (
 	}
 
 	// BrowseParams fetches the first rows of one table.
+	//
+	// Filter, Sort and After mirror the kernel's TableRowsRequest so the plugin
+	// can apply them. A plugin whose dialect cannot honour them returns
+	// ERR_NOT_SUPPORTED rather than silently returning unfiltered rows.
 	BrowseParams struct {
-		ConnID string `json:"connId"`
-		Table  string `json:"table"`
-		Limit  int    `json:"limit"`
+		ConnID string      `json:"connId"`
+		Table  string      `json:"table"`
+		Limit  int         `json:"limit"`
+		Filter []FilterArg `json:"filter,omitempty"`
+		Sort   []SortArg   `json:"sort,omitempty"`
+		After  []CellPayload `json:"after,omitempty"`
 	}
 
 	// CreateDBParams creates a new database/schema on the server.
@@ -311,6 +321,13 @@ func (q QueryResult) StringRows() [][]*string {
 
 // CellText is the text of one tagged cell. A NULL has no text at all — it is not
 // the empty string, and the grid says so.
+//
+// The time kind is the one whose wire and display spellings differ: the wire is
+// RFC3339-with-nanos (the plugin encodes it that way, the kernel decodes it that
+// way), while a grid shows something a human reads. The re-render happens here
+// at the display edge, so the protocol keeps exactly one format. sqlkit.cellText
+// carries the same rule for the in-process driver; a value that fails to parse
+// falls through as its wire text rather than becoming an empty cell.
 func CellText(cell CellPayload) string {
 	switch cell.Kind {
 	case "int":
@@ -324,6 +341,13 @@ func CellText(cell CellPayload) string {
 	case "blob":
 		return string(cell.Blob)
 	case "time":
+		if t, err := time.Parse("2006-01-02T15:04:05.999999999Z07:00", cell.Time); err == nil {
+			local := t.Local()
+			if local.Nanosecond() == 0 {
+				return local.Format("2006-01-02 15:04:05")
+			}
+			return local.Format("2006-01-02 15:04:05.999999999")
+		}
 		return cell.Time
 	case "decimal":
 		// Exact decimal digits: never re-format them through a float, that is

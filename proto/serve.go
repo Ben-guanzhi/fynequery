@@ -3,6 +3,7 @@ package proto
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -57,6 +58,11 @@ type Handler interface {
 
 var stdoutMu sync.Mutex
 
+// maxConcurrentFrames bounds how many request frames one plugin process works
+// on at a time. The host gates its own sends (callGate, 8), so this is a
+// defence-in-depth ceiling for the process rather than the primary limit.
+const maxConcurrentFrames = 32
+
 // writeLine marshals v and writes it as one line to w.
 func writeLine(w io.Writer, v interface{}) error {
 	b, err := json.Marshal(v)
@@ -86,6 +92,14 @@ func serve(h Handler, banner Banner, r io.Reader, w io.Writer) error {
 
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // SQL can be large
+	// Bound the work started per frame. The host already gates what it sends
+	// (callGate, 8 in flight), but that bound lives in the caller: a second
+	// host, a restarted host that lost its accounting, or a future transport
+	// could hand this process an unbounded burst, and every frame would start
+	// its own goroutine. The semaphore makes the bound the plugin's own
+	// property — the reader blocks instead of spawning, so memory and
+	// connection pressure stay flat.
+	inflight := make(chan struct{}, maxConcurrentFrames)
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
@@ -97,7 +111,9 @@ func serve(h Handler, banner Banner, r io.Reader, w io.Writer) error {
 			log.Printf("bad request line: %v", err)
 			continue
 		}
+		inflight <- struct{}{}
 		go func(req Request) {
+			defer func() { <-inflight }()
 			res := Response{ID: req.ID}
 			if req.Method == MethodQueryStream {
 				serveStream(h, req, w)
@@ -120,7 +136,20 @@ func serve(h Handler, banner Banner, r io.Reader, w io.Writer) error {
 			}
 		}(req)
 	}
-	return sc.Err()
+	// A frame past the scanner's cap ends the read loop: the oversized line is
+	// unrecoverable (the scanner has already consumed it). Returning nil makes
+	// Serve() exit with code 0 — a clean shutdown, NOT a process that stays
+	// up: the already-dispatched goroutines die with it, and the host's lazy
+	// ensure() relaunches the plugin on the next call. Naming the cap in the
+	// log keeps it from reading like a transport failure (SEC-01).
+	if err := sc.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			log.Printf("plugin protocol: a request line exceeded the 16MB frame cap; exiting cleanly (the host relaunches on next use)")
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // dispatchSafe isolates handler panics: a panicking method surfaces as an

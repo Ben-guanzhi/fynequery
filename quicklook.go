@@ -418,12 +418,32 @@ func jsonTree(v any) fyne.CanvasObject {
 		},
 		func(i int, obj fyne.CanvasObject) {
 			r := rows[i]
-			hb := obj.(*fyne.Container)
-			indent := hb.Objects[0].(*canvas.Rectangle)
-			arrowBox := hb.Objects[1].(*fyne.Container)
-			lbl := hb.Objects[2].(*widget.Label)
+			// The widget tree is built by the factory above, so the shapes are
+			// known — but a bare assertion here runs on the UI thread inside a
+			// list update, and a mismatch (a Fyne version that wraps the row,
+			// a future refactor of the factory) would crash the whole app
+			// rather than render a blank row. Checked assertions degrade.
+			hb, ok := obj.(*fyne.Container)
+			if !ok || len(hb.Objects) < 3 {
+				return
+			}
+			indent, ok := hb.Objects[0].(*canvas.Rectangle)
+			if !ok {
+				return
+			}
+			arrowBox, ok := hb.Objects[1].(*fyne.Container)
+			if !ok || len(arrowBox.Objects) == 0 {
+				return
+			}
+			lbl, ok := hb.Objects[2].(*widget.Label)
+			if !ok {
+				return
+			}
 			indent.SetMinSize(fyne.NewSize(float32(indentUnit*r.depth), 1))
-			arrow := arrowBox.Objects[0].(*widget.Label)
+			arrow, ok := arrowBox.Objects[0].(*widget.Label)
+			if !ok {
+				return
+			}
 			switch {
 			case r.branch && r.expanded:
 				arrow.SetText("-") // expanded

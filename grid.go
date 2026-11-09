@@ -187,14 +187,88 @@ func (t *dataTable) setData(d *TableData) {
 // declared type is numeric (a text column of digits stays lexicographic).
 // Mirrors TablePlus HeaderSort / HeaderSortDirection.
 // sortKey is the precomputed comparison key for one row during a sort.
-// Decorating once (O(n) ParseFloat calls) turns the sort's O(n log n)
-// comparator into pure field lookups — re-parsing both cells per comparison
-// made a 5000-row numeric sort parse ~120k times.
+// Decorating once (O(n) parses) turns the sort's O(n log n) comparator into
+// pure field lookups — re-parsing both cells per comparison made a 5000-row
+// numeric sort parse ~120k times.
+//
+// A numeric cell that ParseFloat would round keeps its digit text in exact:
+// a double's 53-bit mantissa samples a DECIMAL(38) at ~15 significant digits,
+// so two distinct 38-digit values collapse to the same float and the sort
+// treats them as ties. compareExact orders such texts by (sign, integer
+// digits, fraction) — exact at any precision, no big.Int needed.
 type sortKey struct {
 	null  bool
 	isNum bool
 	num   float64
+	exact string // non-empty when the value needs the exact comparator
 	s     string
+}
+
+// needsExact reports whether ParseFloat's round trip changed the digits, i.e.
+// the float64 is a lossy stand-in for the value the cell carries.
+//
+// Scientific-notation text ("1e3") is excluded on purpose: the exact
+// comparator parses plain decimals only, and "1e3" has no dot so its
+// integer part would literally be "1e3". A spelling like that compares
+// correctly through the float (ParseFloat accepts it), so it stays on the
+// fast path.
+func needsExact(text string, f float64) bool {
+	if strings.ContainsAny(text, "eE") {
+		return false
+	}
+	return strconv.FormatFloat(f, 'f', -1, 64) != text
+}
+
+// compareExact orders two decimal digit texts exactly. Both have already
+// passed the numeric-shape test (leading +/-, digits, at most one dot).
+// Normal form compares VALUE, not spelling: leading zeros in the integer part
+// and trailing zeros in the fraction fold away ("012.50" and "12.5" tie).
+func compareExact(a, b string) int {
+	parse := func(s string) (neg bool, intPart, fracPart string) {
+		body := strings.TrimPrefix(strings.TrimPrefix(s, "+"), "-")
+		neg = strings.HasPrefix(s, "-")
+		if i := strings.IndexByte(body, '.'); i >= 0 {
+			intPart, fracPart = body[:i], body[i+1:]
+		} else {
+			intPart = body
+		}
+		intPart = strings.TrimLeft(intPart, "0")
+		fracPart = strings.TrimRight(fracPart, "0")
+		return neg, intPart, fracPart
+	}
+	na, ia, fa := parse(a)
+	nb, ib, fb := parse(b)
+	if na != nb {
+		if na {
+			return -1
+		}
+		return 1
+	}
+	mag := func() int {
+		if len(ia) != len(ib) {
+			if len(ia) < len(ib) {
+				return -1
+			}
+			return 1
+		}
+		if ia != ib {
+			if ia < ib {
+				return -1
+			}
+			return 1
+		}
+		if fa != fb {
+			if fa < fb {
+				return -1
+			}
+			return 1
+		}
+		return 0
+	}()
+	if na {
+		return -mag
+	}
+	return mag
 }
 
 func (t *dataTable) sortData(col int) {
@@ -221,7 +295,13 @@ func (t *dataTable) sortData(col int) {
 		k.s = *v
 		if numeric {
 			if f, err := strconv.ParseFloat(k.s, 64); err == nil {
-				k.num, k.isNum = f, true
+				if needsExact(k.s, f) {
+					// The float64 is a lossy stand-in (DECIMAL(38)/big integer
+					// territory): keep the digits for the exact comparator.
+					k.exact = k.s
+				} else {
+					k.num, k.isNum = f, true
+				}
 			}
 		}
 	}
@@ -229,6 +309,41 @@ func (t *dataTable) sortData(col int) {
 	// reads keys by ORIGINAL index while sort permutes `order`, then the
 	// permutation is applied to the rows once. Sorting the row slice
 	// directly would break the index↔key correspondence as elements move.
+	// Both keys numeric (exact digits or a float64 spelled back out) ⇒
+	// compare exactly (a lossy float must not decide the order); the exact
+	// parser takes a plain number spelled back out, so a column mixing the
+	// two magnitudes still orders correctly.
+	less := func(a, b *sortKey) bool {
+		if (a.exact != "" || a.isNum) && (b.exact != "" || b.isNum) {
+			// compareExact's contract is number shapes. Feeding it raw
+			// non-numeric text made the comparator intransitive and the
+			// sort order depend on element order, so a numeric column that
+			// also holds junk text falls through to string ordering below.
+			sa := a.exact
+			if sa == "" {
+				sa = strconv.FormatFloat(a.num, 'f', -1, 64)
+			}
+			sb := b.exact
+			if sb == "" {
+				sb = strconv.FormatFloat(b.num, 'f', -1, 64)
+			}
+			c := compareExact(sa, sb)
+			if asc {
+				return c < 0
+			}
+			return c > 0
+		}
+		if a.isNum && b.isNum {
+			if asc {
+				return a.num < b.num
+			}
+			return a.num > b.num
+		}
+		if asc {
+			return a.s < b.s
+		}
+		return a.s > b.s
+	}
 	order := make([]int, len(rows))
 	for i := range order {
 		order[i] = i
@@ -241,16 +356,7 @@ func (t *dataTable) sortData(col int) {
 		if a.null {
 			return false
 		}
-		if a.isNum && b.isNum {
-			if asc {
-				return a.num < b.num
-			}
-			return a.num > b.num
-		}
-		if asc {
-			return a.s < b.s
-		}
-		return a.s > b.s
+		return less(a, b)
 	})
 	sorted := make([][]*string, len(rows))
 	for i, src := range order {

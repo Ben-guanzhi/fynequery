@@ -89,7 +89,11 @@ func OpenVerify(driverName, dsn, versionQuery string) (*sql.DB, string, error) {
 	}
 	var v interface{}
 	if err := handle.QueryRowContext(ctx, versionQuery).Scan(&v); err != nil {
-		return handle, "", nil // server string is best effort
+		// 部分成功（Ping 通过、版本查询失败）也要释放句柄：把半开连接交给调用者
+		// 会让它误以为验证已完成。版本串是 best-effort 的信息，但句柄的获取必须
+		// 原子地成功或失败——失败即 Close，避免泄漏给调用者。
+		handle.Close()
+		return nil, "", err
 	}
 	if s := sqlkit.FormatValue(v); s != nil {
 		return handle, *s, nil
@@ -288,6 +292,12 @@ func (h *handler) Browse(p proto.BrowseParams) (proto.QueryResult, error) {
 	if err != nil {
 		return proto.QueryResult{}, err
 	}
+	// P1-1 回归：Filter/Sort/After 非空时必须报错，不能静默忽略。
+	// 旧写法只用 p.Table 和 p.Limit 构建 SQL，过滤条件被丢弃，
+	// 插件返回未过滤的行——调用方看到自己没要求的数据。
+	if len(p.Filter) > 0 || len(p.Sort) > 0 || len(p.After) > 0 {
+		return proto.QueryResult{}, fmt.Errorf("pluginkit: browse with filter/sort/after is not supported (got %d filter(s), %d sort key(s), %d after value(s))", len(p.Filter), len(p.Sort), len(p.After))
+	}
 	if p.Limit <= 0 {
 		p.Limit = 1000
 	}
@@ -436,28 +446,102 @@ func (h *handler) Begin(p proto.TxParams) error {
 	return nil
 }
 
+// txSettleTimeout bounds one Commit/Rollback: a commit wedged on a lost
+// network path used to block the plugin's goroutine forever (the host's own
+// one-minute deadline gave up, but the plugin-side tx handle stayed locked in
+// the wedged call). When the deadline fires the watchdog rolls back as a
+// fallback — a Rollback racing a wedged Commit is race-safe by
+// database/sql (the loser gets ErrTxDone), so exactly one of the two wins and
+// the connection's transactional state is left defined either way. A var so
+// the watchdog test can shorten it; production keeps 30s.
+var txSettleTimeout = 30 * time.Second
+
+// settleTx runs one terminal transaction operation with a watchdog: fn is the
+// Commit (or Rollback) itself, fallback the opposite arm that runs when the
+// deadline fires first. The returned error is fn's outcome when it settles in
+// time, or an explicit timeout wrapping the fallback's outcome otherwise. name
+// labels the arm in the timeout message; fn and fallback are each run exactly
+// once (a database/sql tx arm must never be invoked twice).
+func settleTx(tx *sql.Tx, name string, fn, fallback func() error) error {
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			// 兜底：fn 抛 panic 时不能让 goroutine 崩溃带走进程，也不能让
+			// done 永远等不到值——用同一个通道把 panic 转成错误送回。
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("transaction %s panicked: %v", name, r)
+			}
+		}()
+		done <- fn()
+	}()
+	timer := time.NewTimer(txSettleTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		// The watchdog races the wedged call; database/sql arbitrates.
+		fallbackErr := fallback()
+		if fallbackErr == nil {
+			return fmt.Errorf("transaction %s timed out after %s (rolled back by watchdog)", name, txSettleTimeout)
+		}
+		return fmt.Errorf("transaction %s timed out after %s (watchdog rollback also failed: %v)", name, txSettleTimeout, fallbackErr)
+	}
+}
+
 // Commit commits the active transaction, if any.
+//
+// The tx entry is removed on success and when the handle is already terminal
+// (sql.ErrTxDone): a terminal handle left registered would wedge every later
+// Begin on this connection ("transaction already active") with no way out but
+// Close. Any other failure keeps the handle registered for a retry — in
+// practice only the watchdog-timeout outcome lands here (database/sql
+// finalizes the *sql.Tx wrapper on any attempted Commit, so a returned commit
+// error IS ErrTxDone); a retry that finds the handle terminal lands in the
+// ErrTxDone arm above and cleans up.
 func (h *handler) Commit(p proto.TxParams) error {
 	h.mu.Lock()
 	tx, ok := h.txs[p.ConnID]
-	delete(h.txs, p.ConnID)
 	h.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("no active transaction")
 	}
-	return tx.Commit()
+	err := settleTx(tx, "commit", tx.Commit, tx.Rollback)
+	if err == nil || errors.Is(err, sql.ErrTxDone) {
+		h.mu.Lock()
+		// Another arm may have settled the tx meanwhile (the watchdog fallback
+		// of an earlier timed-out op); delete only when this handle is still
+		// the registered one.
+		if h.txs[p.ConnID] == tx {
+			delete(h.txs, p.ConnID)
+		}
+		h.mu.Unlock()
+	}
+	return err
 }
 
-// Rollback rolls back the active transaction, if any.
+// Rollback rolls back the active transaction, if any. As with Commit, the
+// entry is removed on success or when the handle is already terminal, and the
+// watchdog bounds the call. fn and fallback are both tx.Rollback here, so the
+// watchdog arm and a late-settling arm may each invoke it once — the second
+// call lands on an already-finalized handle and database/sql answers it with
+// sql.ErrTxDone, which is harmless.
 func (h *handler) Rollback(p proto.TxParams) error {
 	h.mu.Lock()
 	tx, ok := h.txs[p.ConnID]
-	delete(h.txs, p.ConnID)
 	h.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("no active transaction")
 	}
-	return tx.Rollback()
+	err := settleTx(tx, "rollback", tx.Rollback, tx.Rollback)
+	if err == nil || errors.Is(err, sql.ErrTxDone) {
+		h.mu.Lock()
+		if h.txs[p.ConnID] == tx {
+			delete(h.txs, p.ConnID)
+		}
+		h.mu.Unlock()
+	}
+	return err
 }
 
 // ---- streaming results -----------------------------------------------------

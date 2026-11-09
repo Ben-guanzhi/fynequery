@@ -62,9 +62,19 @@ func buildPreviewSQL(table, driver string, updates []rowUpdate, deletes, inserts
 		fmt.Fprintf(&b, "DELETE FROM %s WHERE %s;\n", qt, strings.Join(where, " AND "))
 	}
 	for _, ins := range inserts {
+		// The commit omits DEFAULT-sentinel columns so the server applies its
+		// own default (buildInsert); the preview must show exactly that
+		// statement, not a DEFAULT keyword the run would never send.
 		cols := make([]string, 0, len(ins))
-		for c := range ins {
+		for c, v := range ins {
+			if v != nil && *v == db.DefaultMarker {
+				continue
+			}
 			cols = append(cols, c)
+		}
+		if len(cols) == 0 {
+			fmt.Fprintf(&b, "-- INSERT skipped: every column uses DEFAULT (commit will report “no values”)\n")
+			continue
 		}
 		sort.Strings(cols) // stable column order for a readable preview
 		colParts := make([]string, len(cols))

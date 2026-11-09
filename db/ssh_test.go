@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"fynequery/proto"
@@ -214,6 +215,88 @@ func TestOpenTunnelEmptyBastion(t *testing.T) {
 	if _, err := OpenTunnel(SSHConfig{Enabled: true}, "127.0.0.1", "5432"); err == nil {
 		t.Fatal("expected error for missing bastion host")
 	}
+}
+
+// --- host key trust on first use -------------------------------------------
+
+func withTempHostKeys(t *testing.T) string {
+	t.Helper()
+	old := hostKeys.path
+	hostKeys.mu.Lock()
+	hostKeys.path = filepath.Join(t.TempDir(), "kh.json")
+	path := hostKeys.path
+	hostKeys.mu.Unlock()
+	t.Cleanup(func() {
+		hostKeys.mu.Lock()
+		hostKeys.path = old
+		hostKeys.mu.Unlock()
+	})
+	return path
+}
+
+// TestHostKeyTOFU: first contact records the key, the same key keeps passing,
+// a different key at the same address refuses with an actionable message, and
+// a fresh store instance (restarted app) enforces the persisted entry.
+func TestHostKeyTOFU(t *testing.T) {
+	path := withTempHostKeys(t)
+	s1, _ := genKey(t)
+	s2, _ := genKey(t)
+
+	if err := hostKeys.verify("bastion:22", s1.PublicKey()); err != nil {
+		t.Fatalf("first contact should record, got %v", err)
+	}
+	if err := hostKeys.verify("bastion:22", s1.PublicKey()); err != nil {
+		t.Fatalf("same key must pass: %v", err)
+	}
+	err := hostKeys.verify("bastion:22", s2.PublicKey())
+	if err == nil || !strings.Contains(err.Error(), "changed") || !strings.Contains(err.Error(), path) {
+		t.Fatalf("key change must refuse with store path, got %v", err)
+	}
+	if err := hostKeys.verify("other:22", s2.PublicKey()); err != nil {
+		t.Fatalf("other addresses are independent: %v", err)
+	}
+	fresh := &hostKeyStore{path: path}
+	if err := fresh.verify("bastion:22", s2.PublicKey()); err == nil {
+		t.Fatal("persisted entry must survive an app restart")
+	}
+}
+
+// TestOpenTunnelHostKeyRemembered dials the same fake bastion twice: the first
+// tunnel records its host key, the second must pass the stored-key check.
+func TestOpenTunnelHostKeyRemembered(t *testing.T) {
+	withTempHostKeys(t)
+	targetAddr, stopTarget := startEchoTarget(t)
+	defer stopTarget()
+
+	hostSigner, clientPEM := genKey(t)
+	clientSigner, err := ssh.ParsePrivateKey(clientPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverAddr, stopServer := startSSHServer(t, hostSigner, clientSigner.PublicKey(), targetAddr)
+	defer stopServer()
+
+	keyFile := writeTempFile(t, clientPEM)
+	sHost, sPort := hostPort(serverAddr)
+	_, tgtPort := hostPort(targetAddr)
+	cfg := SSHConfig{
+		Enabled:  true,
+		Host:     sHost,
+		Port:     strconv.Itoa(sPort),
+		User:     "tester",
+		AuthMode: "key",
+		KeyPath:  keyFile,
+	}
+	tunnel, err := OpenTunnel(cfg, "127.0.0.1", strconv.Itoa(tgtPort))
+	if err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	tunnel.Close()
+	tunnel2, err := OpenTunnel(cfg, "127.0.0.1", strconv.Itoa(tgtPort))
+	if err != nil {
+		t.Fatalf("second dial must pass the recorded host key: %v", err)
+	}
+	tunnel2.Close()
 }
 
 // --- capability forwarding ------------------------------------------------

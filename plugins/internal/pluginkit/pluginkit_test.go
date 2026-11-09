@@ -2,7 +2,9 @@ package pluginkit
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -231,6 +233,124 @@ func TestHandlerTransactionRouting(t *testing.T) {
 	}
 }
 
+// A commit/rollback on an already-finalized *sql.Tx fails with ErrTxDone: the
+// handle is terminal — nothing can settle it again. Dropping the entry is the
+// only escape; keeping it wedged every later Begin on the connection
+// ("transaction already active") until Close. Regression: the keep-handle rule
+// once extended to this shape and permanently bricked the connection.
+//
+// (database/sql finalizes the *sql.Tx wrapper on ANY attempted Commit or
+// Rollback — driver errors included — so at handler level every commit/rollback
+// failure is ErrTxDone-shaped. The keep-handle branch of Commit/Rollback serves
+// only settleTx's watchdog-timeout outcome, where the wedged arm has not
+// attempted the settle yet; a retry against a handle that turned terminal in
+// the meantime lands here and cleans up.)
+func TestErrTxDoneReleasesHandle(t *testing.T) {
+	h := newHandler(sqliteTxDialect{})
+	open, err := h.Open(proto.ConnectParams{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	id := open.ConnID
+	tx := proto.TxParams{ConnID: id}
+
+	if err := h.Begin(tx); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	// Finalize the tx behind the handler's back: the handler still believes
+	// it holds an active transaction.
+	h.mu.Lock()
+	registered := h.txs[id]
+	h.mu.Unlock()
+	if err := registered.Commit(); err != nil {
+		t.Fatalf("pre-finalize commit: %v", err)
+	}
+
+	// The commit arm must fail with ErrTxDone — and must release the handle.
+	if err := h.Commit(tx); !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("Commit on a finalized tx = %v, want ErrTxDone", err)
+	}
+	h.mu.Lock()
+	_, stillThere := h.txs[id]
+	h.mu.Unlock()
+	if stillThere {
+		t.Fatal("an ErrTxDone commit kept the handle registered; Begin is wedged forever")
+	}
+	// 连接必须复活:重新开事务并正常回滚收尾(handler 层回滚同时摘除句柄)。
+	if err := h.Begin(tx); err != nil {
+		t.Fatalf("Begin after ErrTxDone cleanup: %v", err)
+	}
+	if err := h.Rollback(tx); err != nil {
+		t.Fatalf("teardown rollback: %v", err)
+	}
+	h.mu.Lock()
+	_, stillThere = h.txs[id]
+	h.mu.Unlock()
+	if stillThere {
+		t.Fatal("a successful teardown rollback left the handle registered")
+	}
+
+	// Rollback 路径同规则。
+	if err := h.Begin(tx); err != nil {
+		t.Fatalf("Begin (2): %v", err)
+	}
+	h.mu.Lock()
+	registered = h.txs[id]
+	h.mu.Unlock()
+	if err := registered.Commit(); err != nil {
+		t.Fatalf("pre-finalize commit (2): %v", err)
+	}
+	if err := h.Rollback(tx); !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("Rollback on a finalized tx = %v, want ErrTxDone", err)
+	}
+	h.mu.Lock()
+	_, stillThere = h.txs[id]
+	h.mu.Unlock()
+	if stillThere {
+		t.Fatal("an ErrTxDone rollback kept the handle registered")
+	}
+	if err := h.Begin(tx); err != nil {
+		t.Fatalf("Begin (3) after rollback cleanup: %v", err)
+	}
+	if err := h.Rollback(tx); err != nil {
+		t.Fatalf("teardown rollback (2): %v", err)
+	}
+}
+
+// settleTx's watchdog bounds a wedged Commit: the deadline fires, the watchdog
+// rollback races the wedged arm (database/sql arbitrates — the loser gets
+// ErrTxDone), and the caller gets an explicit timeout error instead of hanging.
+// txSettleTimeout is patched down for the test.
+func TestSettleTxWatchdogBoundsWedgedCommit(t *testing.T) {
+	original := txSettleTimeout
+	txSettleTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { txSettleTimeout = original })
+
+	var calls int32
+	tx := &sql.Tx{} // zero value: Commit() returns ErrTxDone immediately
+	// A wedged arm: blocks well past the watchdog deadline.
+	wedged := func() error {
+		atomic.AddInt32(&calls, 1)
+		time.Sleep(2 * time.Second)
+		return nil
+	}
+	start := time.Now()
+	err := settleTx(tx, "commit", wedged, func() error { return nil })
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("the wedged commit must surface a timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want a timeout error", err)
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("settleTx took %s; the watchdog did not bound it", elapsed)
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("wedged arm ran %d times, want exactly 1", calls)
+	}
+}
+
 // TestHandlerQueryStream verifies the plugin streams rows in batches (bounded
 // memory) and that streaming inside a manual transaction sees uncommitted data.
 func TestHandlerQueryStream(t *testing.T) {
@@ -423,5 +543,29 @@ func TestHandlerCancelAbortsRunningQuery(t *testing.T) {
 	// Cancelling an unknown connection fails without touching anything.
 	if err := h.Cancel(proto.CancelParams{ConnID: "nope"}); err == nil {
 		t.Fatal("cancel on unknown connection should fail")
+	}
+}
+
+// P1-1 回归:Browse 带 Filter/Sort/After 必须显式报错——旧写法只用 Table/Limit
+// 拼 SQL,过滤条件被静默丢弃,调用方看到自己没要求的数据。
+func TestBrowseRejectsFilterSortAfter(t *testing.T) {
+	h := newHandler(sqliteTxDialect{})
+	open, err := h.Open(proto.ConnectParams{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	id := open.ConnID
+
+	if _, err := h.Browse(proto.BrowseParams{ConnID: id, Table: "t",
+		Filter: []proto.FilterArg{{Column: "v", Op: "=", Value: proto.CellPayload{Kind: "text", Text: "a"}}}}); err == nil {
+		t.Fatal("Browse with filter must fail, not silently drop it")
+	}
+	if _, err := h.Browse(proto.BrowseParams{ConnID: id, Table: "t",
+		Sort: []proto.SortArg{{Column: "v"}}}); err == nil {
+		t.Fatal("Browse with sort must fail, not silently drop it")
+	}
+	if _, err := h.Browse(proto.BrowseParams{ConnID: id, Table: "t",
+		After: []proto.CellPayload{{Kind: "text", Text: "1"}}}); err == nil {
+		t.Fatal("Browse with after must fail, not silently drop it")
 	}
 }

@@ -134,8 +134,10 @@ func (ws *workspace) importData() {
 
 // parseImport reads CSV or JSON (auto-detected from the filename or a leading
 // '[') into rows keyed by column header. Empty CSV fields and JSON nulls become
-// SQL NULL (nil).
+// SQL NULL (nil). The bytes are decoded first (BOM/UTF-16/GB18030), so a
+// Chinese-language export arrives as text rather than mojibake.
 func parseImport(data []byte, name string) (rows []map[string]*string, headers []string, err error) {
+	data = decodeImportBytes(data)
 	trimmed := strings.TrimSpace(string(data))
 	isJSON := strings.HasSuffix(name, ".json") || strings.HasPrefix(trimmed, "[")
 	if isJSON {

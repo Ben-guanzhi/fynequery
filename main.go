@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -146,8 +147,59 @@ func clampWindowSize(scale float32, size fyne.Size) fyne.Size {
 // work-area clamp would use the wrong units.
 func fitWindowWhenScaled(w fyne.Window, size fyne.Size) {
 	fitWindowToScreen(w, size)
-	time.AfterFunc(250*time.Millisecond, func() {
+	// The re-apply is a one-shot timer, but the window may close before it
+	// fires (FQ-10): arm it through the window-timer group so the close cancels
+	// it instead of letting the callback touch a dead window.
+	armWindowTimer(w, 250*time.Millisecond, func() {
 		safeDo(func() { fitWindowToScreen(w, size) })
+	})
+}
+
+// windowTimers tracks the one-shot window timers the UI arms, grouped by
+// window, so closing a window cancels every timer still pending for it (FQ-10:
+// the old shape dropped the *time.Timer and the callback kept firing into a
+// window that was already gone). Fyne has no AddOnClosed, so each group shares
+// one OnClosed that stops and forgets the whole group.
+var (
+	windowTimersMu sync.Mutex
+	windowTimers   = map[fyne.Window][]*time.Timer{}
+)
+
+// armWindowTimer schedules f to run d later and stops it — along with every
+// other timer still pending for w — when w closes.
+func armWindowTimer(w fyne.Window, d time.Duration, f func()) {
+	windowTimersMu.Lock()
+	defer windowTimersMu.Unlock()
+	var t *time.Timer
+	t = time.AfterFunc(d, func() {
+		windowTimersMu.Lock()
+		if list, ok := windowTimers[w]; ok {
+			for i, cur := range list {
+				if cur == t {
+					list = append(list[:i], list[i+1:]...)
+					break
+				}
+			}
+			if len(list) == 0 {
+				delete(windowTimers, w)
+			} else {
+				windowTimers[w] = list
+			}
+		}
+		windowTimersMu.Unlock()
+		f()
+	})
+	windowTimers[w] = append(windowTimers[w], t)
+	// Closing the window cancels every pending timer for it. Each arm call
+	// re-registers this cleanup because Fyne exposes SetOnClosed, not
+	// AddOnClosed; the closures are equivalent and stop the whole group.
+	w.SetOnClosed(func() {
+		windowTimersMu.Lock()
+		for _, cur := range windowTimers[w] {
+			cur.Stop()
+		}
+		delete(windowTimers, w)
+		windowTimersMu.Unlock()
 	})
 }
 
@@ -200,6 +252,9 @@ func main() {
 	if f := setupLogging(); f != nil {
 		defer f.Close()
 	}
+	// SSH host keys live next to connections.json so the portable override
+	// (FYNEQUERY_CONFIG_DIR) keeps every stored secret in one place.
+	db.SetKnownHostsPath(filepath.Join(configDir(), "ssh-known-hosts.json"))
 
 	a := app.NewWithID("com.tablepro.fynequery")
 	a.Settings().SetTheme(&tablePlusTheme{base: theme.DefaultTheme()})

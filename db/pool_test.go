@@ -3,6 +3,7 @@ package db
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"fynequery/proto"
 )
@@ -53,7 +54,7 @@ func newPoolFake(id string, updater bool) *poolFakeSession {
 }
 
 func TestSessionPoolReuseAndEvict(t *testing.T) {
-	p := NewSessionPool(2, defaultPoolIdleTTL)
+	p := NewSessionPool(2, defaultPoolIdleTTL, 0)
 	var opens int
 	open := func() (Session, error) {
 		opens++
@@ -112,12 +113,15 @@ func TestSessionPoolReuseAndEvict(t *testing.T) {
 }
 
 func TestSessionPoolCloseAll(t *testing.T) {
-	p := NewSessionPool(8, defaultPoolIdleTTL)
+	p := NewSessionPool(8, defaultPoolIdleTTL, 0)
 	f := newPoolFake("c", false)
-	_, err := p.Get("fp", func() (Session, error) { return f, nil })
+	s, err := p.Get("fp", func() (Session, error) { return f, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Release first: CloseAll closes *idle* sessions; a checked-out one is
+	// still running its owner's statements and must not be yanked.
+	s.Close()
 	p.CloseAll()
 	if f.closeCount() != 1 {
 		t.Fatalf("CloseAll should close the cached inner, got %d", f.closeCount())
@@ -129,4 +133,55 @@ func TestSessionPoolCloseAll(t *testing.T) {
 	if f.closeCount() != 1 {
 		t.Fatalf("double close must not call inner twice, got %d", f.closeCount())
 	}
+}
+
+// A session CloseAll finds checked out is NOT closed by CloseAll: its owner is
+// still using it. It is marked dead (never reused), and the last release
+// closes the inner session and returns the admission slot — the old shape
+// closed it under the owner and leaked the slot forever.
+func TestSessionPoolCloseAllSparesCheckedOut(t *testing.T) {
+	// The saturated-pool Get below is expected to fail; patch the wait down so
+	// the test fails fast instead of sleeping out the 30s production timeout.
+	defer func(orig time.Duration) { poolAcquireTimeout = orig }(poolAcquireTimeout)
+	poolAcquireTimeout = 250 * time.Millisecond
+
+	p := NewSessionPool(8, defaultPoolIdleTTL, 2)
+	f := newPoolFake("c", false)
+	s, err := p.Get("fp", func() (Session, error) { return f, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fill the second slot so the admission gate is exhausted.
+	s2, err := p.Get("fp2", func() (Session, error) { return newPoolFake("d", false), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.CloseAll()
+
+	// Checked-out session untouched while in use.
+	if f.closeCount() != 0 {
+		t.Fatalf("CloseAll must not close a checked-out session, got %d closes", f.closeCount())
+	}
+	// The gate is full (2 slots taken); a new Get must fail instead of hang —
+	// the checked-out session still holds its slot.
+	if _, err := p.Get("fp3", func() (Session, error) {
+		t.Fatal("open must not run while the gate is full")
+		return nil, nil
+	}); err == nil {
+		t.Fatal("Get must fail while every slot is taken")
+	}
+
+	// Last release settles the dead entry: inner closed, slot returned.
+	s.Close()
+	if f.closeCount() != 1 {
+		t.Fatalf("release must close the dead entry's inner, got %d", f.closeCount())
+	}
+	s2.Close()
+
+	// The slot is back: a fresh Get now succeeds and opens a new session.
+	s3, err := p.Get("fp3", func() (Session, error) { return newPoolFake("e", false), nil })
+	if err != nil {
+		t.Fatalf("Get after settle: %v", err)
+	}
+	s3.Close()
 }

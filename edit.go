@@ -342,6 +342,7 @@ func (ws *workspace) prepGrid(g *dataTable) {
 	g.onDirty = func() {
 		ws.refreshTxnBar()
 		ws.refreshRowDetails()
+		ws.saveEditJournal()
 	}
 	g.onRowSelect = func(int) { ws.refreshRowDetails() }
 	if _, ok := db.AsValueWriter(ws.sess); ok {
@@ -782,19 +783,26 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 				}
 			}
 		}
-		safeDo(func() {
-			progress.Hide()
-			if ferr != nil {
-				if len(ddl) > 0 {
-					ferr = fmt.Errorf("%w（排队的 %d 条 DDL 已丢弃，请手动重新排队）", ferr, len(ddl))
+			safeDo(func() {
+				progress.Hide()
+				if ferr != nil {
+					if len(ddl) > 0 {
+						ferr = fmt.Errorf("%w（排队的 %d 条 DDL 已丢弃，请手动重新排队）", ferr, len(ddl))
+					}
+					ws.pendingDDL = nil // failed commit: drop the queue, re-queue manually
+					ws.saveEditJournal() // the queue left the journal with it
+					dialog.NewError(friendlyErr(ferr), ws.window).Show()
+					return
 				}
-				ws.pendingDDL = nil // failed commit: drop the queue, re-queue manually
-				dialog.NewError(friendlyErr(ferr), ws.window).Show()
-				return
-			}
-			ws.pendingDDL = nil
-			ws.reloadTable()
-		})
+				ws.pendingDDL = nil
+				// The journal's entry for this tab dies with the commit: clear
+				// the edit state (which rewrites the journal) before the reload
+				// replaces the grid.
+				if ws.grid != nil {
+					ws.grid.clearDirty()
+				}
+				ws.reloadTable()
+			})
 	})
 }
 
@@ -818,6 +826,7 @@ func (ws *workspace) rollbackEdits() {
 			}
 			ws.pendingDDL = nil
 			ws.refreshTxnBar()
+			ws.saveEditJournal() // clearDirty fired while the DDL was still queued
 		}, ws.window).Show()
 }
 

@@ -87,6 +87,15 @@ type queryPane struct {
 	pins      []pinnedResult
 	pinBar    *fyne.Container
 	activePin int // index of the pin currently shown in resultSlot (-1 = live)
+
+	// run-result tabs: every statement of the last Run keeps its grid alive and
+	// switchable (Run All used to keep only the last statement's result). The
+	// switcher bar shows from the second tab on; a fresh Run resets the set,
+	// while a retry of statement i replaces that tab in place.
+	resultTabs []*queryResultTab
+	resultSel  int // tab currently shown in resultSlot (-1 = none)
+	resultStmt int // statement index of the newest tab (-1 = none yet)
+	resultBar  *fyne.Container
 	// find box + counter for in-result search on this pane's result grid.
 	findEntry   *gridSearchEntry
 	findCounter *widget.Label
@@ -102,10 +111,13 @@ type queryPane struct {
 	autoWordLen  int  // rune length of the word being replaced
 	autoGen      int  // debounce/race guard
 	autoSuppress bool // set while inserting a completion (no re-trigger)
+	// autoTimer is the pending debounce timer. FQ-10: keeping the handle lets
+	// scheduleAutoComplete cancel the previous tick instead of stacking timers.
+	autoTimer *time.Timer
 }
 
 func newQueryPane(w fyne.Window, c Connection, sess db.Session, side *sidebar) *queryPane {
-	qp := &queryPane{window: w, conn: c, sess: sess, side: side}
+	qp := &queryPane{window: w, conn: c, sess: sess, side: side, resultSel: -1, resultStmt: -1}
 	qp.ExtendBaseWidget(qp)
 	return qp
 }
@@ -223,6 +235,11 @@ func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	qp.pinBar = container.NewHBox()
 	qp.pinBar.Hide()
 
+	// run-result tab strip: one chip per statement result of the last Run,
+	// shown only from the second result on (see renderResultBar).
+	qp.resultBar = container.NewHBox()
+	qp.resultBar.Hide()
+
 	// search bar sits just above the result grid
 	qp.searchWrap = container.NewBorder(nil, nil, nil, nil, findBox)
 	noResult := widget.NewLabelWithStyle("写点 SQL，然后点 Run Current 或按 Ctrl+Enter 执行", fyne.TextAlignCenter, fyne.TextStyle{})
@@ -234,7 +251,7 @@ func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	// bar below it. A Border centre stretches the grid to fill the trailing half
 	// of the split, so there is no dead space underneath the results.
 	resultPane := container.NewBorder(
-		container.NewVBox(qp.pinBar, qp.searchWrap), qp.status, nil, nil,
+		container.NewVBox(qp.resultBar, qp.pinBar, qp.searchWrap), qp.status, nil, nil,
 		container.NewStack(qp.resultSlot, qp.noResult))
 
 	// Editor (top) and result (bottom) share one draggable split, so the divider
@@ -366,6 +383,118 @@ func cloneTableData(d *TableData) *TableData {
 		c.Rows = append(c.Rows, append([]*string(nil), r...))
 	}
 	return c
+}
+
+// ---- run-result tabs --------------------------------------------------------
+
+// queryResultTab is one statement result kept switchable above the grid. Unlike
+// a pin it is not a snapshot: the tab holds the very grid the statement streamed
+// into, so switching back to it shows the live widget with its find state,
+// selection and row count intact.
+type queryResultTab struct {
+	title  string     // magic "-- name:" label or "stmt N"
+	stmt   string     // one-line SQL for debugging/tests
+	grid   *dataTable // the grid that landed in resultSlot when the result arrived
+	timer  string     // elapsed text restored when this tab is selected
+	status string     // result-status line restored when this tab is selected
+}
+
+// resetResultTabs drops the previous run's tabs. Only a fresh user-initiated
+// Run (runChain) calls this — timeout retries go through runChainAt directly
+// and must keep the earlier statements' tabs.
+func (qp *queryPane) resetResultTabs() {
+	qp.resultTabs = nil
+	qp.resultSel = -1
+	qp.resultStmt = -1
+	qp.renderResultBar()
+}
+
+// recordResultTab files a statement's result grid into the tab strip and
+// selects it (results land sequentially, so the newest one is the one running),
+// returning the tab so the statement's completion callback can store its chrome
+// meta on its OWN tab. A result for the same statement index as the newest tab
+// supersedes it — that is a retry replacing a partial streaming grid.
+func (qp *queryPane) recordResultTab(i int, label, stmt string, g *dataTable) *queryResultTab {
+	if g == nil {
+		return nil
+	}
+	title := label
+	if title == "" {
+		title = fmt.Sprintf("stmt %d", i+1)
+	}
+	tab := &queryResultTab{title: title, stmt: oneLine(stmt, 80), grid: g}
+	if i >= 0 && i == qp.resultStmt && len(qp.resultTabs) > 0 {
+		qp.resultTabs[len(qp.resultTabs)-1] = tab
+	} else {
+		qp.resultTabs = append(qp.resultTabs, tab)
+		qp.resultStmt = i
+	}
+	qp.resultSel = len(qp.resultTabs) - 1
+	qp.renderResultBar()
+	return tab
+}
+
+// setMeta stores the finished statement's timer/status text on its own tab so
+// switching back to it restores the chrome. The pointer — NOT the currently
+// selected tab — is the write target: the user can switch to another result's
+// chip while a slow statement is still running, and writing through resultSel
+// would paste this statement's duration onto the one they are looking at.
+func (t *queryResultTab) setMeta(timer, status string) {
+	if t == nil {
+		return
+	}
+	t.timer = timer
+	t.status = status
+}
+
+// showResultTab swaps the result slot to tab i's grid and restores its chrome.
+func (qp *queryPane) showResultTab(i int) {
+	if i < 0 || i >= len(qp.resultTabs) {
+		return
+	}
+	t := qp.resultTabs[i]
+	qp.resultSel = i
+	qp.activePin = -1 // a run-result tab is a live view, not a pinned one
+	qp.resultSlot.Objects = []fyne.CanvasObject{t.grid}
+	qp.resultSlot.Refresh()
+	qp.bindFind(t.grid)
+	qp.updateResultChrome()
+	if t.timer != "" {
+		qp.timer.Text = t.timer
+		qp.timer.Color = pal().statusFG
+		qp.timer.Refresh()
+	}
+	if t.status != "" {
+		qp.status.setQueryInfo(t.status)
+	}
+	qp.renderResultBar()
+}
+
+// renderResultBar rebuilds the run-result chip row. It stays hidden while
+// fewer than two results are held: a single result needs no switcher (its
+// magic name already shows in the status line).
+func (qp *queryPane) renderResultBar() {
+	if qp.resultBar == nil {
+		return
+	}
+	qp.resultBar.Objects = qp.resultBar.Objects[:0]
+	if len(qp.resultTabs) < 2 {
+		qp.resultBar.Hide()
+		qp.resultBar.Refresh()
+		return
+	}
+	qp.resultBar.Show()
+	for j, t := range qp.resultTabs {
+		j, t := j, t
+		title := t.title
+		if j == qp.resultSel {
+			title = "▸ " + title
+		}
+		chip := newFlatButton(title)
+		chip.onTap = func() { qp.showResultTab(j) }
+		qp.resultBar.Objects = append(qp.resultBar.Objects, chip, spacerW(6))
+	}
+	qp.resultBar.Refresh()
 }
 
 // updateResultChrome shows the "run a query" hint (and hides the result search
@@ -548,8 +677,8 @@ func (qp *queryPane) runAll() {
 // runChain walks the statements, prompting for any query-parameter values,
 // sending each to the session and stopping on the first failure.
 func (qp *queryPane) runChain(stmts []string) {
-	qp.running = true
-	qp.runBtn.setLabel("Cancel")
+	qp.beginRun()
+	qp.resetResultTabs() // a fresh run starts a new tab set
 	qp.runChainAt(stmts, 0)
 }
 
@@ -578,9 +707,13 @@ func (qp *queryPane) runChainAt(stmts []string, i int) {
 // pane's grid and then continues (or stops) the chain.
 func (qp *queryPane) sendStatement(stmt string, all []string, i int) {
 	// Safe Mode gate (per the connection's level) before anything is sent;
-	// the actual send runs as the gate's continuation.
+	// the actual send runs as the gate's continuation. When the gate is
+	// declined or the password check fails, finishRun resets the run state
+	// so the panel does not stay stuck on "Cancel".
 	gateSafeMode(qp.window, qp.conn, stmt, func() {
 		qp.sendGated(stmt, all, i)
+	}, func() {
+		qp.finishRun()
 	})
 }
 
@@ -604,6 +737,12 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 	}
 
 	safeGo("query.run", func() {
+		// The grid is captured here, not re-read from resultSlot per batch: the
+		// user can switch to an older run-result tab (or a pin) while batches
+		// are still arriving, and the rows must land in the grid they were
+		// fetched for, not in whatever is on screen at the moment.
+		var g *dataTable
+		var tab *queryResultTab // this statement's own tab; its meta lands here
 		res, err := sess.Query(stmt, qp.rowLimit())
 		// Build an empty grid on the UI thread, then stream the rows in so a
 		// large result paints incrementally instead of freezing (TablePlus
@@ -628,10 +767,11 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 						qp.timer.Text = fmt.Sprintf("stmt %d failed, continuing…", i+1)
 						qp.timer.Refresh()
 						qp.logQuery("执行失败（继续）：%v", err)
-						qp.finishRun()
+						// 不调 finishRun：链还要继续，running 必须保持 true，
+						// 否则下一条语句执行期间面板可被再次点 Run 并发。
 						// 直接在 UI 线程 Show：Fyne 2.8 的 overlay/窗口操作不许离开主线程，
 						// 裸 goroutine 里的空 recover 还会把 panic 无声吞掉（绕过 crash.go 的全量记录）。
-						dialog.NewError(err, qp.window).Show()
+						dialog.NewError(friendlyErr(err), qp.window).Show()
 						qp.runChainAt(all, i+1)
 						return
 					}
@@ -639,7 +779,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 					qp.timer.Refresh()
 					qp.logQuery("执行失败：%v", err)
 					qp.finishRun()
-					dialog.NewError(err, qp.window).Show()
+					dialog.NewError(friendlyErr(err), qp.window).Show()
 				}
 				return
 			}
@@ -647,7 +787,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 			for _, c := range res.Columns {
 				cols = append(cols, ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable, Key: c.Key})
 			}
-			g := newDataTable(&TableData{Cols: cols, Fetched: 0, Total: -1, Approx: false}, qp.status)
+			g = newDataTable(&TableData{Cols: cols, Fetched: 0, Total: -1, Approx: false}, qp.status)
 			g.window = qp.window
 			g.tableName = "" // query results have no owning table
 			g.onPin = qp.pinResult
@@ -662,6 +802,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 			qp.bindFind(g)
 			qp.updateResultChrome()
 			qp.status.setQueryInfo(qp.resultStatusLine(label, len(cols), "执行中…"))
+			tab = qp.recordResultTab(i, label, stmt, g)
 		})
 		if err != nil {
 			return
@@ -685,7 +826,6 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 				if myGen != int(qp.runGen.Load()) {
 					return // a newer run superseded this one
 				}
-				g := qp.resultGrid()
 				if g == nil {
 					return
 				}
@@ -702,12 +842,15 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 				noun = "rows affected"
 			}
 			affected := max64(res.RowsAffected, int64(total))
-			qp.timer.Text = fmt.Sprintf("%d ms · %d %s", res.DurationMS, affected, noun)
+			timerText := fmt.Sprintf("%d ms · %d %s", res.DurationMS, affected, noun)
+			statusLine := qp.resultStatusLine(label, len(res.Columns),
+				truncationNote(fmt.Sprintf("%d %s", total, noun), res.Truncated))
+			qp.timer.Text = timerText
 			qp.timer.Color = pal().statusFG
 			qp.timer.Refresh()
 			qp.logQuery("完成：%d %s · %d ms", affected, noun, res.DurationMS)
-			qp.status.setQueryInfo(qp.resultStatusLine(label, len(res.Columns),
-				fmt.Sprintf("%d %s", total, noun)))
+			qp.status.setQueryInfo(statusLine)
+			tab.setMeta(timerText, statusLine)
 			if qp.side != nil {
 				qp.side.appendHistory(stmt)
 			}
@@ -726,6 +869,23 @@ func (qp *queryPane) finishRun() {
 	qp.runBtn.setLabel("Run Current")
 }
 
+// beginRun arms the run state (running flag + Cancel label) without resetting
+// the result tabs. Used by runChain (which also resets tabs separately) and by
+// the timeout-dialog retry/reconnect callbacks, where a statement is re-sent
+// under the same run and must not appear as a fresh run.
+func (qp *queryPane) beginRun() {
+	// FQ-02: a transparently rebuilt plugin session means the server
+	// connection was re-opened — transactions, temp tables and session
+	// variables from earlier statements are gone. Say so once
+	// (acknowledge-on-read), right where the next statement is about to run.
+	if o, ok := db.AsRebuildObserver(qp.session()); ok && o.TakeRebuilt() {
+		qp.logQuery("插件进程已重建：连接已重新打开，此前的事务/临时表/会话变量已丢失")
+		qp.status.setQueryInfo("⚠ 插件进程已重建——服务器端会话状态已丢失")
+	}
+	qp.running = true
+	qp.runBtn.setLabel("Cancel")
+}
+
 // streamBatch is how many rows the streaming path asks for per frame.
 const streamBatch = 500
 
@@ -734,6 +894,7 @@ const streamBatch = 500
 type streamState struct {
 	started bool
 	g       *dataTable
+	tab     *queryResultTab // this statement's own tab; its meta lands here
 	rows    int64
 }
 
@@ -757,7 +918,7 @@ func (qp *queryPane) runStreaming(st db.Streamer, stmt, label string, all []stri
 				if myGen != int(qp.runGen.Load()) {
 					return
 				}
-				if g := qp.streamGrid(state, pcols, label); g != nil {
+				if g := qp.streamGrid(state, pcols, label, i, stmt); g != nil {
 					g.appendRows(rows)
 					state.rows = seen
 					qp.status.setRows(g.data.Fetched, int(seen), false)
@@ -770,6 +931,12 @@ func (qp *queryPane) runStreaming(st db.Streamer, stmt, label string, all []stri
 		if res.DurationMS == 0 {
 			res.DurationMS = time.Since(start).Milliseconds()
 		}
+		// The host's stream path returns no aggregate, so the flag has to be
+		// inferred: an overshooting frame (more rows than the pane's limit
+		// arrived in one batch) proves truncation. Exactly `limit` rows is
+		// ambiguous — the stream stops either way — so it stays unclaimed
+		// rather than inventing a flag.
+		res.Truncated = seen > int64(limit)
 		safeDo(func() {
 			if myGen != int(qp.runGen.Load()) {
 				return
@@ -781,7 +948,7 @@ func (qp *queryPane) runStreaming(st db.Streamer, stmt, label string, all []stri
 
 // streamGrid lazily builds the result grid on the first emitted frame (so the
 // column metadata arrives with the data) and returns it for appending.
-func (qp *queryPane) streamGrid(state *streamState, pcols []proto.ColumnInfo, label string) *dataTable {
+func (qp *queryPane) streamGrid(state *streamState, pcols []proto.ColumnInfo, label string, i int, stmt string) *dataTable {
 	if state.started {
 		return state.g
 	}
@@ -805,6 +972,7 @@ func (qp *queryPane) streamGrid(state *streamState, pcols []proto.ColumnInfo, la
 	qp.bindFind(g)
 	qp.updateResultChrome()
 	qp.status.setQueryInfo(qp.resultStatusLine(label, len(cols), "执行中…"))
+	state.tab = qp.recordResultTab(i, label, stmt, g)
 	state.g = g
 	return g
 }
@@ -830,14 +998,14 @@ func (qp *queryPane) finishStream(state *streamState, res proto.QueryResult, err
 				qp.logQuery("执行失败（继续）：%v", err)
 				// 直接在 UI 线程 Show：Fyne 2.8 的 overlay/窗口操作不许离开主线程，
 				// 裸 goroutine 里的空 recover 还会把 panic 无声吞掉（绕过 crash.go 的全量记录）。
-				dialog.NewError(err, qp.window).Show()
+				dialog.NewError(friendlyErr(err), qp.window).Show()
 				qp.runChainAt(all, i+1)
 				return
 			}
 			qp.timer.Text = "error"
 			qp.timer.Refresh()
 			qp.logQuery("执行失败：%v", err)
-			dialog.NewError(err, qp.window).Show()
+			dialog.NewError(friendlyErr(err), qp.window).Show()
 		}
 		qp.finishRun()
 		return
@@ -854,6 +1022,7 @@ func (qp *queryPane) finishStream(state *streamState, res proto.QueryResult, err
 		qp.resultSlot.Refresh()
 		qp.bindFind(g)
 		qp.updateResultChrome()
+		state.tab = qp.recordResultTab(i, label, stmt, g)
 		state.g = g
 		state.started = true
 	}
@@ -864,12 +1033,15 @@ func (qp *queryPane) finishStream(state *streamState, res proto.QueryResult, err
 		noun = "rows affected"
 	}
 	affected := max64(res.RowsAffected, total)
-	qp.timer.Text = fmt.Sprintf("%d ms · %d %s", res.DurationMS, affected, noun)
+	timerText := fmt.Sprintf("%d ms · %d %s", res.DurationMS, affected, noun)
+	statusLine := qp.resultStatusLine(label, len(state.g.data.Cols),
+		truncationNote(fmt.Sprintf("%d %s", total, noun), res.Truncated))
+	qp.timer.Text = timerText
 	qp.timer.Color = pal().statusFG
 	qp.timer.Refresh()
 	qp.logQuery("完成：%d %s · %d ms", affected, noun, res.DurationMS)
-	qp.status.setQueryInfo(qp.resultStatusLine(label, len(state.g.data.Cols),
-		fmt.Sprintf("%d %s", total, noun)))
+	qp.status.setQueryInfo(statusLine)
+	state.tab.setMeta(timerText, statusLine)
 	if qp.side != nil {
 		qp.side.appendHistory(stmt)
 	}
@@ -1023,6 +1195,7 @@ func (qp *queryPane) showTimeoutDialog(stmt string, all []string, i int) {
 	var d *dialog.CustomDialog
 	retry := widget.NewButton("等待并重试", func() {
 		d.Hide()
+		qp.beginRun() // 重发同一条语句：恢复 running，避免重试期间再点 Run 并发
 		qp.sendStatement(stmt, all, i)
 	})
 	reconnect := widget.NewButton("重连并重试", func() {
@@ -1032,6 +1205,7 @@ func (qp *queryPane) showTimeoutDialog(stmt string, all []string, i int) {
 		}
 		qp.onReconnect(func(sess db.Session) {
 			if sess != nil {
+				qp.beginRun() // 会话就绪后立即武装，不等 sendStatement 内部
 				qp.sendStatement(stmt, all, i)
 			}
 		})
@@ -1054,6 +1228,17 @@ func (qp *queryPane) resultStatusLine(label string, cols int, detail string) str
 		name = "Query result"
 	}
 	return fmt.Sprintf("%s — %d columns · %s", name, cols, detail)
+}
+
+// truncationNote flags a result that is a window rather than the whole set. A
+// capped read used to pose its first page as the complete result; the flag
+// (set by sqlkit.ReadRows, inferred on the stream path) is what lets the status
+// line say so instead.
+func truncationNote(detail string, truncated bool) string {
+	if !truncated {
+		return detail
+	}
+	return detail + " · truncated"
 }
 
 // promptParams opens the Variables dialog (TablePlus) for the named
@@ -1087,7 +1272,10 @@ func (qp *queryPane) promptParams(names []string, onApply func(map[string]string
 		}
 	})
 	apply.Importance = widget.HighImportance
-	cancel := widget.NewButton("Cancel", func() { dlg.Hide() })
+	cancel := widget.NewButton("Cancel", func() {
+		dlg.Hide()
+		qp.finishRun() // Cancel 放弃本次链：不调会卡在 "Cancel"（与 gateSafeMode 拒绝同理）
+	})
 
 	body := container.NewBorder(
 		widget.NewLabel("Query parameters — values are inserted as written:"),

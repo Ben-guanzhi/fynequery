@@ -98,6 +98,19 @@ type Canceller interface {
 	KillQuery() error
 }
 
+// RebuildObserver is optionally implemented by Session types whose backing
+// process or connection may be transparently rebuilt after a death (plugin
+// sessions): the rebuild re-opens the server connection, so any server-side
+// session state — manual transactions, temp tables, session variables,
+// prepared statements — is irreversibly gone. The UI checks it where the user
+// is about to rely on continuity and says so once.
+type RebuildObserver interface {
+	// TakeRebuilt reports whether the backing connection was rebuilt since
+	// the last call (or session creation) and clears the flag — the
+	// acknowledge-on-read shape, so a notice fires exactly once per rebuild.
+	TakeRebuilt() bool
+}
+
 // Transactional is optionally implemented by Session types that support a
 // manual transaction (TablePlus "Begin Transaction" mode). Begin starts a
 // transaction; subsequent Query/Browse/DML run inside it until Commit or
@@ -230,6 +243,16 @@ func Register(d Dialer) {
 	regMu.Lock()
 	defer regMu.Unlock()
 	drivers[d.Info().Code] = d
+}
+
+// Unregister removes a driver by its code. It is the inverse of Register and
+// is used when a plugin is withdrawn, so the registry can return to the state
+// it had before that plugin existed (a hot update / re-scan must be able to
+// undo a registration, not merely overwrite it).
+func Unregister(code string) {
+	regMu.Lock()
+	defer regMu.Unlock()
+	delete(drivers, code)
 }
 
 // Driver looks a driver up by code ("mysql", "postgres", ...).

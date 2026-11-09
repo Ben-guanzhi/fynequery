@@ -2,6 +2,7 @@ package proto
 
 import (
 	"testing"
+	"time"
 
 	"github.com/dbcore/dbcore/plugindriver"
 )
@@ -163,3 +164,28 @@ func TestCellConversionsKeepNullDistinct(t *testing.T) {
 }
 
 func strp(s string) *string { return &s }
+
+// The wire carries RFC3339-with-nanos; the grid shows local, human-readable
+// time. Both directions are pinned so a change to either side is visible —
+// sqlkit.cellText carries the same rule for the in-process driver.
+func TestCellTextRendersTimeForDisplay(t *testing.T) {
+	instant := time.Date(2026, 10, 24, 12, 0, 0, 123456789, time.UTC)
+
+	// A parseable wire value renders in local time with its fractional digits.
+	wire := plugindriver.CellPayload{Kind: "time", Time: "2026-10-24T12:00:00.123456789Z"}
+	want := instant.Local().Format("2006-01-02 15:04:05.999999999")
+	if got := CellText(wire); got != want {
+		t.Fatalf("CellText(time) = %q, want %q", got, want)
+	}
+	// Whole seconds drop the fractional tail.
+	wholeWire := plugindriver.CellPayload{Kind: "time", Time: "2026-10-24T12:00:00Z"}
+	wantWhole := instant.Truncate(time.Second).Local().Format("2006-01-02 15:04:05")
+	if got := CellText(wholeWire); got != wantWhole {
+		t.Fatalf("CellText(whole time) = %q, want %q", got, wantWhole)
+	}
+	// An unparseable value shows its raw text instead of an empty cell.
+	bad := plugindriver.CellPayload{Kind: "time", Time: "not-a-time"}
+	if got := CellText(bad); got != "not-a-time" {
+		t.Fatalf("CellText(bad time) = %q, want the raw wire text", got)
+	}
+}

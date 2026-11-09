@@ -48,6 +48,13 @@ const (
 	erdRowH   float32 = 16
 	erdGap    float32 = 48
 	erdMaxTb          = 60 // cap tables per diagram to keep the fetch bounded
+
+	// erLayoutSweeps is the fixed number of barycenter passes. Crossing
+	// minimization is NP-hard even to verify, so the heuristic is the point:
+	// a fixed bound keeps the layout deterministic (identical for any input
+	// order) and O(sweeps · edges) — convergence probing would trade that
+	// for nothing measurable at diagram scale.
+	erLayoutSweeps = 4
 )
 
 // erBoxSize returns the box dimensions for a table (title + one row per column).
@@ -92,13 +99,197 @@ func (ws *workspace) fetchERModel(sess db.Session, driver string) (*erModel, err
 	return m, nil
 }
 
-// layoutERModel assigns initial grid positions (3 tables per row).
+// layoutERModel assigns initial positions with the same left-to-right
+// layered + barycenter layout as TableProGo's erLayout.ts (ported, not
+// re-derived): a table's column is one past the deepest table it
+// references, so referenced tables sit left of their references; a
+// recursion guard makes circular FKs resolve instead of overflowing.
+// Within a column the order starts alphabetical and goes through a few
+// barycenter sweeps: each column reorders by the average row of its
+// neighbours in the adjacent column, which pulls connected tables level
+// with each other. Minimizing crossings is NP-hard even to check, so the
+// fixed sweep count is the point — determinism over optimality.
 func layoutERModel(m *erModel) {
+	if len(m.Tables) == 0 {
+		return
+	}
+	// Deterministic FK order first: the sweeps sum neighbour positions, so
+	// the sum must not depend on catalog row order. Full-key sort — the same
+	// discipline erLayout.ts applies to its edges.
+	sort.SliceStable(m.FKs, func(i, j int) bool {
+		a, b := m.FKs[i], m.FKs[j]
+		if a.From != b.From {
+			return a.From < b.From
+		}
+		if a.FromCol != b.FromCol {
+			return a.FromCol < b.FromCol
+		}
+		if a.To != b.To {
+			return a.To < b.To
+		}
+		return a.ToCol < b.ToCol
+	})
+
+	// name → table index for O(1) lookups.
+	idx := make(map[string]int, len(m.Tables))
 	for i := range m.Tables {
-		sz := erBoxSize(m.Tables[i])
-		m.Tables[i].Pos = fyne.NewPos(
-			erdGap+float32(i%3)*(erdBoxW+erdGap),
-			erdGap+float32(i/3)*(sz.Height+erdGap))
+		idx[m.Tables[i].Name] = i
+	}
+
+	// Layering: DAG longest path with a cycle guard (depth > 1000 or
+	// re-entering a node mid-computation resolves to level 0).
+	level := make(map[string]int, len(m.Tables))
+	visiting := make(map[string]bool, len(m.Tables))
+	var levelOf func(name string, depth int) int
+	levelOf = func(name string, depth int) int {
+		if depth > 1000 {
+			return 0
+		}
+		if l, ok := level[name]; ok {
+			return l
+		}
+		if visiting[name] {
+			return 0 // cycle: break it
+		}
+		visiting[name] = true
+		l := 0
+		for _, fk := range m.FKs {
+			if fk.From != name || fk.To == name {
+				continue
+			}
+			if _, ok := idx[fk.To]; !ok {
+				continue // cross-schema ref not in this diagram
+			}
+			if l2 := levelOf(fk.To, depth+1) + 1; l2 > l {
+				l = l2
+			}
+		}
+		visiting[name] = false
+		level[name] = l
+		return l
+	}
+	for _, t := range m.Tables {
+		levelOf(t.Name, 0)
+	}
+
+	maxLevel := 0
+	for _, t := range m.Tables {
+		if l := level[t.Name]; l > maxLevel {
+			maxLevel = l
+		}
+	}
+	columns := make([][]int, maxLevel+1) // per-column table indices, layout order
+	for i := range m.Tables {
+		columns[level[m.Tables[i].Name]] = append(columns[level[m.Tables[i].Name]], i)
+	}
+	// Alphabetical seed per column. Codepoint order, not localeCompare:
+	// byte-identical on every machine (the upstream TS version's ICU
+	// dependency is exactly the determinism hazard this port drops).
+	for _, col := range columns {
+		sort.SliceStable(col, func(a, b int) bool {
+			return m.Tables[col[a]].Name < m.Tables[col[b]].Name
+		})
+	}
+
+	// Undirected adjacency over the drawn edges (self-references add
+	// nothing to a layering).
+	neighbors := make(map[string][]string, len(m.Tables))
+	link := func(a, b string) {
+		neighbors[a] = append(neighbors[a], b)
+		neighbors[b] = append(neighbors[b], a)
+	}
+	for _, fk := range m.FKs {
+		if fk.From == fk.To {
+			continue
+		}
+		if _, ok := idx[fk.From]; !ok {
+			continue
+		}
+		if _, ok := idx[fk.To]; !ok {
+			continue
+		}
+		link(fk.From, fk.To)
+	}
+
+	// Barycenter sweeps: each pass walks the columns in one direction and
+	// reorders every column by its neighbours' average row in the adjacent
+	// one; alternating direction lets pulls from both sides settle.
+	order := make([][]string, len(columns))
+	for ci, col := range columns {
+		for _, ti := range col {
+			order[ci] = append(order[ci], m.Tables[ti].Name)
+		}
+	}
+	for sweep := 0; sweep < erLayoutSweeps; sweep++ {
+		forward := sweep%2 == 0
+		cols := make([]int, len(order))
+		for i := range cols {
+			cols[i] = i
+		}
+		if !forward {
+			for i, j := 0, len(cols)-1; i < j; i, j = i+1, j-1 {
+				cols[i], cols[j] = cols[j], cols[i]
+			}
+		}
+		for _, c := range cols {
+			adj := c - 1
+			if !forward {
+				adj = c + 1
+			}
+			if adj < 0 || adj >= len(order) || len(order[c]) < 2 {
+				continue
+			}
+			// Current rows of every table. Rebuilt per column: the sweeps
+			// mutate order in place, so later columns must see updates.
+			pos := make(map[string]int, len(m.Tables))
+			for _, col := range order {
+				for i, name := range col {
+					pos[name] = i
+				}
+			}
+			type entry struct {
+				name string
+				key  float64
+			}
+			entries := make([]entry, len(order[c]))
+			for i, name := range order[c] {
+				sum, count := 0, 0
+				for _, nb := range neighbors[name] {
+					if level[nb] == adj {
+						sum += pos[nb]
+						count++
+					}
+				}
+				// A table without neighbours in the adjacent column keeps
+				// its current slot as the sort key, so isolated tables do
+				// not drift.
+				key := float64(i)
+				if count > 0 {
+					key = float64(sum) / float64(count)
+				}
+				entries[i] = entry{name: name, key: key}
+			}
+			sort.SliceStable(entries, func(a, b int) bool {
+				if entries[a].key != entries[b].key {
+					return entries[a].key < entries[b].key
+				}
+				return entries[a].name < entries[b].name
+			})
+			for i := range entries {
+				order[c][i] = entries[i].name
+			}
+		}
+	}
+
+	// Position assignment: column-major, y accumulating per column.
+	for ci, col := range order {
+		y := erdGap
+		for _, name := range col {
+			t := &m.Tables[idx[name]]
+			sz := erBoxSize(*t)
+			t.Pos = fyne.NewPos(erdGap+float32(ci)*(erdBoxW+erdGap), y)
+			y += sz.Height + erdGap
+		}
 	}
 }
 

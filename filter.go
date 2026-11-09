@@ -14,6 +14,8 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
+
+	sqltext "github.com/dbcore/dbcore/sqltext"
 )
 
 var filterOperators = []string{
@@ -24,6 +26,14 @@ var filterOperators = []string{
 func (ws *workspace) showFilterDialog() {
 	if ws.tableName == "" {
 		showInfo(ws.window, "Filter", "Open a table first.")
+		return
+	}
+	// A filter is a WHERE clause, and only SQL drivers have one to offer: the
+	// apply path builds SELECT … WHERE … LIMIT statements, which a Redis
+	// session would parse as commands. Redis keys have no filter equivalent
+	// (the value pager has no predicate), so the sheet refuses to open here.
+	if !ws.pageSupported() {
+		showInfo(ws.window, "Filter", "此连接类型不支持筛选（WHERE 仅 SQL 引擎可用）。")
 		return
 	}
 	cols := ws.columnNames()
@@ -138,10 +148,16 @@ func (ws *workspace) applyFilter() {
 	if t == nil || t.name == "" {
 		return
 	}
-	t.filterSQL = ws.filterSQL // the filter lives on the open tab
+	// showFilterDialog refuses non-SQL drivers, so a filter cannot be set on
+	// them; clearing one left over from a previous connection still has to
+	// fall back to the plain browse rather than gotoOffset's SQL path.
+	t.filterSQL = ws.filterSQL
 	ws.refreshFilterChip()
 	if strings.TrimSpace(ws.filterSQL) == "" && !ws.pageSupported() {
 		ws.reloadActiveData()
+		return
+	}
+	if !ws.pageSupported() {
 		return
 	}
 	t.offset = -1 // force a reload even when the target offset is 0
@@ -150,7 +166,7 @@ func (ws *workspace) applyFilter() {
 
 // buildCondition renders one column/operator/value triple as SQL. The column
 // is quoted for the driver; string values are single-quoted and escaped while
-// numeric values stay bare; IN wraps its list in parentheses.
+// numeric values stay bare; IN renders each list element as a literal.
 func (ws *workspace) buildCondition(col, op, val string) string {
 	if col == "" || op == "" {
 		return ""
@@ -164,10 +180,11 @@ func (ws *workspace) buildCondition(col, op, val string) string {
 		if v == "" {
 			return ""
 		}
-		if !strings.HasPrefix(v, "(") {
-			v = "(" + v + ")"
+		list := inListLiteral(ws.conn.Driver, v)
+		if list == "" {
+			return ""
 		}
-		return q + " IN " + v
+		return q + " IN " + list
 	}
 	v := strings.TrimSpace(val)
 	if v == "" {
@@ -176,5 +193,43 @@ func (ws *workspace) buildCondition(col, op, val string) string {
 	if _, err := strconv.ParseFloat(v, 64); err == nil && !strings.Contains(strings.ToUpper(op), "LIKE") {
 		return q + " " + op + " " + v
 	}
-	return q + " " + op + " '" + strings.ReplaceAll(v, "'", "''") + "'"
+	// Route through the kernel's dialect-aware literal quoting: MySQL/MariaDB
+	// run in backslash-escape mode, so a literal backslash must be doubled or
+	// it escapes the closing quote and the filter runs into the rest of the
+	// statement. The hand-rolled doubling below only handled quotes.
+	return q + " " + op + " " + sqltext.QuotedLiteral(ws.conn.Driver, v)
+}
+
+// inListLiteral renders a comma-separated IN list as "(a, b, c)", quoting each
+// element as a literal (numbers stay bare). An outer pair of parentheses is
+// accepted as a convenience, but the elements inside are still quoted
+// individually — the old branch pasted the raw input in after merely wrapping
+// it, which let a value such as `1) OR (1=1` splice a new predicate into the
+// WHERE clause. A raw subquery is deliberately not passed through; the raw
+// WHERE box is the documented escape hatch for advanced SQL.
+func inListLiteral(driver, val string) string {
+	inner := strings.TrimSpace(val)
+	if strings.HasPrefix(inner, "(") && strings.HasSuffix(inner, ")") && len(inner) >= 2 {
+		inner = strings.TrimSpace(inner[1 : len(inner)-1])
+	}
+	if inner == "" {
+		return ""
+	}
+	parts := strings.Split(inner, ",")
+	rendered := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, err := strconv.ParseFloat(p, 64); err == nil {
+			rendered = append(rendered, p)
+			continue
+		}
+		rendered = append(rendered, sqltext.QuotedLiteral(driver, p))
+	}
+	if len(rendered) == 0 {
+		return ""
+	}
+	return "(" + strings.Join(rendered, ",") + ")"
 }

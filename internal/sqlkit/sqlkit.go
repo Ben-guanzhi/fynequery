@@ -193,7 +193,9 @@ func StreamRunCtx(q Querier, ctx context.Context, sqlText string, batch int, emi
 }
 
 // ReadRows drains rows into a QueryResult. It is exported because metadata
-// queries in drivers reuse the same formatting.
+// queries in drivers reuse the same formatting. When the row count reaches
+// maxRows the result carries at most maxRows rows and sets Truncated, so a
+// caller never mistakes the capped window for the whole result.
 func ReadRows(rows *sql.Rows, maxRows int, start time.Time) (proto.QueryResult, error) {
 	colNames, err := rows.Columns()
 	if err != nil {
@@ -225,6 +227,13 @@ func ReadRows(rows *sql.Rows, maxRows int, start time.Time) (proto.QueryResult, 
 		}
 		res.Rows = append(res.Rows, row)
 		if len(res.Rows) >= maxRows {
+			// Probe for one more row: if it exists, this result is a window
+			// rather than the full set. Previously the loop broke here and
+			// left res.Truncated false, so the query editor and plugin
+			// Browse both showed the first page as the complete result.
+			if rows.Next() {
+				res.Truncated = true
+			}
 			break
 		}
 	}
@@ -256,10 +265,17 @@ func FormatValue(v interface{}) *string {
 		s := x.Format("2006-01-02 15:04:05.999999999")
 		return &s
 	case float64:
-		s := strconv.FormatFloat(x, 'g', -1, 64)
+		// 'f' not 'g' for the scalar/version rendering this feeds (plugin
+		// version strings, single-value reads): a million should not read
+		// like a formula. The grid is NOT on this path — plugin stream cells
+		// render through proto.CellText, which keeps 'g'; the two spellings
+		// coexist by design, and aligning them is a deliberate display change
+		// (CellText feeds every driver's grid), not a drive-by. -1 precision
+		// keeps every exact digit a float64 carries.
+		s := strconv.FormatFloat(x, 'f', -1, 64)
 		return &s
 	case float32:
-		s := strconv.FormatFloat(float64(x), 'g', -1, 32)
+		s := strconv.FormatFloat(float64(x), 'f', -1, 32)
 		return &s
 	case bool:
 		s := strconv.FormatBool(x)

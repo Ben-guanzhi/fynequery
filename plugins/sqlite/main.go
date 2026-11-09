@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strings"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
@@ -40,15 +41,57 @@ func (d sqliteDialect) Open(p proto.ConnectParams) (*sql.DB, string, error) {
 	if dsn != ":memory:" && !strings.HasPrefix(dsn, "file:") {
 		dsn = "file:" + dsn + "?mode=rwc" // create the file when absent
 	}
+	dsn = addSQLitePragmas(dsn)
 
 	handle, version, err := pluginkit.OpenVerify("sqlite", dsn, "SELECT sqlite_version()")
 	if err != nil {
 		return nil, "", fmt.Errorf("sqlite %s: %w", path, err)
 	}
+	// `:memory:` is a per-connection scratch database: a pool of >1 would let
+	// concurrent statements land on distinct physical handles, each seeing its
+	// own empty database (a table created moments earlier would vanish). Pin the
+	// pool to one connection, matching the kernel driver and TableProGo.
+	if dsn == ":memory:" {
+		handle.SetMaxOpenConns(1)
+		handle.SetMaxIdleConns(1)
+	}
 	if version != "" {
 		version = "SQLite " + version
 	}
 	return handle, version, nil
+}
+
+// addSQLitePragmas appends the pool-wide pragmas a file database needs, as
+// modernc `_pragma` query parameters — the driver runs them on EVERY physical
+// connection the pool opens, not just the first one. Without them a file
+// database runs the rollback journal (slower, holds exclusive locks longer)
+// and busy_timeout=0 (a concurrent writer fails with SQLITE_BUSY immediately
+// instead of waiting). :memory: needs none, and a DSN that already carries
+// pragmas is left untouched so an advanced user's overrides win.
+func addSQLitePragmas(dsn string) string {
+	if dsn == ":memory:" || strings.Contains(dsn, "_pragma=") {
+		return dsn
+	}
+	pragmas := []string{
+		"journal_mode(WAL)",
+		"busy_timeout(5000)",
+		"synchronous(NORMAL)",
+	}
+	sep := "&"
+	if !strings.Contains(dsn, "?") {
+		sep = "?"
+	}
+	// Escape each pragma the way modernc parses them (same shape the
+	// dbcore/sqlite kernel DSN builder uses).
+	for i, pragma := range pragmas {
+		if i == 0 {
+			dsn += sep
+		} else {
+			dsn += "&"
+		}
+		dsn += "_pragma=" + url.QueryEscape(pragma)
+	}
+	return dsn
 }
 
 func (sqliteDialect) ListTables(db *sql.DB) ([]proto.ObjectInfo, error) {

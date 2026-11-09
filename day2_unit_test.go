@@ -193,6 +193,26 @@ func TestBuildPreviewSQL(t *testing.T) {
 
 // --- Query parameters ------------------------------------------------------
 
+// Commit omits DEFAULT-sentinel columns on INSERT (buildInsert), so the
+// preview must not show a DEFAULT keyword the run would never send.
+func TestBuildPreviewSQLInsertDefaultOmitted(t *testing.T) {
+	mk := func(s string) *string { return &s }
+	inserts := []map[string]*string{
+		{"name": mk("zoe"), "level": mk(db.DefaultMarker)},
+		{"name": mk(db.DefaultMarker)}, // every column DEFAULT → nothing to send
+	}
+	out := buildPreviewSQL("users", "mysql", nil, nil, inserts)
+	if strings.Contains(out, "INSERT INTO `users` (`level`") {
+		t.Errorf("DEFAULT-sentinel column must be omitted from INSERT preview:\n%s", out)
+	}
+	if !strings.Contains(out, "INSERT INTO `users` (`name`) VALUES ('zoe')") {
+		t.Errorf("plain column should still be sent:\n%s", out)
+	}
+	if !strings.Contains(out, "-- INSERT skipped") {
+		t.Errorf("all-DEFAULT insert should be annotated instead of sent:\n%s", out)
+	}
+}
+
 func TestExtractParams(t *testing.T) {
 	got := extractParams("SELECT * FROM t WHERE a = :x AND b = ${y} AND c = ?")
 	want := []string{"x", "y", "?1"}

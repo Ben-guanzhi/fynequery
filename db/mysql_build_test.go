@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/dbcore/dbcore/sqltext"
 )
 
 func strPtr(s string) *string { return &s }
@@ -168,5 +170,27 @@ func TestBuildInsertNoValues(t *testing.T) {
 	values = map[string]*string{}
 	if _, _, err := buildInsert("t", values); err == nil {
 		t.Fatal("expected error for empty insert")
+	}
+}
+
+// TestMySQLQuoteIdentFallbackStaysNative pins the MySQL-only quoter's fallback:
+// names QuoteIdent refuses must still come out as a *native* identifier. The
+// client used to hand-roll the ANSI double-quote fallback here, which MySQL
+// parses as a string literal.
+func TestMySQLQuoteIdentFallbackStaysNative(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	for _, c := range []struct{ name, want string }{
+		{"users", "`users`"},
+		{"a`b", "`a``b`"},
+		{long, "`" + long + "`"},
+		{"a\x00b", "`a\x00b`"},
+		{"", "``"},
+	} {
+		if got := quoteIdent(c.name); got != c.want {
+			t.Errorf("quoteIdent(%q) = %q, want %q", c.name, got, c.want)
+		}
+		if got, loose := quoteIdent(c.name), sqltext.QuoteIdentLoose("mysql", c.name); got != loose {
+			t.Errorf("quoteIdent(%q) = %q, want sqltext %q", c.name, got, loose)
+		}
 	}
 }

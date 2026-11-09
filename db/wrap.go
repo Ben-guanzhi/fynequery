@@ -60,6 +60,10 @@ func AsValuePager(s Session) (ValuePager, bool) { return asCapability[ValuePager
 // AsCanceller reports whether s can cancel a running query.
 func AsCanceller(s Session) (Canceller, bool) { return asCapability[Canceller](s) }
 
+// AsRebuildObserver reports whether s can disclose a transparent rebuild of
+// its backing process/connection (server-side session state lost on rebuild).
+func AsRebuildObserver(s Session) (RebuildObserver, bool) { return asCapability[RebuildObserver](s) }
+
 // AsDatabaseCreator reports whether s can create a database.
 func AsDatabaseCreator(s Session) (DatabaseCreator, bool) { return asCapability[DatabaseCreator](s) }
 
@@ -127,6 +131,13 @@ func (w *capabilityWrapper) KillQuery() error {
 		return c.KillQuery()
 	}
 	return errUnsupported("kill query")
+}
+
+func (w *capabilityWrapper) TakeRebuilt() bool {
+	if r, ok := w.Session.(RebuildObserver); ok {
+		return r.TakeRebuilt()
+	}
+	return false // a plain session is never rebuilt behind the caller's back
 }
 
 func (w *capabilityWrapper) SetValue(edit ValueEdit) error {

@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"fynequery/db"
 )
 
 // writeConns persists conns to the (test-isolated) config dir.
@@ -162,5 +164,85 @@ func TestSaveConnectionsKeepsBackup(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"v1"`) || strings.Contains(string(raw), `"v2"`) {
 		t.Fatalf("backup does not hold the previous generation: %s", raw)
+	}
+}
+
+// The backup is for recovering the connection LIST, not secrets: a plaintext
+// password in the previous generation must not survive into .bak. Without
+// this, a user who saves with a password and later enables the keyring keeps
+// a plaintext snapshot on disk — the exact thing the JSON copy promises not
+// to hold (SEC-04).
+func TestSaveConnectionsBackupRedactsPasswords(t *testing.T) {
+	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
+	writeConns(t, Connection{Name: "plain", Driver: "mysql", Password: "s3cret"})
+
+	if err := saveConnections([]Connection{{Name: "next", Driver: "mysql"}}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(connectionsPath() + ".bak")
+	if err != nil {
+		t.Fatalf("no backup written: %v", err)
+	}
+	if strings.Contains(string(raw), "s3cret") {
+		t.Fatalf("backup leaked the plaintext password: %s", raw)
+	}
+	// The rest of the entry survives, so the list is still recoverable.
+	if !strings.Contains(string(raw), `"plain"`) || !strings.Contains(string(raw), `"mysql"`) {
+		t.Fatalf("backup lost the connection entry: %s", raw)
+	}
+}
+
+// A backup whose previous generation cannot be parsed is not written at all:
+// it could not be restored, and copying it verbatim is the leak path above.
+func TestSaveConnectionsSkipsUnparseableBackup(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FYNEQUERY_CONFIG_DIR", dir)
+	if err := os.WriteFile(connectionsPath(), []byte(`{"not":"an array","password":"s3cret"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConnections([]Connection{{Name: "next", Driver: "mysql"}}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, err := os.Stat(connectionsPath() + ".bak"); !os.IsNotExist(err) {
+		t.Fatalf("an unparseable previous generation must not be backed up (err=%v)", err)
+	}
+}
+
+// Three secrets live in a connection entry, not one: the database password,
+// the SSH password and the SSH key passphrase. All three must be cleared from
+// the backup — a bastion credential is as sensitive as the database one.
+func TestSaveConnectionsBackupRedactsEverySecret(t *testing.T) {
+	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
+	writeConns(t, Connection{
+		Name:     "tunneled",
+		Driver:   "mysql",
+		Password: "db-secret",
+		SSH: db.SSHConfig{
+			Enabled:       true,
+			Host:          "bastion",
+			User:          "deploy",
+			Password:      "ssh-secret",
+			KeyPath:       "/keys/id_ed25519",
+			KeyPassphrase: "key-secret",
+		},
+	})
+
+	if err := saveConnections([]Connection{{Name: "next", Driver: "mysql"}}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(connectionsPath() + ".bak")
+	if err != nil {
+		t.Fatalf("no backup written: %v", err)
+	}
+	for _, secret := range []string{"db-secret", "ssh-secret", "key-secret"} {
+		if strings.Contains(string(raw), secret) {
+			t.Errorf("backup leaked %q: %s", secret, raw)
+		}
+	}
+	// Non-secret connection identity survives, so the list is recoverable.
+	for _, kept := range []string{`"tunneled"`, `"bastion"`, `"deploy"`, `"/keys/id_ed25519"`} {
+		if !strings.Contains(string(raw), kept) {
+			t.Errorf("backup lost %s: %s", kept, raw)
+		}
 	}
 }

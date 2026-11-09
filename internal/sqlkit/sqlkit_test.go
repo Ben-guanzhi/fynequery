@@ -103,6 +103,11 @@ func TestRunSelect(t *testing.T) {
 	if len(res.Rows) != 2 || res.Rows[1][0].Int != 2 {
 		t.Fatalf("capped rows = %+v, want ids 1..2", res.Rows)
 	}
+	// The cap is a window, not the full result: Run must carry that through
+	// (Run -> RunCtx -> ReadRows), since the UI is the consumer.
+	if !res.Truncated {
+		t.Error("Run(maxRows=2) left Truncated false over a 3-row table")
+	}
 
 	// maxRows <= 0 falls back to the 1000 default (all 3 rows come back).
 	res, err = Run(h, "SELECT id FROM t", 0)
@@ -149,6 +154,65 @@ func TestReadRowsKinds(t *testing.T) {
 	}
 	if res.Rows[0][1].Kind != "null" || res.Rows[0][2].Kind != "null" {
 		t.Fatalf("NULL cells = %+v / %+v, want null", res.Rows[0][1], res.Rows[0][2])
+	}
+}
+
+func TestReadRowsSetsTruncated(t *testing.T) {
+	h := testDB(t)
+	// 3 rows exist; add 3 more so the cap cases have something to cap.
+	if _, err := h.Exec(`INSERT INTO t (id, v, f) VALUES (4,'d',4.5),(5,'e',5.5),(6,'f',6.5)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// 6 rows at maxRows=4: a window, not the whole result.
+	rows, err := h.Query("SELECT id FROM t ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ReadRows(rows, 4, time.Now())
+	rows.Close()
+	if err != nil {
+		t.Fatalf("ReadRows: %v", err)
+	}
+	if len(res.Rows) != 4 {
+		t.Fatalf("rows = %d, want 4", len(res.Rows))
+	}
+	if !res.Truncated {
+		t.Error("Truncated = false for a 4-of-6-row cap; the grid would pose the window as the full result")
+	}
+
+	// 6 rows at maxRows=10: complete, never a window.
+	rows2, err := h.Query("SELECT id FROM t ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res2, err := ReadRows(rows2, 10, time.Now())
+	rows2.Close()
+	if err != nil {
+		t.Fatalf("ReadRows: %v", err)
+	}
+	if len(res2.Rows) != 6 {
+		t.Fatalf("rows = %d, want 6", len(res2.Rows))
+	}
+	if res2.Truncated {
+		t.Error("Truncated = true for a complete 6-row result")
+	}
+
+	// Exactly maxRows rows: complete, not a window.
+	rows3, err := h.Query("SELECT id FROM t ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res3, err := ReadRows(rows3, 6, time.Now())
+	rows3.Close()
+	if err != nil {
+		t.Fatalf("ReadRows: %v", err)
+	}
+	if len(res3.Rows) != 6 {
+		t.Fatalf("rows = %d, want 6", len(res3.Rows))
+	}
+	if res3.Truncated {
+		t.Error("Truncated = true when the result has exactly maxRows rows and no more")
 	}
 }
 
@@ -274,6 +338,14 @@ func TestFormatValue(t *testing.T) {
 		}
 		if got := FormatValue(f32); *got != "1.5" {
 			t.Fatalf("float32 → %v", *got)
+		}
+		// 'f' not 'g': a million is "1000000", not "1e+06" — the fixed-point
+		// spelling the grid shows (sqltui's FormatValue matches, wave 43.1).
+		if got := FormatValue(1e6); *got != "1000000" {
+			t.Fatalf("float64 1e6 → %v, want 1000000 without exponent", *got)
+		}
+		if got := FormatValue(0.000001); *got != "0.000001" {
+			t.Fatalf("float64 1e-6 → %v, want 0.000001 without exponent", *got)
 		}
 	})
 	t.Run("bool", func(t *testing.T) {

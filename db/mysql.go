@@ -23,6 +23,15 @@ import (
 
 func init() { Register(mysqlDialer{}) }
 
+const (
+	// mysqlConnMaxLifetime 是池中单个物理连接的最长存活时间；到期后即使仍被
+	// 引用也会被关闭并重建，避免服务端 socket / 会话状态无限期驻留。
+	mysqlConnMaxLifetime = 30 * time.Minute
+	// mysqlConnMaxIdleTime 是空闲连接的最长保留时间；超过后被池关闭，服务端
+	// 侧的空闲连接随之释放。
+	mysqlConnMaxIdleTime = 5 * time.Minute
+)
+
 type mysqlDialer struct{}
 
 func (mysqlDialer) Info() DriverInfo {
@@ -62,6 +71,18 @@ func (mysqlDialer) Connect(p proto.ConnectParams) (Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mysql: %w", err)
 	}
+	// Admission control: bound the pool explicitly instead of letting however
+	// many concurrent tabs/queries are open hit the server until its
+	// max_connections rejects them. The budget leaves room for the pattern
+	// Query uses — one pinned connection for the running statement plus a
+	// second independent connection for KILL QUERY — while catalog reads and
+	// keepalive pings run alongside.
+	handle.SetMaxOpenConns(8)
+	handle.SetMaxIdleConns(4)
+	// 连接级 TTL：空闲服务端 socket 不能比 session 活得更久。没有这两个设置时，
+	// 被池保留的旧连接会一直占用服务端连接，直到进程退出。
+	handle.SetConnMaxLifetime(mysqlConnMaxLifetime)
+	handle.SetConnMaxIdleTime(mysqlConnMaxIdleTime)
 	// sql.Open is lazy; Ping actually establishes the connection.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -88,8 +109,11 @@ type mysqlSession struct {
 	killAsked bool  // KillQuery was called for the in-flight statement
 
 	// tx is the active manual transaction, if one has been started. While set,
-	// Query/Browse/DML run inside it rather than autocommitting.
-	tx *sql.Tx
+	// Query/Browse/DML run inside it rather than autocommitting. txConn is the
+	// connection that tx was opened on (pinned out of the pool, see Begin) and
+	// must go back to the pool when the tx settles.
+	tx     *sql.Tx
+	txConn *sql.Conn
 }
 
 func (s *mysqlSession) Server() string { return s.server }
@@ -139,7 +163,9 @@ func quoteIdent(name string) string {
 	if q, err := sqltext.QuoteIdent("mysql", name); err == nil {
 		return q
 	}
-	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+	// The name was refused by the guard (empty / overlong / control-carrying);
+	// still emit a native identifier rather than an ANSI one.
+	return sqltext.QuoteIdentLoose("mysql", name)
 }
 
 // validIdent reports whether s is a safe SQL identifier (letters, digits,
@@ -171,6 +197,17 @@ func (s *mysqlSession) scalar(q string, args ...interface{}) (*string, error) {
 // a slow server parked the worker (and whatever refresh it was doing) forever.
 func catalogCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 30*time.Second)
+}
+
+// acquireConn takes a pooled connection with a bounded WAIT: the per-session
+// pool is capped (mysqlMaxOpenConns), so saturation is possible and an
+// unbounded wait parked the caller — often a UI worker — forever. Only the
+// wait for the connection is bounded; work done ON the connection keeps
+// whatever deadline its caller chose. The caller must conn.Close().
+func (s *mysqlSession) acquireConn() (*sql.Conn, error) {
+	ctx, cancel := catalogCtx()
+	defer cancel()
+	return s.db.Conn(ctx)
 }
 
 func (s *mysqlSession) Tables() ([]proto.ObjectInfo, error) {
@@ -237,15 +274,19 @@ func (s *mysqlSession) Query(sqlText string, maxRows int) (proto.QueryResult, er
 	// Run the statement on a dedicated pooled connection and remember its
 	// server-side thread id, so KillQuery can target it precisely without
 	// disturbing other pooled connections (TablePlus process-list "Kill").
-	conn, err := s.db.Conn(context.Background())
+	// Only the WAIT for the connection is bounded (see acquireConn); the
+	// statement itself runs without a deadline — a long query is legitimate.
+	conn, err := s.acquireConn()
 	if err != nil {
 		return proto.QueryResult{}, fmt.Errorf("mysql: %w", err)
 	}
 	defer conn.Close()
 	var id int64
-	if err := conn.QueryRowContext(context.Background(), "SELECT CONNECTION_ID()").Scan(&id); err != nil {
+	idCtx, idCancel := catalogCtx()
+	if err := conn.QueryRowContext(idCtx, "SELECT CONNECTION_ID()").Scan(&id); err != nil {
 		id = 0
 	}
+	idCancel()
 	s.mu.Lock()
 	s.activeID = id
 	s.killAsked = false
@@ -354,10 +395,15 @@ func (s *mysqlSession) Close() {
 	// a clean state instead of holding a dangling transaction.
 	s.mu.Lock()
 	tx := s.tx
+	conn := s.txConn
 	s.tx = nil
+	s.txConn = nil
 	s.mu.Unlock()
 	if tx != nil {
 		_ = tx.Rollback()
+	}
+	if conn != nil {
+		conn.Close()
 	}
 	s.db.Close()
 }
@@ -376,16 +422,28 @@ func (s *mysqlSession) activeExecer() execer {
 
 // Begin starts a manual transaction on this session.
 func (s *mysqlSession) Begin() error {
+	// Bound the WAIT for a connection, not the transaction: a BeginTx context
+	// governs the transaction for its whole life and would roll a legitimate
+	// long manual transaction back at the deadline. Pin the connection with a
+	// bounded wait, open the transaction on it without one, and keep the
+	// pinned connection until the tx settles (Commit/Rollback/Close).
+	conn, err := s.acquireConn()
+	if err != nil {
+		return fmt.Errorf("mysql: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.tx != nil {
+		conn.Close()
 		return fmt.Errorf("mysql: transaction already active")
 	}
-	tx, err := s.db.Begin()
+	tx, err := conn.BeginTx(context.Background(), nil)
 	if err != nil {
-		return err
+		conn.Close()
+		return fmt.Errorf("mysql: %w", err)
 	}
 	s.tx = tx
+	s.txConn = conn
 	return nil
 }
 
@@ -393,24 +451,36 @@ func (s *mysqlSession) Begin() error {
 func (s *mysqlSession) Commit() error {
 	s.mu.Lock()
 	tx := s.tx
+	conn := s.txConn
 	s.tx = nil
+	s.txConn = nil
 	s.mu.Unlock()
 	if tx == nil {
 		return fmt.Errorf("mysql: no active transaction")
 	}
-	return tx.Commit()
+	err := tx.Commit()
+	if conn != nil {
+		conn.Close() // the pinned connection goes back to the pool
+	}
+	return err
 }
 
 // Rollback rolls back the active transaction, if any.
 func (s *mysqlSession) Rollback() error {
 	s.mu.Lock()
 	tx := s.tx
+	conn := s.txConn
 	s.tx = nil
+	s.txConn = nil
 	s.mu.Unlock()
 	if tx == nil {
 		return fmt.Errorf("mysql: no active transaction")
 	}
-	return tx.Rollback()
+	err := tx.Rollback()
+	if conn != nil {
+		conn.Close() // the pinned connection goes back to the pool
+	}
+	return err
 }
 
 // InTransaction reports whether a manual transaction is currently open.
@@ -471,6 +541,13 @@ func isDefault(v *string) bool { return v != nil && *v == DefaultMarker }
 // execer is the subset of *sql.DB / *sql.Tx used by the row-DML builders, so
 // the same SQL is used for a single autocommit op and inside ApplyChanges'
 // transaction.
+//
+// 0 rows from a keyed UPDATE is always a conflict here, never a same-value
+// no-op: this client's DSN sets ClientFoundRows (dbcore/mysql/spec.go), so
+// RowsAffected counts MATCHED rows — a matched-but-identical UPDATE reports
+// 1. A zero-row probe on top of that would be dead code at best and, in the
+// delete/reinsert race window, would silently skip a user edit instead of
+// rolling back (R2-02 的教训要按本驱动的 matched 语义记,不按 changed 语义).
 type execer interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
 }
@@ -524,7 +601,15 @@ func (s *mysqlSession) ApplyChanges(table string, updates []RowEdit, deletes []m
 		return applyWithin(tx, table, updates, deletes, inserts, ddl)
 	}
 
-	t, err := s.db.Begin()
+	// Bound the wait for a connection, not the transaction (see Begin): the
+	// commit batch lives on a pinned connection opened without a deadline,
+	// and the pin is local to this call.
+	conn, err := s.acquireConn()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer conn.Close()
+	t, err := conn.BeginTx(context.Background(), nil)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
@@ -538,6 +623,10 @@ func (s *mysqlSession) ApplyChanges(table string, updates []RowEdit, deletes []m
 // applyWithin runs one commit batch on an already-open transaction. Each DML
 // statement must affect exactly one row (RowsAffected == 1); a mismatch aborts
 // so the caller can roll back. DDL statements are exempt from the row check.
+//
+// With ClientFoundRows on (see execer), a keyed UPDATE reporting 0 rows means
+// the row was not there — there is no legitimate same-value no-op to probe
+// for, so 0 is always ErrRowMismatch.
 func applyWithin(x execer, table string, updates []RowEdit, deletes []map[string]*string, inserts []map[string]*string, ddl []string) error {
 	for _, u := range updates {
 		if len(u.Changes) == 0 {

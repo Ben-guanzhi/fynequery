@@ -16,6 +16,8 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
+
+	fuzzy "github.com/dbcore/dbcore/fuzzy"
 )
 
 // objectMatch is one quick-open candidate.
@@ -170,7 +172,7 @@ func (ws *workspace) quickOpenSearch(pattern string) []objectMatch {
 	raw := strings.TrimSpace(pattern)
 	anchorStart := strings.HasPrefix(raw, "^")
 	anchorEnd := strings.HasSuffix(raw, "$")
-	needle := strings.ToLower(raw)
+	needle := fuzzy.FoldString(raw)
 	if anchorStart {
 		needle = needle[1:]
 	}
@@ -183,11 +185,13 @@ func (ws *workspace) quickOpenSearch(pattern string) []objectMatch {
 	}
 	var ranked []scored
 	for _, c := range cands {
-		// Lowercase both sides so the palette matches case-insensitively,
-		// like TablePlus OpenAnything (e.g. "li" finds "Lima").
-		text := strings.ToLower(c.Label)
+		// Fold both sides with dbcore/fuzzy's orbit-aware folding so the
+		// palette matches case-insensitively, like TablePlus OpenAnything
+		// (e.g. "li" finds "Lima"). Uses the same folding as sqltui,
+		// polydb tuidata, and TableProGo's quick-open (K-F2).
+		text := fuzzy.FoldString(c.Label)
 		if c.Database != "" {
-			text = strings.ToLower(c.Database) + "." + text
+			text = fuzzy.FoldString(c.Database) + "." + text
 		}
 		var score int
 		var ok bool

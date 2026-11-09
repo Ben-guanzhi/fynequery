@@ -1,7 +1,10 @@
 package main
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/dbcore/dbcore/sqltext"
 
 	"fynequery/db"
 )
@@ -59,5 +62,34 @@ func TestShowQueryRowFillsDetails(t *testing.T) {
 	ws.showQueryRow(data, 9)
 	if len(ws.details.fields) != 0 {
 		t.Fatalf("out-of-range should clear details, got %d fields", len(ws.details.fields))
+	}
+}
+
+// TestQuoteTableMatchesSqltext pins the table quoter to the shared dialect
+// layer. It used to hand-roll MySQL backticks and ANSI for everything else,
+// which silently missed SQL Server's brackets.
+func TestQuoteTableMatchesSqltext(t *testing.T) {
+	drivers := []string{"mysql", "mariadb", "postgres", "postgresql", "sqlserver", "mssql", "oracle", "sqlite", "nope"}
+	names := []string{"t", "a`b", `a"b`, "a]b", strings.Repeat("x", 300), "a\x00b"}
+	for _, driver := range drivers {
+		for _, name := range names {
+			ws := &workspace{conn: Connection{Driver: driver}}
+			if got, want := ws.quoteTable(name), sqltext.QuoteIdentLoose(driver, name); got != want {
+				t.Errorf("quoteTable(%q, %q) = %q, want %q", name, driver, got, want)
+			}
+		}
+	}
+}
+
+// TestTruncationNote checks the status-line decoration a capped result gets.
+// The flag used to be dropped on the floor: the first page was shown as if it
+// were the whole result, which is exactly what sqlkit.ReadRows now reports and
+// what this note is for.
+func TestTruncationNote(t *testing.T) {
+	if got := truncationNote("42 rows", false); got != "42 rows" {
+		t.Errorf("truncationNote(false) = %q, want unchanged", got)
+	}
+	if got := truncationNote("42 rows", true); got != "42 rows · truncated" {
+		t.Errorf("truncationNote(true) = %q, want a truncation note", got)
 	}
 }
