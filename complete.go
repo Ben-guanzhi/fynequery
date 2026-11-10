@@ -21,6 +21,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"fynequery/icons"
+	"fynequery/internal/sqlscan"
 )
 
 // sqlKeywords are the statement/clause words offered by completion.
@@ -701,7 +702,7 @@ func (qp *queryPane) autoComplete() {
 		return
 	}
 	r := []rune(text)
-	if start+dot < len(r) && inQuotes(text, len(string(r[:start+dot]))) {
+	if start+dot < len(r) && sqlscan.InQuotes(text, len(string(r[:start+dot]))) {
 		qp.hideAuto()
 		return
 	}

@@ -11,6 +11,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"fynequery/db"
+	"fynequery/internal/sqlscan"
 )
 
 // newEditorForTest builds a headless editor with given text and cursor.
@@ -50,15 +51,15 @@ func TestSplitStatementsForRunBlankDropped(t *testing.T) {
 
 func TestTopLevelStatementRanges(t *testing.T) {
 	script := "SELECT 1; SELECT 2"
-	ranges := topLevelStatementRanges(script)
+	ranges := sqlscan.StatementRanges(script)
 	// One ';' yields 2 spans: [0,9) = "SELECT 1;" and [9,17) = " SELECT 2".
 	if len(ranges) != 2 {
 		t.Fatalf("ranges = %d, want 2: %+v", len(ranges), ranges)
 	}
-	if ranges[0].start != 0 || ranges[0].end != 9 {
-		t.Errorf("range0 = {%d,%d}, want {0,9}", ranges[0].start, ranges[0].end)
+	if ranges[0].Start != 0 || ranges[0].End != 9 {
+		t.Errorf("range0 = {%d,%d}, want {0,9}", ranges[0].Start, ranges[0].End)
 	}
-	if s := strings.TrimSpace(script[ranges[1].start:ranges[1].end]); s != "SELECT 2" {
+	if s := strings.TrimSpace(script[ranges[1].Start:ranges[1].End]); s != "SELECT 2" {
 		t.Errorf("range1 text = %q, want 'SELECT 2'", s)
 	}
 }

@@ -23,6 +23,7 @@ import (
 
 	"fynequery/db"
 	"fynequery/icons"
+	"fynequery/internal/sqlscan"
 	"fynequery/proto"
 )
 
@@ -1090,18 +1091,18 @@ func looksLikeTimeout(err error) bool {
 	return false
 }
 
-// stmtRanges is the [start,end) byte span of one top-level statement.
-type stmtRanges struct{ start, end int }
-
+// currentStatementRange returns the byte [start,end) of the statement
+// containing the cursor (skipping to the next non-blank statement when the
+// cursor sits in whitespace between statements) — the "highlight current
+// query" readout.
 // splitStatementsForRun breaks a script into non-blank top-level statements,
-// honouring quoted strings, -- line comments and /* */ blocks. The
-// backup.go DELIMITER variant does not skip block comments, which is too lossy
-// for an "Run All" executor). A single trailing ';' on each statement is
-// stripped; attached leading comments are kept (they are valid SQL).
+// honouring quoted strings, -- line comments and /* */ blocks. A single
+// trailing ';' on each statement is stripped; attached leading comments are
+// kept (they are valid SQL).
 func splitStatementsForRun(script string) []string {
 	var out []string
-	for _, r := range topLevelStatementRanges(script) {
-		s := strings.TrimSpace(script[r.start:r.end])
+	for _, r := range sqlscan.StatementRanges(script) {
+		s := strings.TrimSpace(script[r.Start:r.End])
 		s = strings.TrimSuffix(s, ";")
 		if s = strings.TrimSpace(s); s != "" {
 			out = append(out, s)
@@ -1110,51 +1111,6 @@ func splitStatementsForRun(script string) []string {
 	return out
 }
 
-// topLevelStatementRanges scans a script honouring quoted strings, -- line
-// comments and /* */ blocks, returning the byte span of every top-level
-// statement (including any trailing span after the last ';').
-func topLevelStatementRanges(script string) []stmtRanges {
-	var out []stmtRanges
-	start := 0
-	var q byte // active quote char (0 = none)
-	inLine, inBlock := false, false
-	for i := 0; i < len(script); i++ {
-		c := script[i]
-		switch {
-		case inLine:
-			if c == '\n' {
-				inLine = false
-			}
-		case inBlock:
-			if c == '*' && i+1 < len(script) && script[i+1] == '/' {
-				inBlock = false
-				i++
-			}
-		case q != 0:
-			if c == q {
-				q = 0
-			}
-		case c == '\'' || c == '"':
-			q = c
-		case c == '-' && i+1 < len(script) && script[i+1] == '-':
-			inLine = true
-			i++
-		case c == '/' && i+1 < len(script) && script[i+1] == '*':
-			inBlock = true
-			i++
-		case c == ';':
-			out = append(out, stmtRanges{start, i + 1})
-			start = i + 1
-		}
-	}
-	out = append(out, stmtRanges{start, len(script)})
-	return out
-}
-
-// currentStatementRange returns the byte [start,end) of the statement
-// containing the cursor (skipping to the next non-blank statement when the
-// cursor sits in whitespace between statements) — the "highlight current
-// query" readout.
 func (qp *queryPane) currentStatementRange() (int, int) {
 	if qp.editor == nil {
 		return 0, 0
@@ -1166,22 +1122,22 @@ func (qp *queryPane) currentStatementRange() (int, int) {
 		cursor = len(r)
 	}
 	cursorByte := len(string(r[:cursor]))
-	ranges := topLevelStatementRanges(text)
+	ranges := sqlscan.StatementRanges(text)
 	for i, rg := range ranges {
-		if cursorByte >= rg.start && cursorByte < rg.end {
-			if strings.TrimSpace(text[rg.start:rg.end]) == "" {
+		if cursorByte >= rg.Start && cursorByte < rg.End {
+			if strings.TrimSpace(text[rg.Start:rg.End]) == "" {
 				for _, nx := range ranges[i+1:] {
-					if strings.TrimSpace(text[nx.start:nx.end]) != "" {
-						return nx.start, nx.end
+					if strings.TrimSpace(text[nx.Start:nx.End]) != "" {
+						return nx.Start, nx.End
 					}
 				}
 			}
-			return rg.start, rg.end
+			return rg.Start, rg.End
 		}
 	}
 	if len(ranges) > 0 {
 		rg := ranges[len(ranges)-1]
-		return rg.start, rg.end
+		return rg.Start, rg.End
 	}
 	return 0, 0
 }

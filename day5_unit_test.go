@@ -34,6 +34,10 @@ func TestIsReadOnlySQL(t *testing.T) {
 		"SELECT 1", "  select * from t", "SHOW TABLES", "explain select 1",
 		"DESCRIBE t", "PRAGMA table_info(t)", "WITH c AS (SELECT 1) SELECT * FROM c",
 		"TABLE t", "VALUES (1)", "SELECT(select 1)",
+		// 前导注释曾使门禁读不到首词、把 SELECT 当写语句弹窗(FirstKeyword 修复)
+		"-- note\nSELECT 1",
+		"/* header */ SELECT 1",
+		"  /* c1 */ -- c2\nSHOW TABLES",
 		// 括号内含关键词但不是 CTE 体首词:子查询/普通标识符不误报
 		"WITH c AS (SELECT * FROM (SELECT 1) x) SELECT * FROM c",
 		"WITH c AS (SELECT \"delete\" FROM t) SELECT 1",
@@ -48,6 +52,8 @@ func TestIsReadOnlySQL(t *testing.T) {
 	writes := []string{
 		"", "UPDATE t SET a=1", "DELETE FROM t", "INSERT INTO t VALUES (1)",
 		"DROP TABLE t", "TRUNCATE t", "SET foreign_key_checks=0",
+		// 前导注释不改变写语句的判定
+		"-- cleanup\nDROP TABLE t",
 		// PostgreSQL 数据修改型 CTE:主语句是 SELECT,真实写入在 CTE 体里
 		"WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
 		"WITH i AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM i",

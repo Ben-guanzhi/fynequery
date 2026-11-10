@@ -23,6 +23,7 @@ import (
 	"github.com/dbcore/dbcore/sqltext"
 
 	"fynequery/db"
+	"fynequery/internal/sqlscan"
 )
 
 // 可注入的包级变量而非 const：测试需要缩小行上限，才能触达 cap 截断与
@@ -419,164 +420,13 @@ func runSQLScript(sess db.Session, script string) (int, error) {
 		return 0, fmt.Errorf("no active connection")
 	}
 	n := 0
-	for _, stmt := range splitStatementsDelimited(script) {
+	for _, stmt := range sqlscan.SplitDelimited(script) {
 		if _, err := sess.Query(stmt, 10); err != nil {
 			return n, fmt.Errorf("statement %d failed: %w", n+1, err)
 		}
 		n++
 	}
 	return n, nil
-}
-
-// splitStatementsDelimited splits a SQL script into statements, honoring
-// DELIMITER directives (as mysqldump emits around stored routines/triggers).
-// Semicolons inside BEGIN…END blocks are kept intact until the active
-// delimiter appears, while string literals, quoted identifiers, -- line
-// comments and /* block */ comments are respected so a delimiter inside them
-// does not split. The MySQL executable form /*! ... */ is kept as statement
-// text (mysqldump's version-guarded directives live in it).
-func splitStatementsDelimited(script string) []string {
-	var out []string
-	var sb strings.Builder
-	delim := ";"
-	var quote byte  // 0, '\'', '"' or '`'
-	atStart := true // sb holds only whitespace so far (statement boundary)
-
-	flush := func() {
-		if s := strings.TrimSpace(sb.String()); s != "" {
-			out = append(out, s)
-		}
-		sb.Reset()
-		atStart = true
-	}
-
-	i, n := 0, len(script)
-	for i < n {
-		// At a statement start look for a DELIMITER directive before anything
-		// else, so routine bodies that use the custom delimiter are kept whole.
-		if atStart {
-			if d, consumed, ok := readDelimiterDirective(script[i:]); ok {
-				flush()
-				delim = d
-				i += consumed
-				continue
-			}
-		}
-
-		c := script[i]
-		if quote != 0 {
-			sb.WriteByte(c)
-			if c == '\\' && quote != '`' && i+1 < n {
-				sb.WriteByte(script[i+1])
-				i += 2
-				continue
-			}
-			if c == quote {
-				quote = 0
-			}
-			i++
-			continue
-		}
-		switch c {
-		case '\'', '"', '`':
-			quote = c
-			sb.WriteByte(c)
-			atStart = false
-		case '-':
-			if i+1 < n && script[i+1] == '-' {
-				for i < n && script[i] != '\n' {
-					i++
-				}
-				sb.WriteByte('\n')
-				continue
-			}
-			sb.WriteByte(c)
-			atStart = false
-		case '/':
-			if i+1 < n && script[i+1] == '*' {
-				end := -1
-				if j := strings.Index(script[i+2:], "*/"); j >= 0 {
-					end = i + 2 + j + 2
-				}
-				if i+2 < n && script[i+2] == '!' {
-					// MySQL executable conditional comment (/*! ... */): to the
-					// server this is statement text (mysqldump's version-guarded
-					// directives live in it), so keep it verbatim — including
-					// its closing */ so it is not misread as a comment opener.
-					if end < 0 {
-						sb.WriteString(script[i:])
-						i = n
-					} else {
-						sb.WriteString(script[i:end])
-						i = end
-					}
-					atStart = false
-					continue
-				}
-				// Plain block comment: skip through the closing */ (as
-				// whitespace), so a semicolon or DELIMITER token inside it
-				// cannot split.
-				if end < 0 {
-					i = n // unterminated: drop the rest of the script
-				} else {
-					i = end
-				}
-				sb.WriteByte(' ')
-				continue
-			}
-			if strings.HasPrefix(script[i:], delim) {
-				flush()
-				i += len(delim)
-				continue
-			}
-			sb.WriteByte(c)
-			atStart = false
-		default:
-			if strings.HasPrefix(script[i:], delim) {
-				flush()
-				i += len(delim)
-				continue
-			}
-			sb.WriteByte(c)
-			if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
-				atStart = false
-			}
-		}
-		i++
-	}
-	flush()
-	return out
-}
-
-// readDelimiterDirective parses a DELIMITER directive at the start of s and
-// returns the delimiter token plus the number of bytes consumed (through the
-// end of that directive line).
-func readDelimiterDirective(s string) (string, int, bool) {
-	if len(s) < 9 || !strings.EqualFold(s[:9], "DELIMITER") {
-		return "", 0, false
-	}
-	after := 9
-	if after >= len(s) || (s[after] != ' ' && s[after] != '\t' && s[after] != '\r' && s[after] != '\n') {
-		return "", 0, false
-	}
-	for after < len(s) && (s[after] == ' ' || s[after] == '\t' || s[after] == '\r' || s[after] == '\n') {
-		after++
-	}
-	start := after
-	for after < len(s) && s[after] != ' ' && s[after] != '\t' && s[after] != '\r' && s[after] != '\n' {
-		after++
-	}
-	if start == after {
-		return "", 0, false
-	}
-	delim := s[start:after]
-	for after < len(s) && s[after] != '\n' {
-		after++
-	}
-	if after < len(s) {
-		after++ // consume the newline
-	}
-	return delim, after, true
 }
 
 // quoteIdent quotes an identifier for the driver.

@@ -6,6 +6,7 @@ import (
 
 	"github.com/dbcore/dbcore/sqltext"
 
+	"fynequery/internal/sqlscan"
 	"fynequery/proto"
 )
 
@@ -279,7 +280,7 @@ func TestSplitStatementsDelimited(t *testing.T) {
 		"CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND;;\n" +
 		"DELIMITER ;\n" +
 		"SET FOREIGN_KEY_CHECKS=1;\n"
-	got := splitStatementsDelimited(script)
+	got := sqlscan.SplitDelimited(script)
 	want := []string{
 		"SET FOREIGN_KEY_CHECKS=0",
 		"CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND",
@@ -300,7 +301,7 @@ func TestSplitStatementsDelimitedBlockComments(t *testing.T) {
 		"/*!40101 SET @saved_cs_client = @@character_set_client */;\n" +
 		"SELECT 'x;/*not-comment*/y' AS s;\n" +
 		"/* trailing unterminated comment"
-	got := splitStatementsDelimited(script)
+	got := sqlscan.SplitDelimited(script)
 	want := []string{
 		"SET a=1",
 		"/*!40101 SET @saved_cs_client = @@character_set_client */",
