@@ -80,8 +80,8 @@ type dataTable struct {
 	findHits     []searchHitKey
 	findHitSet   map[searchHitKey]bool
 	findCur      int
-	findTimer    *time.Timer // debounces the per-keystroke full scan
-	findGen      int         // drops a debounced scan overtaken by newer typing
+	findTimer    *time.Timer          // debounces the per-keystroke full scan
+	findGen      int                  // drops a debounced scan overtaken by newer typing
 	onFindStatus func(cur, total int) // updates the counter label when hits change
 
 	// copy/Query-Magics context: owning table name ("" for query results) and
@@ -90,8 +90,8 @@ type dataTable struct {
 	// driver is the connection's dialect; copy-as-SQL renders literals with it
 	// (MySQL escapes backslashes, the others do not). Set by prepGrid.
 	driver string
-	onGoto    func(table, column, value string)
-	onPin     func() // optional: pin this result (query pane)
+	onGoto func(table, column, value string)
+	onPin  func() // optional: pin this result (query pane)
 
 	// keyboard/focus state: arrow-key row navigation + Ctrl+C copy of the
 	// selected row. focused is set by FocusGained/Lost; Ctrl+C is registered
@@ -1466,7 +1466,7 @@ func (r *rowViewRenderer) Layout(size fyne.Size) {
 }
 
 func (r *rowViewRenderer) Refresh() {
-	r.rv.gut.Text = strconv.Itoa(r.rv.idx+1)
+	r.rv.gut.Text = strconv.Itoa(r.rv.idx + 1)
 	p := pal()
 	if r.rv.idx == r.rv.t.selRow {
 		r.rv.gut.Color = p.selFG // white row number on the blue selection

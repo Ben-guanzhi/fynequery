@@ -48,13 +48,13 @@ type sidebar struct {
 	dbSelect    *widget.Select
 	schemaWrap  fyne.CanvasObject
 	modeBtns    []*sideModeButton
-	body        *sidebarBody // pane switcher; refreshed on every state change
-	suppress    bool         // guard Select.OnChanged during programmatic changes
-	objects     []TableInfo  // full inventory from the session
-	invVersion  int          // bumped on every setInventory: completion caches key on it
-	lowerNames  []string     // parallel to objects: lowercased names for the search filter
+	body        *sidebarBody      // pane switcher; refreshed on every state change
+	suppress    bool              // guard Select.OnChanged during programmatic changes
+	objects     []TableInfo       // full inventory from the session
+	invVersion  int               // bumped on every setInventory: completion caches key on it
+	lowerNames  []string          // parallel to objects: lowercased names for the search filter
 	kindByName  map[string]string // name -> kind, so leafIcon never scans the inventory
-	filtered    []TableInfo  // after search filter
+	filtered    []TableInfo       // after search filter
 	database    string
 	selID       string // currently selected tree node id (drives white-on-blue rows)
 	history     []string

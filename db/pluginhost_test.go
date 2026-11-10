@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbcore/dbcore"
+
 	"fynequery/proto"
 )
 
@@ -643,3 +645,29 @@ func TestUndiscoverPlugins(t *testing.T) {
 	}
 	UndiscoverPlugins(dir)
 }
+
+// TestValuesOfTranslatesDefaultMarker pins 建议5's last mile on the plugin
+// path: the UI's DEFAULT sentinel (db.DefaultMarker, NUL-prefixed) must leave
+// valuesOf as the wire's proto.DefaultMarker, or the plugin's isDefault
+// missed it and wrote the sentinel's literal bytes into the column while the
+// preview claimed the column was omitted. valuesOf is the one funnel every
+// DML path (UpdateRow/InsertRow/DeleteRow/ApplyChanges) passes through.
+func TestValuesOfTranslatesDefaultMarker(t *testing.T) {
+	plain := "plain"
+	got := valuesOf(map[string]*string{
+		"nil":    nil,
+		"plain":  &plain,
+		"marker": strp(DefaultMarker),
+	})
+	if got["nil"].Kind != dbcore.ValNull {
+		t.Fatalf("nil must map to ValNull, got %+v", got["nil"])
+	}
+	if got["plain"].S != "plain" {
+		t.Fatalf("plain value must pass through, got %+v", got["plain"])
+	}
+	if got["marker"].S != proto.DefaultMarker {
+		t.Fatalf("DEFAULT marker must translate to the wire sentinel, got %q", got["marker"].S)
+	}
+}
+
+func strp(s string) *string { return &s }

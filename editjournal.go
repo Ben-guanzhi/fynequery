@@ -90,10 +90,19 @@ func (ws *workspace) buildEditJournal() *editJournal {
 		DDL:     append([]string(nil), ws.pendingDDL...),
 	}
 	for _, t := range ws.dataTabs {
-		if t == nil || t.grid == nil || t.grid.changeCount() == 0 {
+		if t == nil || t.grid == nil {
 			continue
 		}
 		updates, deletes, inserts := t.grid.pending()
+		// Carried edits (rows that scrolled off with a page flip) are part of
+		// the tab's unsaved state — snapshot them too, or the journal would
+		// drop exactly the edits paging just learned to preserve.
+		updates = append(updates, t.carryUpdates...)
+		deletes = append(deletes, t.carryDeletes...)
+		inserts = append(inserts, t.carryInserts...)
+		if len(updates)+len(deletes)+len(inserts) == 0 {
+			continue
+		}
 		jupdates := make([]editJournalUpdate, 0, len(updates))
 		for _, u := range updates {
 			jupdates = append(jupdates, editJournalUpdate{PK: u.pk, Changes: u.changes})

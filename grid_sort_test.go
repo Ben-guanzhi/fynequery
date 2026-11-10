@@ -185,8 +185,8 @@ func TestCompareExact(t *testing.T) {
 		{"9", "10", -1},
 		{"10", "9", 1},
 		{"0", "0", 0},
-		{"0", "00", 0},      // leading zeros fold to the same integer
-		{"1.5", "1.50", 0},  // trailing zeros are spelling, not value
+		{"0", "00", 0},     // leading zeros fold to the same integer
+		{"1.5", "1.50", 0}, // trailing zeros are spelling, not value
 		{"1.5", "1.6", -1},
 		{"12.50", "12.5", 0},
 		{"-2", "-10", 1}, // negatives mirror
@@ -209,8 +209,8 @@ func TestSortDataScientificNotationSortsByValue(t *testing.T) {
 	data := &TableData{
 		Cols: []ColumnInfo{{Name: "n", Type: "double"}},
 		Rows: [][]*string{
-			{s("1e3")},   // 1000
-			{s("1000")},  // 1000 — same value, different spelling
+			{s("1e3")},  // 1000
+			{s("1000")}, // 1000 — same value, different spelling
 			{s("999")},
 			{s("2.5e3")}, // 2500
 		},

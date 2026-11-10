@@ -857,6 +857,17 @@ func valuesOf(cells map[string]*string) map[string]dbcore.Value {
 			out[name] = dbcore.Value{Kind: dbcore.ValNull}
 			continue
 		}
+		// The UI's DEFAULT sentinel is db.DefaultMarker (NUL-prefixed, fine in
+		// Go memory); the wire's is proto.DefaultMarker (JSON-safe). Translate
+		// at this boundary — the one funnel every DML path (single-row and
+		// batch alike) passes through. Without it the plugin's isDefault
+		// missed the marker and wrote the sentinel's literal bytes into the
+		// column while the preview (which reads db.DefaultMarker) claimed the
+		// column was omitted: 建议5 的同源保证在插件路径上的最后一公里.
+		if *value == DefaultMarker {
+			out[name] = dbcore.Value{Kind: dbcore.ValText, S: proto.DefaultMarker}
+			continue
+		}
 		out[name] = dbcore.Value{Kind: dbcore.ValText, S: *value}
 	}
 	return out

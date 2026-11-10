@@ -200,7 +200,7 @@ func (streamTestHandler) Begin(TxParams) error                         { return 
 func (streamTestHandler) Commit(TxParams) error                        { return nil }
 func (streamTestHandler) Rollback(TxParams) error                      { return nil }
 func (streamTestHandler) Metrics(MetricsParams) (MetricsResult, error) { return MetricsResult{}, nil }
-func (streamTestHandler) Cancel(CancelParams) error              { return nil }
+func (streamTestHandler) Cancel(CancelParams) error                    { return nil }
 
 func (streamTestHandler) QueryStream(p QueryStreamParams, emit func(StreamFrame) error) (QueryResult, error) {
 	if p.SQL == "boom" {

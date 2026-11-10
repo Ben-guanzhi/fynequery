@@ -243,11 +243,11 @@ type (
 	// can apply them. A plugin whose dialect cannot honour them returns
 	// ERR_NOT_SUPPORTED rather than silently returning unfiltered rows.
 	BrowseParams struct {
-		ConnID string      `json:"connId"`
-		Table  string      `json:"table"`
-		Limit  int         `json:"limit"`
-		Filter []FilterArg `json:"filter,omitempty"`
-		Sort   []SortArg   `json:"sort,omitempty"`
+		ConnID string        `json:"connId"`
+		Table  string        `json:"table"`
+		Limit  int           `json:"limit"`
+		Filter []FilterArg   `json:"filter,omitempty"`
+		Sort   []SortArg     `json:"sort,omitempty"`
 		After  []CellPayload `json:"after,omitempty"`
 	}
 

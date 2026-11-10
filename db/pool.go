@@ -144,11 +144,11 @@ func NewSessionPool(maxIdle int, idleTTL time.Duration, maxTotal int) *SessionPo
 		maxTotal = defaultMaxTotalSessions
 	}
 	return &SessionPool{
-		maxIdle:  maxIdle,
-		idleTTL:  idleTTL,
-		byFP:     map[string][]*pooled{},
-		sem:      make(chan struct{}, maxTotal),
-		maxTotal: maxTotal,
+		maxIdle:    maxIdle,
+		idleTTL:    idleTTL,
+		byFP:       map[string][]*pooled{},
+		sem:        make(chan struct{}, maxTotal),
+		maxTotal:   maxTotal,
 		closeGroup: newCloseGroup(),
 	}
 }

@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"fynequery/proto"
 )
 
 func journalTestWS(t *testing.T) *workspace {
@@ -46,8 +49,8 @@ func TestEditJournalRoundTrip(t *testing.T) {
 	ws.dataTabs = append(ws.dataTabs, &dataTableTab{name: "users", grid: g})
 	ws.pendingDDL = []string{"ALTER TABLE users DROP COLUMN legacy"}
 
-	g.setCell(0, 1, one("alice2"))                    // update
-	g.markSelectedDeleted()                            // delete: selRow defaults to 0? set explicitly below
+	g.setCell(0, 1, one("alice2")) // update
+	g.markSelectedDeleted()        // delete: selRow defaults to 0? set explicitly below
 	if g.selRow != 1 {
 		g.selRow = 1
 		g.deleted = map[int]bool{1: true} // mark row "bob" directly (selRow semantics vary)
@@ -164,12 +167,57 @@ func TestEditJournalCorruptFileIgnored(t *testing.T) {
 	}
 }
 
-// 翻页×日志对账回归(P2 修复):翻页整页替换网格、旧页编辑随之丢弃——显式
-// 导航与关页签同语义。修复前翻页路径不触发日志对账,磁盘快照继续宣称"该表
-// 有未提交编辑",下次启动会弹出恢复已放弃编辑的提示。
-func TestLoadTablePageReconcilesJournal(t *testing.T) {
+// pageFakeSession serves loadTablePage's page query with journalEditGrid's
+// rows (fakeSession's SELECT * returns no columns, which would push every
+// edit into the carry and make re-match untestable). OFFSET 0 serves the full
+// page; any other offset serves a different page holding only id=3 — the
+// row the edits below must NOT match.
+type pageFakeSession struct{ fakeSession }
+
+func (f *pageFakeSession) Query(sql string, maxRows int) (proto.QueryResult, error) {
+	if strings.HasPrefix(sql, "SELECT * FROM") {
+		s := func(v string) proto.CellPayload { return proto.CellPayload{Kind: "text", Text: v} }
+		cols := []proto.ColumnInfo{{Name: "id", Key: "PK"}, {Name: "name"}}
+		if !strings.HasSuffix(sql, "OFFSET 0") {
+			return proto.QueryResult{
+				Columns: cols,
+				Rows:    [][]proto.CellPayload{{s("3"), {Kind: "null"}}},
+			}, nil
+		}
+		return proto.QueryResult{
+			Columns: cols,
+			Rows:    [][]proto.CellPayload{{s("1"), s("alice")}, {s("2"), s("bob")}, {s("3"), {Kind: "null"}}},
+		}, nil
+	}
+	return f.fakeSession.Query(sql, maxRows)
+}
+
+// waitForGridSwap waits until loadTablePage's async callback has COMPLETED
+// (pageDone bump = happens-before edge: grid swapped, carry re-applied,
+// journal snapshotted) so the assertions below read tab state race-free.
+// The test driver runs fyne.Do callbacks inline on the worker's goroutine,
+// so polling plain fields would race the very callback being waited for.
+func waitForGridSwap(t *testing.T, tab *dataTableTab, old *dataTable) *dataTable {
+	t.Helper()
+	before := tab.pageDone.Load()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if tab.pageDone.Load() > before && tab.grid != old {
+			return tab.grid
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("loadTablePage did not replace the grid in time")
+	return nil
+}
+
+// 翻页保留编辑(建议3 本体): 翻页把旧页的未保存编辑搬到新页——行在页上的
+// 原位重匹配(dirty/deleted 恢复、carry 清空),行不在页上的随 tab carry 且
+// 仍进日志;翻回可见页时从 carry 原位重现。回归: 旧语义整页替换连编辑一起
+// 丢弃,事务条显示"干净",日志与 UI 脱节。
+func TestLoadTablePageCarriesEdits(t *testing.T) {
 	ws := journalTestWS(t)
-	ws.setSession(&fakeSession{})
+	ws.setSession(&pageFakeSession{})
 	one := func(s string) *string { return &s }
 
 	g := journalEditGrid()
@@ -178,30 +226,112 @@ func TestLoadTablePageReconcilesJournal(t *testing.T) {
 	ws.prepGrid(g)
 	tab := &dataTableTab{name: "users", grid: g}
 	ws.dataTabs = append(ws.dataTabs, tab)
+	ws.activeData = tab
 
-	g.setCell(0, 1, one("alice2"))
-	ws.flushEditJournal()
+	g.setCell(0, 1, one("alice2"))    // update on id=1
+	g.deleted = map[int]bool{2: true} // delete id=3
 	path := editJournalPath(ws.conn)
+	ws.flushEditJournal()
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("journal must exist before paging: %v", err)
 	}
 
+	// 翻到 OFFSET 1(只含 id=3):id=3 的删除被新页原位收编(deleted[0]、
+	// carry 消费),id=1 的更新不在页上、必须进 carry 而不是消失。
 	old := tab.grid
+	ws.loadTablePage(tab, 1)
+	ng := waitForGridSwap(t, tab, old)
+	if ng.changeCount() != 1 || !ng.deleted[0] {
+		t.Fatalf("the delete's row IS on this page and must re-apply in place: count=%d deleted=%v", ng.changeCount(), ng.deleted)
+	}
+	if len(tab.carryUpdates) != 1 || tab.carryUpdates[0].pk["id"] == nil || *tab.carryUpdates[0].pk["id"] != "1" {
+		t.Fatalf("the update's row is off-page and must ride the carry, got %+v", tab.carryUpdates)
+	}
+	if len(tab.carryDeletes) != 0 {
+		t.Fatalf("the delete was re-hosted and must leave the carry, got %+v", tab.carryDeletes)
+	}
+	// 日志必须同时包含网格上的删除与 carry 里的更新。
+	ws.flushEditJournal()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("journal must survive a flip whose edits are carried: %v", err)
+	}
+	var j editJournal
+	if err := json.Unmarshal(raw, &j); err != nil {
+		t.Fatalf("journal unreadable: %v", err)
+	}
+	if len(j.Tabs) != 1 || len(j.Tabs[0].Updates) != 1 || len(j.Tabs[0].Deletes) != 1 {
+		t.Fatalf("journal must snapshot carried + on-grid edits, got %+v", j.Tabs)
+	}
+
+	// 翻回含这两行的页:carry 原位重现,carry 清空。
+	old = tab.grid
 	ws.loadTablePage(tab, 0)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && tab.grid == old {
-		time.Sleep(10 * time.Millisecond)
+	ng = waitForGridSwap(t, tab, old)
+	if tab.carryCount() != 0 {
+		t.Fatalf("carry must be consumed by a page that shows the rows, count = %d", tab.carryCount())
 	}
-	if tab.grid == old {
-		t.Fatal("loadTablePage did not replace the grid in time")
+	if ng.changeCount() == 0 {
+		t.Fatal("re-applied edits must show as pending on the returned page")
 	}
-	// 对账保存(gen 已更新)必须让文件确定性消失;排队中的旧写入按代数放弃。
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	// id=1 的更新回到第 0 行,id=3 的删除回到第 2 行。
+	if v := ng.dirty[0][1]; v == nil || *v != "alice2" {
+		t.Fatalf("carried update not re-applied in place: %+v", ng.dirty)
 	}
-	t.Fatal("journal still claims edits for a page the session discarded")
+	if !ng.deleted[2] {
+		t.Fatal("carried delete not re-applied in place")
+	}
+
+	// 全部还原后,日志必须确定性消失(对账路径仍然成立)。
+	ng.setCell(0, 1, one("alice"))
+	ng.deleted = nil
+	ng.Refresh()
+	ws.flushEditJournal()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("journal must be gone once nothing is pending, stat err = %v", err)
+	}
+}
+
+// carryPageEdits 纯单测: from 页的编辑进 carry;to 页装得下的原位重匹配并从
+// carry 消费,装不下的留下;staged insert 永远随 carry(它不属于任何服务端页)。
+func TestCarryPageEditsReappliesAndCarries(t *testing.T) {
+	ws := journalTestWS(t)
+	ws.tableName = "users"
+	one := func(s string) *string { return &s }
+	mkGrid := func(rows [][]*string) *dataTable {
+		g := newDataTable(&TableData{
+			Cols:    []ColumnInfo{{Name: "id", Type: "int", Key: "PK"}, {Name: "name", Type: "varchar"}},
+			Rows:    rows,
+			Fetched: len(rows),
+			Total:   len(rows),
+		}, nil)
+		g.setEditable(true)
+		return g
+	}
+	from := mkGrid([][]*string{{one("1"), one("alice")}, {one("2"), one("bob")}})
+	tab := &dataTableTab{name: "users", grid: from}
+	ws.dataTabs = append(ws.dataTabs, tab)
+	from.setCell(0, 1, one("alice2"))                    // id=1 update
+	from.stageInsert(map[string]*string{"id": one("9")}) // staged insert
+
+	// to 页只含 id=2:id=1 的更新进 carry,id=9 的 insert 永远进 carry。
+	to := mkGrid([][]*string{{one("2"), one("bob")}})
+	ws.carryPageEdits(tab, from, to)
+	if len(tab.carryUpdates) != 1 || *tab.carryUpdates[0].pk["id"] != "1" {
+		t.Fatalf("carried updates = %+v", tab.carryUpdates)
+	}
+	if len(tab.carryInserts) != 1 || *tab.carryInserts[0]["id"] != "9" {
+		t.Fatalf("staged inserts must always carry, got %+v", tab.carryInserts)
+	}
+
+	// 换一页装得下 id=1:更新原位重现,carry 消费;insert 继续 carry。
+	back := mkGrid([][]*string{{one("1"), one("alice")}, {one("2"), one("bob")}})
+	ws.carryPageEdits(tab, to, back)
+	if tab.carryCount() != 1 || len(tab.carryInserts) != 1 {
+		t.Fatalf("re-hosted update must leave the carry, carry = %+v/%+v/%+v",
+			tab.carryUpdates, tab.carryDeletes, tab.carryInserts)
+	}
+	if v := back.dirty[0][1]; v == nil || *v != "alice2" {
+		t.Fatalf("carried update not re-applied in place: %+v", back.dirty)
+	}
 }

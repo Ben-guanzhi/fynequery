@@ -58,6 +58,18 @@ type dataTableTab struct {
 	// kvNext is the Redis value pager's continuation cursor ("" = exhausted
 	// or not a paged collection). The 加载更多值 button is driven by it.
 	kvNext string
+	// carryEdits hold unsaved edits from pages the user flipped away from
+	// (建议3: paging used to silently discard them). PK-keyed; staged inserts
+	// always ride here because a staged row exists on no server page.
+	// carryPageEdits owns the lifecycle: capture on flip, re-apply onto a
+	// page that shows the row, consume on commit, drop on rollback.
+	carryUpdates []rowUpdate
+	carryDeletes []map[string]*string
+	carryInserts []map[string]*string
+	// pageDone counts completed loadTablePage callbacks (atomic). A bump is
+	// the happens-before edge after which the swapped grid and its applied
+	// carry-over are safe to read from another goroutine.
+	pageDone atomic.Uint64
 }
 
 // docTab ties one strip entry to its content (a table view or a query pane).
@@ -2217,17 +2229,25 @@ func (ws *workspace) loadTablePage(t *dataTableTab, off int) {
 			t.offset = off
 			grid := newDataTable(data, ws.status)
 			ws.prepGrid(grid)
+			old := t.grid
 			t.grid = grid
-			// Paging replaces the grid wholesale: the old page's unsaved edits
-			// are dropped with it — paging is explicit navigation, same as
-			// closing the tab. The journal still holds the pre-flip snapshot;
-			// rewriting it here keeps the next launch from offering to
-			// "restore" edits this session already discarded.
+			// Paging no longer discards the old page's unsaved edits: they are
+			// re-applied in place when the incoming page shows their row and
+			// ride the tab's carry-over otherwise (commit/preview/banner/
+			// journal all merge it). The rewrite also keeps the journal in
+			// step with whatever survived the flip.
+			ws.carryPageEdits(t, old, grid)
 			ws.saveEditJournal()
 			if ws.activeData == t {
 				ws.pushTabGrid(t)
 				ws.updatePaging(off > 0, hasMore)
 			}
+			// Completion sequence: bumped after every mutation this callback
+			// makes (grid swap, carry re-application, journal snapshot).
+			// Observers that read tab state from another goroutine — tests
+			// under -race, and any future UI sync point — wait on it instead
+			// of polling unsynchronized fields.
+			t.pageDone.Add(1)
 		})
 	})
 }

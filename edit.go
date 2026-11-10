@@ -404,6 +404,11 @@ func (ws *workspace) refreshTxnBar() {
 	if ws.grid != nil {
 		n += ws.grid.changeCount()
 	}
+	// Carried edits (pages flipped away) commit with this tab: count them or
+	// a carry-only tab would show a clean banner with its commit unreachable.
+	if t := ws.activeData; t != nil {
+		n += t.carryCount()
+	}
 	if n == 0 {
 		ws.dirtyLabel.Hide()
 		ws.commitBtn.Hide()
@@ -688,15 +693,109 @@ func (ws *workspace) ensureEditable() bool {
 	return true
 }
 
+// ---- cross-page edit carry (建议3: paging no longer discards edits) --------
+
+// carryCount reports how many unsaved edits ride the tab's carry-over —
+// counted like changeCount (cells), plus carried deletes and staged inserts.
+func (t *dataTableTab) carryCount() int {
+	n := len(t.carryDeletes) + len(t.carryInserts)
+	for _, u := range t.carryUpdates {
+		n += len(u.changes)
+	}
+	return n
+}
+
+// carryPageEdits moves unsaved edits across a page flip. The outgoing page's
+// pending snapshot joins the tab's carry-over; then whatever the INCOMING
+// page can host is re-applied in place (visible again, committed exactly
+// once — the carry entry is consumed) and the rest stays carried until a
+// page shows the row, or commit consumes it, or rollback drops it. Staged
+// inserts always stay carried: a staged row exists on no server page. from
+// may be nil (fresh load). By construction a PK never lives in both the
+// grid's dirty maps and the carry at once, so commit can simply concatenate.
+func (ws *workspace) carryPageEdits(t *dataTableTab, from, to *dataTable) {
+	if t == nil || to == nil {
+		return
+	}
+	if from != nil && from.changeCount() > 0 {
+		u, d, i := from.pending()
+		t.carryUpdates = append(t.carryUpdates, u...)
+		t.carryDeletes = append(t.carryDeletes, d...)
+		t.carryInserts = append(t.carryInserts, i...)
+	}
+	if t.carryCount() == 0 {
+		return
+	}
+	// pkCols must be set for the PK re-match; the flip rebuilt the grid and
+	// edit mode may have been off, so force it like restorePending does.
+	to.setEditable(true)
+	colIdx := func(name string) int {
+		for i, c := range to.data.Cols {
+			if c.Name == name {
+				return i
+			}
+		}
+		return -1
+	}
+	keepU := make([]rowUpdate, 0, len(t.carryUpdates))
+	for _, u := range t.carryUpdates {
+		if row := to.findRowByPK(u.pk); row >= 0 && !to.deleted[row] {
+			for name, v := range u.changes {
+				if ci := colIdx(name); ci >= 0 {
+					to.setCell(row, ci, v) // setCell skips no-op restores itself
+				}
+			}
+		} else {
+			keepU = append(keepU, u)
+		}
+	}
+	t.carryUpdates = keepU
+	keepD := make([]map[string]*string, 0, len(t.carryDeletes))
+	for _, pk := range t.carryDeletes {
+		if row := to.findRowByPK(pk); row >= 0 && !to.deleted[row] {
+			if to.deleted == nil {
+				to.deleted = map[int]bool{}
+			}
+			to.deleted[row] = true
+			delete(to.dirty, row) // an edited-then-deleted row is simply deleted
+			to.Refresh()
+		} else {
+			keepD = append(keepD, pk)
+		}
+	}
+	t.carryDeletes = keepD
+}
+
+// carriedEditsOf returns the active tab's carry-over for merging into commit,
+// preview and the banner count. A nil tab (no data view) carries nothing.
+func (ws *workspace) carriedEditsOf() (t *dataTableTab, updates []rowUpdate, deletes, inserts []map[string]*string) {
+	t = ws.activeData
+	if t == nil {
+		return nil, nil, nil, nil
+	}
+	return t, t.carryUpdates, t.carryDeletes, t.carryInserts
+}
+
 // commitEdits applies the pending UPDATE/DELETE operations plus any queued
 // structure DDL, then reloads the page.
 func (ws *workspace) commitEdits() {
 	g := ws.grid
-	if g == nil || (g.changeCount() == 0 && len(ws.pendingDDL) == 0) {
+	tab, cU, cD, cI := ws.carriedEditsOf()
+	carry := 0
+	if tab != nil {
+		carry = tab.carryCount()
+	}
+	if g == nil || (g.changeCount() == 0 && len(ws.pendingDDL) == 0 && carry == 0) {
 		return
 	}
 	up, ok := db.AsUpdater(ws.sess)
 	updates, deletes, inserts := g.pending()
+	// The carry-over joins the batch (disjoint from the grid's edits by
+	// construction — carryPageEdits re-applies any carried edit its page can
+	// host, so a PK never lives in both places).
+	updates = append(updates, cU...)
+	deletes = append(deletes, cD...)
+	inserts = append(inserts, cI...)
 	if !ok && len(updates)+len(deletes)+len(inserts) > 0 {
 		showInfo(ws.window, "Commit", "This connection does not support editing.")
 		return
@@ -705,7 +804,7 @@ func (ws *workspace) commitEdits() {
 	ddl := append([]string(nil), ws.pendingDDL...) // snapshot; cleared below on success
 	// Safe Mode gate: committing pending edits is a write, so prompt per
 	// the connection's level before the batch reaches the server.
-	desc := fmt.Sprintf("commit %d row change(s)", g.changeCount())
+	desc := fmt.Sprintf("commit %d row change(s)", g.changeCount()+carry)
 	if len(inserts) > 0 {
 		desc += fmt.Sprintf(", %d new row(s)", len(inserts))
 	}
@@ -713,12 +812,15 @@ func (ws *workspace) commitEdits() {
 		desc += fmt.Sprintf(" and %d DDL statement(s)", len(ddl))
 	}
 	gateSafeMode(ws.window, ws.conn, "COMMIT — "+desc, func() {
-		ws.commitGated(up, ok, table, updates, deletes, inserts, ddl)
+		ws.commitGated(up, ok, table, tab, updates, deletes, inserts, ddl)
 	})
 }
 
 // commitGated applies one already-gated commit batch and reloads the page.
-func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates []rowUpdate, deletes, inserts []map[string]*string, ddl []string) {
+// carryTab is the tab whose carried edits joined this batch (nil = none); the
+// success path consumes them on THIS pointer, not on whatever tab is active
+// when the background commit lands.
+func (ws *workspace) commitGated(up db.Updater, ok bool, table string, carryTab *dataTableTab, updates []rowUpdate, deletes, inserts []map[string]*string, ddl []string) {
 	// Session snapshot, taken on the UI thread like `up` was: the workers' rule
 	// is "never read ws.sess" — a database switch or a close replaces it while
 	// this background commit runs, and the batch must land on the session its
@@ -783,26 +885,32 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, updates [
 				}
 			}
 		}
-			safeDo(func() {
-				progress.Hide()
-				if ferr != nil {
-					if len(ddl) > 0 {
-						ferr = fmt.Errorf("%w（排队的 %d 条 DDL 已丢弃，请手动重新排队）", ferr, len(ddl))
-					}
-					ws.pendingDDL = nil // failed commit: drop the queue, re-queue manually
-					ws.saveEditJournal() // the queue left the journal with it
-					dialog.NewError(friendlyErr(ferr), ws.window).Show()
-					return
+		safeDo(func() {
+			progress.Hide()
+			if ferr != nil {
+				if len(ddl) > 0 {
+					ferr = fmt.Errorf("%w（排队的 %d 条 DDL 已丢弃，请手动重新排队）", ferr, len(ddl))
 				}
-				ws.pendingDDL = nil
-				// The journal's entry for this tab dies with the commit: clear
-				// the edit state (which rewrites the journal) before the reload
-				// replaces the grid.
-				if ws.grid != nil {
-					ws.grid.clearDirty()
-				}
-				ws.reloadTable()
-			})
+				ws.pendingDDL = nil  // failed commit: drop the queue, re-queue manually
+				ws.saveEditJournal() // the queue left the journal with it
+				dialog.NewError(friendlyErr(ferr), ws.window).Show()
+				return
+			}
+			ws.pendingDDL = nil
+			// The carried edits went out with this batch: consume them
+			// (entry-captured tab — valid even if the user switched tabs
+			// while the commit ran).
+			if carryTab != nil {
+				carryTab.carryUpdates, carryTab.carryDeletes, carryTab.carryInserts = nil, nil, nil
+			}
+			// The journal's entry for this tab dies with the commit: clear
+			// the edit state (which rewrites the journal) before the reload
+			// replaces the grid.
+			if ws.grid != nil {
+				ws.grid.clearDirty()
+			}
+			ws.reloadTable()
+		})
 	})
 }
 
@@ -811,6 +919,9 @@ func (ws *workspace) rollbackEdits() {
 	pending := 0
 	if ws.grid != nil {
 		pending = ws.grid.changeCount()
+	}
+	if t := ws.activeData; t != nil {
+		pending += t.carryCount() // carried edits die with the rollback too
 	}
 	if pending == 0 && len(ws.pendingDDL) == 0 {
 		return // nothing to discard
@@ -823,6 +934,9 @@ func (ws *workspace) rollbackEdits() {
 			}
 			if ws.grid != nil {
 				ws.grid.clearDirty()
+			}
+			if t := ws.activeData; t != nil {
+				t.carryUpdates, t.carryDeletes, t.carryInserts = nil, nil, nil
 			}
 			ws.pendingDDL = nil
 			ws.refreshTxnBar()

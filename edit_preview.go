@@ -93,10 +93,20 @@ func buildPreviewSQL(table, driver string, updates []rowUpdate, deletes, inserts
 // buttons so the review doubles as a confirmation step.
 func (ws *workspace) previewEdits() {
 	g := ws.grid
-	if g == nil || (g.changeCount() == 0 && len(ws.pendingDDL) == 0) {
+	tab, cU, cD, cI := ws.carriedEditsOf()
+	carry := 0
+	if tab != nil {
+		carry = tab.carryCount()
+	}
+	if g == nil || (g.changeCount() == 0 && len(ws.pendingDDL) == 0 && carry == 0) {
 		return
 	}
 	updates, deletes, inserts := g.pending()
+	// The preview must show what commit will send — the carry-over included,
+	// same merge as commitEdits (建议5: 所见 SQL 即所执行 SQL).
+	updates = append(updates, cU...)
+	deletes = append(deletes, cD...)
+	inserts = append(inserts, cI...)
 	sqlText := buildPreviewSQL(ws.tableName, ws.conn.Driver, updates, deletes, inserts)
 	if d := strings.Join(ws.pendingDDL, "\n"); d != "" {
 		if sqlText != "" {

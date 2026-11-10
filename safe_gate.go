@@ -86,7 +86,7 @@ func trimLeading(s string) string {
 // subquery (SELECT …) never reads as DML.
 //
 // At depth 0, CTE names are followed by AS — the main statement keyword is
-// not. String literals (with '' and \' escapes), comments, and quoted
+// not. String literals (with ” and \' escapes), comments, and quoted
 // identifiers are skipped.
 func isWithStatementReadOnly(stmt string) bool {
 	s := stmt
