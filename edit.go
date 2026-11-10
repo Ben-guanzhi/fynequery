@@ -447,9 +447,19 @@ func (ws *workspace) refreshRowDetails() {
 		if ws.kvMode() {
 			// 键视图: while no element row is selected the right pane shows
 			// the key's server metadata (type, TTL, fetched element count) —
-			// the KV answer to a SQL table's column structure.
+			// the KV answer to a SQL table's column structure. The TTL card
+			// is editable in place when the session can administer keys.
 			if t := ws.activeData; t != nil {
-				ws.details.setRow(kvDetailsFields(t.name, t.kvMeta, t.gridRowCount()))
+				var onTTL func(string)
+				if _, ok := db.AsKeyAdmin(ws.sess); ok {
+					key := t.name
+					onTTL = func(cur string) {
+						if ka, ok := db.AsKeyAdmin(ws.sess); ok {
+							ws.editKeyTTL(key, cur, ka)
+						}
+					}
+				}
+				ws.details.setRow(kvDetailsFields(t.name, t.kvMeta, t.gridRowCount(), onTTL))
 			} else {
 				ws.details.setRowPrompt()
 			}

@@ -6,7 +6,6 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -119,43 +118,11 @@ func (ws *workspace) showKeyMeta(name string, ka db.KeyAdmin) {
 	})
 }
 
-// setKeyTTL changes the key's expiry. The input is a number of seconds; 0
-// removes the expiry (PERSIST), so the key never expires.
+// setKeyTTL opens the key's TTL editor from the sidebar menu. The dialog,
+// parsing, Safe Mode gate and apply all live in editKeyTTL (shared with the
+// details-pane in-place TTL edit).
 func (ws *workspace) setKeyTTL(name string, ka db.KeyAdmin) {
-	dialog.ShowEntryDialog("设置 TTL — "+name, "过期秒数（0 = 永不过期）", func(input string) {
-		input = strings.TrimSpace(input)
-		secs, err := strconv.ParseInt(input, 10, 64)
-		if err != nil {
-			showInfo(ws.window, "设置 TTL", "请输入整数秒数。")
-			return
-		}
-		if secs < 0 {
-			showInfo(ws.window, "设置 TTL", "秒数不能为负数；0 表示永不过期。")
-			return
-		}
-		ttl := time.Duration(secs) * time.Second
-		if secs > 0 && ttl <= 0 {
-			showInfo(ws.window, "设置 TTL", "过期时间过大。")
-			return
-		}
-		desc := fmt.Sprintf("PERSIST %q", name)
-		if secs > 0 {
-			desc = fmt.Sprintf("PEXPIRE %q %d", name, ttl.Milliseconds())
-		}
-		gateSafeMode(ws.window, ws.conn, desc, func() {
-			safeGo("setKeyTTL "+name, func() {
-				err := ka.SetKeyTTL(name, ttl)
-				safeDo(func() {
-					if err != nil {
-						showInfo(ws.window, "设置 TTL", err.Error())
-						return
-					}
-					ws.logf("已设置键 %s 的 TTL：%s", name, desc)
-					ws.showKeyMeta(name, ka)
-				})
-			})
-		})
-	}, ws.window)
+	ws.editKeyTTL(name, "", ka)
 }
 
 // renameKey asks for a new name and renames the key. The driver refuses to

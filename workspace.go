@@ -5,6 +5,7 @@ package main
 // bar. All data comes from the live db.Session handed to openWorkspace.
 
 import (
+	"errors"
 	"fmt"
 	"image/color"
 	"strconv"
@@ -85,12 +86,13 @@ func (ws *workspace) kvMode() bool {
 	return ws.conn.Driver == "redis"
 }
 
-// kvDetailsFields renders a key's server metadata as the read-only field
-// list the details pane displays while no element row is selected.
-// elements is the element count of the currently fetched window (the only
-// count the UI truthfully knows — a SCAN/MATCH key list never counted the
-// key's members).
-func kvDetailsFields(key string, meta *db.KeyMeta, elements int) []detailsField {
+// kvDetailsFields renders a key's server metadata as the field list the
+// details pane displays while no element row is selected. elements is the
+// element count of the currently fetched window (the only count the UI
+// truthfully knows — a SCAN/MATCH key list never counted the key's members).
+// onTTL, when non-nil, makes the TTL card editable in place (it receives the
+// rendered TTL text and shows the edit dialog); nil leaves it read-only.
+func kvDetailsFields(key string, meta *db.KeyMeta, elements int, onTTL func(current string)) []detailsField {
 	ttl := "永不过期"
 	if meta != nil && meta.HasTTL {
 		if meta.TTL > 0 {
@@ -107,9 +109,78 @@ func kvDetailsFields(key string, meta *db.KeyMeta, elements int) []detailsField 
 	return []detailsField{
 		{Name: "键", Value: &key, ReadOnly: true},
 		{Name: "类型", Value: &kind, ReadOnly: true},
-		{Name: "TTL", Value: &ttl, ReadOnly: true},
+		{Name: "TTL", Value: &ttl, Edit: onTTL},
 		{Name: "元素数(本窗口)", Value: &n, ReadOnly: true},
 	}
+}
+
+// ttlParseSeconds parses a TTL input as seconds (0 = never expire / PERSIST).
+// It also accepts Go duration spellings ("30s", "5m", "1h30m") because a
+// bare "90" and a human "90s" should not mean different things.
+func ttlParseSeconds(input string) (int64, error) {
+	input = strings.TrimSpace(input)
+	if secs, err := strconv.ParseInt(input, 10, 64); err == nil {
+		if secs < 0 {
+			return 0, errors.New("秒数不能为负数；0 表示永不过期")
+		}
+		return secs, nil
+	}
+	d, err := time.ParseDuration(input)
+	if err != nil {
+		return 0, errors.New("请输入整数秒数或时长（如 30s / 5m / 1h30m）；0 表示永不过期")
+	}
+	if d <= 0 {
+		return 0, errors.New("时长必须为正；0 表示永不过期")
+	}
+	secs := int64(d / time.Second)
+	if secs <= 0 {
+		return 0, errors.New("过期时间过小（不足 1 秒）。")
+	}
+	return secs, nil
+}
+
+// editKeyTTL opens the TTL editor for a key and applies the new expiry
+// through Safe Mode. Shared by the sidebar key menu and the details-pane
+// in-place TTL edit.
+func (ws *workspace) editKeyTTL(name, current string, ka db.KeyAdmin) {
+	dialog.ShowEntryDialog("设置 TTL — "+name,
+		"过期秒数或时长（如 30s / 5m / 1h30m）；0 = 永不过期\n当前："+current, func(input string) {
+			secs, err := ttlParseSeconds(input)
+			if err != nil {
+				showInfo(ws.window, "设置 TTL", err.Error())
+				return
+			}
+			ttl := time.Duration(secs) * time.Second
+			if secs > 0 && ttl <= 0 {
+				showInfo(ws.window, "设置 TTL", "过期时间过大。")
+				return
+			}
+			desc := fmt.Sprintf("PERSIST %q", name)
+			if secs > 0 {
+				desc = fmt.Sprintf("PEXPIRE %q %d", name, ttl.Milliseconds())
+			}
+			gateSafeMode(ws.window, ws.conn, desc, func() {
+				safeGo("setKeyTTL "+name, func() {
+					err := ka.SetKeyTTL(name, ttl)
+					safeDo(func() {
+						if err != nil {
+							showInfo(ws.window, "设置 TTL", err.Error())
+							return
+						}
+						ws.logf("已设置键 %s 的 TTL：%s", name, desc)
+						// The kind never changes on a TTL edit; only expiry does.
+						if t := ws.activeData; t != nil && t.name == name {
+							kind := ""
+							if t.kvMeta != nil {
+								kind = t.kvMeta.Kind
+							}
+							t.kvMeta = &db.KeyMeta{Kind: kind, HasTTL: secs > 0, TTL: ttl}
+						}
+						ws.refreshRowDetails()
+					})
+				})
+			})
+		}, ws.window)
 }
 
 // docTab ties one strip entry to its content (a table view or a query pane).

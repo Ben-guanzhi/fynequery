@@ -13,7 +13,7 @@ import (
 
 func TestKVDetailsFields(t *testing.T) {
 	// 永不过期: HasTTL=false
-	fs := kvDetailsFields("myhash", &db.KeyMeta{Kind: "hash"}, 128)
+	fs := kvDetailsFields("myhash", &db.KeyMeta{Kind: "hash"}, 128, nil)
 	if got := fieldText(t, fs, "类型"); got != "hash" {
 		t.Fatalf("类型 = %q, want hash", got)
 	}
@@ -28,19 +28,19 @@ func TestKVDetailsFields(t *testing.T) {
 	}
 
 	// 有 TTL: 剩余时长可读
-	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 90 * time.Second}, 1)
+	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 90 * time.Second}, 1, nil)
 	if got := fieldText(t, fs, "TTL"); got != "剩余 1m30s" {
 		t.Fatalf("TTL = %q, want 剩余 1m30s", got)
 	}
 
 	// HasTTL 且剩余 0: 已过期
-	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 0}, 0)
+	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 0}, 0, nil)
 	if got := fieldText(t, fs, "TTL"); got != "已过期" {
 		t.Fatalf("TTL = %q, want 已过期", got)
 	}
 
 	// 元数据未取到: 类型未知但界面不留空
-	fs = kvDetailsFields("k", nil, 0)
+	fs = kvDetailsFields("k", nil, 0, nil)
 	if got := fieldText(t, fs, "类型"); got != "未知" {
 		t.Fatalf("类型 = %q, want 未知", got)
 	}
@@ -111,5 +111,25 @@ func TestKVChromeHiddenForRedis(t *testing.T) {
 	ws.applyDataTab(tab)
 	if !ws.segment.Visible() || !ws.filterBtn.Visible() {
 		t.Fatal("switching back to SQL must restore the chrome")
+	}
+}
+
+// TestTTLParseSeconds 钉住 TTL 输入解析: 裸秒数、Go 时长拼写、0(永不过期)
+// 都接受;负数、垃圾、非正时长报错。
+func TestTTLParseSeconds(t *testing.T) {
+	ok := map[string]int64{
+		"30": 30, "0": 0, "  45  ": 45,
+		"30s": 30, "5m": 300, "1h30m": 5400, "90": 90,
+	}
+	for in, want := range ok {
+		got, err := ttlParseSeconds(in)
+		if err != nil || got != want {
+			t.Errorf("ttlParseSeconds(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"-5", "abc", "", "1h30m ago"} {
+		if _, err := ttlParseSeconds(in); err == nil {
+			t.Errorf("ttlParseSeconds(%q) = nil error, want failure", in)
+		}
 	}
 }
