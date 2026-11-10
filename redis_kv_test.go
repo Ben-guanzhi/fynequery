@@ -13,7 +13,7 @@ import (
 
 func TestKVDetailsFields(t *testing.T) {
 	// 永不过期: HasTTL=false
-	fs := kvDetailsFields("myhash", &db.KeyMeta{Kind: "hash"}, 128, nil)
+	fs := kvDetailsFields("myhash", &db.KeyMeta{Kind: "hash"}, 128, nil, nil)
 	if got := fieldText(t, fs, "类型"); got != "hash" {
 		t.Fatalf("类型 = %q, want hash", got)
 	}
@@ -28,19 +28,19 @@ func TestKVDetailsFields(t *testing.T) {
 	}
 
 	// 有 TTL: 剩余时长可读
-	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 90 * time.Second}, 1, nil)
+	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 90 * time.Second}, 1, nil, nil)
 	if got := fieldText(t, fs, "TTL"); got != "剩余 1m30s" {
 		t.Fatalf("TTL = %q, want 剩余 1m30s", got)
 	}
 
 	// HasTTL 且剩余 0: 已过期
-	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 0}, 0, nil)
+	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 0}, 0, nil, nil)
 	if got := fieldText(t, fs, "TTL"); got != "已过期" {
 		t.Fatalf("TTL = %q, want 已过期", got)
 	}
 
 	// 元数据未取到: 类型未知但界面不留空
-	fs = kvDetailsFields("k", nil, 0, nil)
+	fs = kvDetailsFields("k", nil, 0, nil, nil)
 	if got := fieldText(t, fs, "类型"); got != "未知" {
 		t.Fatalf("类型 = %q, want 未知", got)
 	}
@@ -79,6 +79,8 @@ func TestKVChromeHiddenForRedis(t *testing.T) {
 	ws := newTabHarness()
 	ws.pageMarkBtn = newFlatButton("≡")
 	ws.columnsBtn = newFlatButton("Columns")
+	// 生产代码在 buildBottomBar 构建删除键按钮;测试里手工补齐,否则断言空指针。
+	ws.deleteKeyBtn = newFlatButton("删除键")
 	tab := &dataTableTab{name: "mykey"}
 	tab.grid = newDataTable(emptyTableData(), ws.status)
 	ws.dataTabs = append(ws.dataTabs, tab)
@@ -92,6 +94,9 @@ func TestKVChromeHiddenForRedis(t *testing.T) {
 	if !ws.filterBtn.Visible() || !ws.columnsBtn.Visible() || !ws.pageMarkBtn.Visible() {
 		t.Fatal("SQL data view must show Filter/Columns/≡")
 	}
+	if ws.deleteKeyBtn.Visible() {
+		t.Fatal("SQL data view must not show 删除键")
+	}
 
 	// Redis:伪装退场。
 	ws.conn.Driver = "redis"
@@ -101,6 +106,9 @@ func TestKVChromeHiddenForRedis(t *testing.T) {
 	}
 	if ws.filterBtn.Visible() || ws.columnsBtn.Visible() || ws.pageMarkBtn.Visible() {
 		t.Fatal("KV keys must not show SQL-only buttons")
+	}
+	if !ws.deleteKeyBtn.Visible() {
+		t.Fatal("KV keys must show 删除键")
 	}
 	if tab.segIdx != 0 {
 		t.Fatalf("KV view must pin to the Data segment, segIdx = %d", tab.segIdx)
@@ -112,6 +120,21 @@ func TestKVChromeHiddenForRedis(t *testing.T) {
 	if !ws.segment.Visible() || !ws.filterBtn.Visible() {
 		t.Fatal("switching back to SQL must restore the chrome")
 	}
+	if ws.deleteKeyBtn.Visible() {
+		t.Fatal("switching back to SQL must hide 删除键")
+	}
+}
+
+// TestDeleteActiveKeyGuards 删除键的守卫: 非 KV 连接与空数据页都直接返回,
+// 不 panic、不弹确认框。
+func TestDeleteActiveKeyGuards(t *testing.T) {
+	ws := newTabHarness()
+	ws.conn.Driver = "mysql"
+	ws.deleteActiveKey() // 非 KV: no-op
+
+	ws.conn.Driver = "redis"
+	ws.activeData = nil
+	ws.deleteActiveKey() // 无数据页: no-op
 }
 
 // TestTTLParseSeconds 钉住 TTL 输入解析: 裸秒数、Go 时长拼写、0(永不过期)

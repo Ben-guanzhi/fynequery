@@ -86,13 +86,27 @@ func (ws *workspace) kvMode() bool {
 	return ws.conn.Driver == "redis"
 }
 
+// deleteActiveKey deletes the active tab's whole key (KV sessions). The
+// confirm dialog and Safe Mode gate live in deleteKey.
+func (ws *workspace) deleteActiveKey() {
+	t := ws.activeData
+	if t == nil || !ws.kvMode() {
+		return
+	}
+	ka, ok := db.AsKeyAdmin(ws.sess)
+	if !ok {
+		return
+	}
+	ws.deleteKey(t.name, ka)
+}
+
 // kvDetailsFields renders a key's server metadata as the field list the
 // details pane displays while no element row is selected. elements is the
 // element count of the currently fetched window (the only count the UI
 // truthfully knows — a SCAN/MATCH key list never counted the key's members).
 // onTTL, when non-nil, makes the TTL card editable in place (it receives the
 // rendered TTL text and shows the edit dialog); nil leaves it read-only.
-func kvDetailsFields(key string, meta *db.KeyMeta, elements int, onTTL func(current string)) []detailsField {
+func kvDetailsFields(key string, meta *db.KeyMeta, elements int, onRename, onTTL func(current string)) []detailsField {
 	ttl := "永不过期"
 	if meta != nil && meta.HasTTL {
 		if meta.TTL > 0 {
@@ -107,7 +121,9 @@ func kvDetailsFields(key string, meta *db.KeyMeta, elements int, onTTL func(curr
 	}
 	n := strconv.Itoa(elements)
 	return []detailsField{
-		{Name: "键", Value: &key, ReadOnly: true},
+		// Tapping the key name renames it in place (renameKey refuses to
+		// overwrite an existing key, so a typo cannot destroy another key).
+		{Name: "键", Value: &key, Edit: onRename},
 		{Name: "类型", Value: &kind, ReadOnly: true},
 		{Name: "TTL", Value: &ttl, Edit: onTTL},
 		{Name: "元素数(本窗口)", Value: &n, ReadOnly: true},
@@ -239,6 +255,7 @@ type workspace struct {
 	filterBtn        *flatButton       // bottom-bar Filter button (shows an active-filter dot)
 	columnsBtn       *flatButton       // bottom-bar Columns picker (hidden for KV keys)
 	pageMarkBtn      *flatButton       // bottom-bar ≡ shortcut to the column picker
+	deleteKeyBtn     *flatButton       // bottom-bar 删除键 (KV only: whole-key DEL)
 	loadingMu        sync.Mutex
 	loadingGen       int                // generation counter to discard stale async results
 	searchTimer      *time.Timer        // pending KV key-filter debounce
@@ -1522,8 +1539,13 @@ func (ws *workspace) buildBottomBar() fyne.CanvasObject {
 	columnsBtn := newFlatButton("Columns")
 	columnsBtn.onTap = func() { ws.showColumnsDialog() }
 	ws.columnsBtn = columnsBtn
+	// 删除键: a KV key's whole-key DEL, promoted from the sidebar right-click
+	// menu to a visible action (hidden for SQL connections).
+	ws.deleteKeyBtn = newFlatButton("删除键")
+	ws.deleteKeyBtn.onTap = func() { ws.deleteActiveKey() }
+	ws.deleteKeyBtn.Hide()
 	row2right := container.NewHBox(filtersBtn, spacerW(6), columnsBtn, spacerW(10),
-		ws.prevBtn, pageMark, ws.nextBtn, spacerW(6), ws.moreValBtn)
+		ws.prevBtn, pageMark, ws.nextBtn, spacerW(6), ws.moreValBtn, spacerW(6), ws.deleteKeyBtn)
 	// in-result search box (TablePlus in-grid spotlight) on the data tab.
 	findEntry := newGridSearchEntry()
 	findEntry.PlaceHolder = "在数据中查找…"
@@ -1818,6 +1840,15 @@ func (ws *workspace) applyDataTab(t *dataTableTab) {
 			ws.pageMarkBtn.Hide()
 		} else {
 			ws.pageMarkBtn.Show()
+		}
+	}
+	if ws.deleteKeyBtn != nil {
+		// Only a KV key has a whole-key DEL; a SQL table is dropped, not
+		// "deleted" row-for-row, so the button stays a KV-only affordance.
+		if kv {
+			ws.deleteKeyBtn.Show()
+		} else {
+			ws.deleteKeyBtn.Hide()
 		}
 	}
 	ws.refreshRowDetails()

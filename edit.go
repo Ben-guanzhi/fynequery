@@ -450,16 +450,21 @@ func (ws *workspace) refreshRowDetails() {
 			// the KV answer to a SQL table's column structure. The TTL card
 			// is editable in place when the session can administer keys.
 			if t := ws.activeData; t != nil {
-				var onTTL func(string)
+				var onRename, onTTL func(string)
 				if _, ok := db.AsKeyAdmin(ws.sess); ok {
 					key := t.name
+					onRename = func(string) {
+						if ka, ok := db.AsKeyAdmin(ws.sess); ok {
+							ws.renameKey(key, ka)
+						}
+					}
 					onTTL = func(cur string) {
 						if ka, ok := db.AsKeyAdmin(ws.sess); ok {
 							ws.editKeyTTL(key, cur, ka)
 						}
 					}
 				}
-				ws.details.setRow(kvDetailsFields(t.name, t.kvMeta, t.gridRowCount(), onTTL))
+				ws.details.setRow(kvDetailsFields(t.name, t.kvMeta, t.gridRowCount(), onRename, onTTL))
 			} else {
 				ws.details.setRowPrompt()
 			}
