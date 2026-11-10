@@ -68,11 +68,18 @@ type queryPane struct {
 	onRowSelect   func(data *TableData, row int) // a result row was selected
 	onLog         func(string)                   // workspace console sink (optional)
 	onKeysChanged func()                         // KV session: a run finished, refresh the sidebar key inventory
-	colCache      map[string][]string            // table -> column names (completion)
-	colVersion    int                            // bumped when colCache gains entries (invalidates sugCache)
-	colInflight   map[string]*colCall            // in-flight Columns() fetches, deduplicated per table
-	sug           *sugCache                      // built + sorted completion candidates (guarded by colMu)
-	colMu         sync.Mutex                     // guards colCache / colVersion / colInflight / sug
+	// Command-history navigation (Ctrl+Up / Ctrl+Down): a snapshot of the
+	// executed-statement history plus the position within it. histPos ==
+	// len(hist) means "at the live draft" (what the user was typing before
+	// navigating); the draft is restored when navigation returns there.
+	hist          []string
+	histPos       int
+	histDraft     string
+	colCache      map[string][]string // table -> column names (completion)
+	colVersion    int                 // bumped when colCache gains entries (invalidates sugCache)
+	colInflight   map[string]*colCall // in-flight Columns() fetches, deduplicated per table
+	sug           *sugCache           // built + sorted completion candidates (guarded by colMu)
+	colMu         sync.Mutex          // guards colCache / colVersion / colInflight / sug
 	shortcutBound bool
 
 	// runGen discards result batches from a superseded run (TablePlus
@@ -887,8 +894,69 @@ func (qp *queryPane) finishRun() {
 			qp.onKeysChanged()
 		}
 	}
+	// Reset history navigation: the statement just run is now the newest
+	// history entry, so the next Ctrl+Up starts fresh from the live editor.
+	qp.hist, qp.histDraft, qp.histPos = nil, "", 0
 	qp.running = false
 	qp.runBtn.setLabel("Run Current")
+}
+
+// historyPrev loads the previous executed statement into the editor (Ctrl+Up).
+// The first press snapshots the history and steps to the newest entry;
+// further presses walk back toward the oldest.
+func (qp *queryPane) historyPrev() {
+	if qp.side == nil || qp.editor == nil {
+		return
+	}
+	if qp.histPos >= len(qp.hist) {
+		// At the live draft: start navigating from the newest entry.
+		qp.hist = qp.side.historyItems()
+		if len(qp.hist) == 0 {
+			return
+		}
+		qp.histDraft = qp.editor.Text
+		qp.histPos = len(qp.hist) - 1
+	} else if qp.histPos > 0 {
+		qp.histPos--
+	} else {
+		return // already at the oldest entry
+	}
+	qp.setEditorTextAtEnd(qp.hist[qp.histPos])
+}
+
+// historyNext steps forward through history navigation, restoring the live
+// draft once the newest entry is passed (Ctrl+Down).
+func (qp *queryPane) historyNext() {
+	if qp.histPos >= len(qp.hist) {
+		return // not navigating (or already back at the live draft)
+	}
+	qp.histPos++
+	if qp.histPos >= len(qp.hist) {
+		qp.setEditorTextAtEnd(qp.histDraft) // back to what the user was typing
+		return
+	}
+	qp.setEditorTextAtEnd(qp.hist[qp.histPos])
+}
+
+// setEditorTextAtEnd replaces the editor's text and parks the cursor at the
+// very end — the natural spot after loading a history entry to re-run or edit.
+func (qp *queryPane) setEditorTextAtEnd(text string) {
+	if qp.editor == nil {
+		return
+	}
+	qp.editor.SetText(text)
+	line, col := 0, 0
+	for _, r := range text {
+		if r == '\n' {
+			line++
+			col = 0
+		} else {
+			col++
+		}
+	}
+	qp.editor.CursorRow = line
+	qp.editor.CursorColumn = col
+	qp.refreshPos()
 }
 
 // beginRun arms the run state (running flag + Cancel label) without resetting

@@ -546,6 +546,13 @@ func (qp *queryPane) bindEditorShortcuts() {
 	slash := &desktop.CustomShortcut{KeyName: fyne.KeySlash, Modifier: fyne.KeyModifierControl}
 	bindEntryShortcut(qp.editor, slash, func(fyne.Shortcut) { qp.toggleComment() })
 
+	// Ctrl+Up / Ctrl+Down: walk the executed-statement history into the editor
+	// (command-console staple — the KV/command mode's other half).
+	up := &desktop.CustomShortcut{KeyName: fyne.KeyUp, Modifier: fyne.KeyModifierControl}
+	down := &desktop.CustomShortcut{KeyName: fyne.KeyDown, Modifier: fyne.KeyModifierControl}
+	bindEntryShortcut(qp.editor, up, func(fyne.Shortcut) { qp.historyPrev() })
+	bindEntryShortcut(qp.editor, down, func(fyne.Shortcut) { qp.historyNext() })
+
 	// Focus the editor once this SQL tab is on-screen so typing works at once.
 	// Suppressed under test: see delayedFocusSuppressed / TestMain.
 	ed := qp.editor

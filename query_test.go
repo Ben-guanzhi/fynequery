@@ -93,3 +93,83 @@ func TestTruncationNote(t *testing.T) {
 		t.Errorf("truncationNote(true) = %q, want a truncation note", got)
 	}
 }
+
+// --- command-history navigation (Ctrl+Up / Ctrl+Down) -----------------------
+
+func historyTestPane(t *testing.T, entries ...string) *queryPane {
+	t.Helper()
+	qp := newTestQueryPane()
+	qp.side = newSidebar(nil, nil)
+	for _, e := range entries {
+		qp.side.appendHistory(e)
+	}
+	return qp
+}
+
+// TestCommandHistoryNavigation 钉住命令历史导航: Ctrl+Up 从最新往回翻、到最旧
+// 停住;Ctrl+Down 往前翻、越过最新一条后恢复导航前的草稿。
+func TestCommandHistoryNavigation(t *testing.T) {
+	qp := historyTestPane(t, "SELECT 1", "SELECT 2", "SELECT 3")
+
+	qp.historyPrev()
+	if got := qp.editor.Text; got != "SELECT 3" {
+		t.Fatalf("first prev = %q, want SELECT 3 (newest)", got)
+	}
+	qp.historyPrev()
+	if got := qp.editor.Text; got != "SELECT 2" {
+		t.Fatalf("second prev = %q, want SELECT 2", got)
+	}
+	// 到最旧: 再按 prev 停住不越界。
+	qp.historyPrev()
+	if got := qp.editor.Text; got != "SELECT 1" {
+		t.Fatalf("at oldest, prev = %q, want SELECT 1", got)
+	}
+	qp.historyPrev()
+	if got := qp.editor.Text; got != "SELECT 1" {
+		t.Fatalf("prev past oldest = %q, want SELECT 1", got)
+	}
+
+	// Down 往前翻: SELECT 2 → SELECT 3 → 恢复草稿。
+	qp.historyNext()
+	if got := qp.editor.Text; got != "SELECT 2" {
+		t.Fatalf("next = %q, want SELECT 2", got)
+	}
+	qp.historyNext()
+	if got := qp.editor.Text; got != "SELECT 3" {
+		t.Fatalf("next = %q, want SELECT 3 (newest)", got)
+	}
+	qp.historyNext()
+	if got := qp.editor.Text; got != "" {
+		t.Fatalf("next past newest = %q, want the live draft restored (empty)", got)
+	}
+	qp.historyNext()
+	if got := qp.editor.Text; got != "" {
+		t.Fatalf("next at live = %q, want empty", got)
+	}
+}
+
+// TestCommandHistoryDraftRestored 导航前正在输入的草稿必须被保存: 翻回去再翻
+// 回来,草稿原样恢复(不会丢掉用户打到一半的语句)。
+func TestCommandHistoryDraftRestored(t *testing.T) {
+	qp := historyTestPane(t, "SELECT 1")
+	qp.editor.SetText("SELECT draft")
+	qp.historyPrev()
+	if got := qp.editor.Text; got != "SELECT 1" {
+		t.Fatalf("prev = %q, want SELECT 1", got)
+	}
+	qp.historyNext()
+	if got := qp.editor.Text; got != "SELECT draft" {
+		t.Fatalf("back to live = %q, want the draft restored", got)
+	}
+}
+
+// TestCommandHistoryEmptyNoop 空历史: 历史导航必须是 no-op,不改动编辑器。
+func TestCommandHistoryEmptyNoop(t *testing.T) {
+	qp := historyTestPane(t)
+	qp.editor.SetText("SELECT draft")
+	qp.historyPrev()
+	qp.historyNext()
+	if got := qp.editor.Text; got != "SELECT draft" {
+		t.Fatalf("empty history must be a no-op, got %q", got)
+	}
+}
