@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,6 +71,45 @@ type dataTableTab struct {
 	// the happens-before edge after which the swapped grid and its applied
 	// carry-over are safe to read from another goroutine.
 	pageDone atomic.Uint64
+	// kvMeta is the KV key's server-reported type and expiry (nil until the
+	// async fetch lands). The details pane shows it while no element row is
+	// selected — the 键视图's answer to a SQL table's column structure.
+	kvMeta *db.KeyMeta
+}
+
+// kvMode reports whether the current connection is a KV store (Redis today):
+// keys are not tables, so the data view drops the SQL disguises (structure /
+// indexes segments, filter / column pickers) and the details pane shows key
+// metadata. Same verdict the sidebar's kv inventory uses.
+func (ws *workspace) kvMode() bool {
+	return ws.conn.Driver == "redis"
+}
+
+// kvDetailsFields renders a key's server metadata as the read-only field
+// list the details pane displays while no element row is selected.
+// elements is the element count of the currently fetched window (the only
+// count the UI truthfully knows — a SCAN/MATCH key list never counted the
+// key's members).
+func kvDetailsFields(key string, meta *db.KeyMeta, elements int) []detailsField {
+	ttl := "永不过期"
+	if meta != nil && meta.HasTTL {
+		if meta.TTL > 0 {
+			ttl = "剩余 " + meta.TTL.String()
+		} else {
+			ttl = "已过期"
+		}
+	}
+	kind := "未知"
+	if meta != nil && meta.Kind != "" {
+		kind = meta.Kind
+	}
+	n := strconv.Itoa(elements)
+	return []detailsField{
+		{Name: "键", Value: &key, ReadOnly: true},
+		{Name: "类型", Value: &kind, ReadOnly: true},
+		{Name: "TTL", Value: &ttl, ReadOnly: true},
+		{Name: "元素数(本窗口)", Value: &n, ReadOnly: true},
+	}
 }
 
 // docTab ties one strip entry to its content (a table view or a query pane).
@@ -126,6 +166,8 @@ type workspace struct {
 	pendingDDL       []string          // queued ALTER TABLE statements (Preview/Commit)
 	findCounterLabel *widget.Label     // "cur/total" counter for the data-grid find box
 	filterBtn        *flatButton       // bottom-bar Filter button (shows an active-filter dot)
+	columnsBtn       *flatButton       // bottom-bar Columns picker (hidden for KV keys)
+	pageMarkBtn      *flatButton       // bottom-bar ≡ shortcut to the column picker
 	loadingMu        sync.Mutex
 	loadingGen       int                // generation counter to discard stale async results
 	searchTimer      *time.Timer        // pending KV key-filter debounce
@@ -1402,11 +1444,13 @@ func (ws *workspace) buildBottomBar() fyne.CanvasObject {
 	ws.moreValBtn.Hide()
 	pageMark := newFlatButton("≡")
 	pageMark.onTap = func() { ws.showColumnsDialog() }
+	ws.pageMarkBtn = pageMark
 	filtersBtn := newFlatButton("Filter")
 	filtersBtn.onTap = func() { ws.showFilterDialog() }
 	ws.filterBtn = filtersBtn
 	columnsBtn := newFlatButton("Columns")
 	columnsBtn.onTap = func() { ws.showColumnsDialog() }
+	ws.columnsBtn = columnsBtn
 	row2right := container.NewHBox(filtersBtn, spacerW(6), columnsBtn, spacerW(10),
 		ws.prevBtn, pageMark, ws.nextBtn, spacerW(6), ws.moreValBtn)
 	// in-result search box (TablePlus in-grid spotlight) on the data tab.
@@ -1660,6 +1704,18 @@ func (ws *workspace) applyDataTab(t *dataTableTab) {
 	}
 	ws.structPane.Refresh()
 	ws.indexPane.Refresh()
+	// KV keys are not tables: the Structure/Indexes segments are disguise
+	// noise (synthetic columns, empty indexes), so the segmented control
+	// hides and the view pins to Data. Switching back to a SQL connection
+	// restores the normal chrome.
+	if ws.kvMode() {
+		if ws.segment != nil {
+			ws.segment.Hide()
+		}
+		t.segIdx = 0
+	} else if ws.segment != nil {
+		ws.segment.Show()
+	}
 	ws.segment.set(t.segIdx)
 
 	// re-sync the shared status/paging/filter chrome for this table.
@@ -1669,6 +1725,30 @@ func (ws *workspace) applyDataTab(t *dataTableTab) {
 	ws.status.setFrom(t.offset + 1)
 	ws.updatePaging(t.offset > 0, t.gridRowCount() >= browseLimit)
 	ws.refreshFilterChip()
+	// KV keys have no WHERE filter and no column set to pick from: hide the
+	// SQL-only chrome instead of letting it error or show noise on click.
+	kv := ws.kvMode()
+	if ws.filterBtn != nil {
+		if kv {
+			ws.filterBtn.Hide()
+		} else {
+			ws.filterBtn.Show()
+		}
+	}
+	if ws.columnsBtn != nil {
+		if kv {
+			ws.columnsBtn.Hide()
+		} else {
+			ws.columnsBtn.Show()
+		}
+	}
+	if ws.pageMarkBtn != nil {
+		if kv {
+			ws.pageMarkBtn.Hide()
+		} else {
+			ws.pageMarkBtn.Show()
+		}
+	}
 	ws.refreshRowDetails()
 }
 
@@ -2123,8 +2203,25 @@ func (ws *workspace) loadTableData(t *dataTableTab, offset int) {
 			t.grid = grid
 			ws.pushTabGrid(t)
 			ws.logf("已加载表 %s：%d 行", name, len(data.Rows))
-			ws.loadStructureTab(t, sess)
-			ws.loadIndexesTab(t, sess)
+			if driver != "redis" {
+				// A KV key has synthetic columns and no indexes: both panes
+				// would be disguise noise (and two wasted round trips).
+				ws.loadStructureTab(t, sess)
+				ws.loadIndexesTab(t, sess)
+			} else if ka, ok := db.AsKeyAdmin(sess); ok {
+				// 键视图 metadata: the details pane shows the key's type and
+				// remaining TTL while no element row is selected — the KV
+				// answer to a SQL table's column structure.
+				if meta, merr := ka.KeyMeta(name); merr == nil {
+					safeDo(func() {
+						if ws.liveSession() != sess || gen != t.gen || !ws.tabOpen(t) {
+							return
+						}
+						t.kvMeta = &meta
+						ws.refreshRowDetails()
+					})
+				}
+			}
 			safeGo("approxRows "+name, func() {
 				total, approx := ws.approxRows(name)
 				safeDo(func() {

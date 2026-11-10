@@ -153,12 +153,23 @@ func oneLine(s string, max int) string {
 	return s
 }
 
+// queryPlaceholder returns the editor placeholder for a connection's driver.
+// A KV session runs one command per line (replies render as a single "reply"
+// column), so the example matches what actually executes there instead of
+// teaching SQL that the driver would reject.
+func queryPlaceholder(driver string) string {
+	if driver == "redis" {
+		return "逐行输入 Redis 命令（每行一条，分号可省略），例如：\nHGETALL myhash\nSCAN 0 MATCH user:* COUNT 100\nSET greeting \"hello\"\n\nCtrl+Enter 执行 · 回复按行拼成 reply 表"
+	}
+	return "Write SQL here, e.g.\nSELECT id, name FROM users LIMIT 20;\n\nCtrl+Enter 执行当前语句 · Ctrl+Space 补全关键字 / 表 / 列"
+}
+
 func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	qp.editor = widget.NewMultiLineEntry()
 	qp.editor.TextStyle.Monospace = true  // SQL reads best in a monospace font
 	qp.editor.Wrapping = fyne.TextWrapOff // keep statements on one line; scroll horizontally
 	gutter := newLineGutter(qp.editor)    // line-number gutter, scroll-synced to the editor
-	qp.editor.SetPlaceHolder("Write SQL here, e.g.\nSELECT id, name FROM users LIMIT 20;\n\nCtrl+Enter 执行当前语句 · Ctrl+Space 补全关键字 / 表 / 列")
+	qp.editor.SetPlaceHolder(queryPlaceholder(qp.conn.Driver))
 	// keep the cursor-position readout roughly current and offer completions
 	// while typing (the popup updates as the word under the cursor changes)
 	qp.editor.OnChanged = func(string) {

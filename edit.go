@@ -444,6 +444,17 @@ func (ws *workspace) refreshRowDetails() {
 	}
 	g := ws.grid
 	if g == nil || g.data == nil || g.selRow < 0 || g.selRow >= len(g.data.Rows) {
+		if ws.kvMode() {
+			// 键视图: while no element row is selected the right pane shows
+			// the key's server metadata (type, TTL, fetched element count) —
+			// the KV answer to a SQL table's column structure.
+			if t := ws.activeData; t != nil {
+				ws.details.setRow(kvDetailsFields(t.name, t.kvMeta, t.gridRowCount()))
+			} else {
+				ws.details.setRowPrompt()
+			}
+			return
+		}
 		if len(ws.tableCols) > 0 {
 			ws.details.setTable(ws.tableName, ws.tableCols)
 		} else {
