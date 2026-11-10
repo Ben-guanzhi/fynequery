@@ -1871,6 +1871,10 @@ func (ws *workspace) newQueryTabPane() *queryPane {
 	qp.onReconnect = ws.reconnect
 	qp.onRowSelect = ws.showQueryRow
 	qp.onLog = func(s string) { ws.logf("%s", s) }
+	// A KV command can create/rename/delete keys: refresh the sidebar's key
+	// inventory when the run lands, so the browse half of the dual mode stays
+	// in step with the command half (suggestion 6).
+	qp.onKeysChanged = ws.loadInventory
 	qp.Hide()
 	return qp
 }

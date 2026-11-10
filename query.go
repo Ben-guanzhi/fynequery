@@ -67,6 +67,7 @@ type queryPane struct {
 	onReconnect   func(func(db.Session))         // workspace dials a fresh session, then calls back (timeout dialog)
 	onRowSelect   func(data *TableData, row int) // a result row was selected
 	onLog         func(string)                   // workspace console sink (optional)
+	onKeysChanged func()                         // KV session: a run finished, refresh the sidebar key inventory
 	colCache      map[string][]string            // table -> column names (completion)
 	colVersion    int                            // bumped when colCache gains entries (invalidates sugCache)
 	colInflight   map[string]*colCall            // in-flight Columns() fetches, deduplicated per table
@@ -877,6 +878,15 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 
 // finishRun resets the busy state and the Run/Cancel button.
 func (qp *queryPane) finishRun() {
+	// A KV command can create/rename/delete keys (SET/RENAME/DEL/…): refresh
+	// the sidebar's key inventory so the browse half of the dual mode stays in
+	// step with the command half. SQL connections are left alone — DML never
+	// changes the table list, and re-scanning it would be pure waste.
+	if qp.onKeysChanged != nil {
+		if _, ok := db.AsKeyPager(qp.session()); ok {
+			qp.onKeysChanged()
+		}
+	}
 	qp.running = false
 	qp.runBtn.setLabel("Run Current")
 }

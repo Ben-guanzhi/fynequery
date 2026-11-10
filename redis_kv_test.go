@@ -6,6 +6,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"fyne.io/fyne/v2/test"
 	"time"
 
 	"fynequery/db"
@@ -154,5 +156,38 @@ func TestTTLParseSeconds(t *testing.T) {
 		if _, err := ttlParseSeconds(in); err == nil {
 			t.Errorf("ttlParseSeconds(%q) = nil error, want failure", in)
 		}
+	}
+}
+
+// kvFakeSession 在 fakeSession 之上补 KeyPager 能力,让 finishRun 的键清单
+// 刷新路径无需真实 Redis 即可被测。
+type kvFakeSession struct {
+	fakeSession
+}
+
+func (kvFakeSession) MoreKeys() bool                   { return false }
+func (kvFakeSession) LoadMoreKeys() (int, bool, error) { return 0, false, nil }
+
+// TestFinishRunReloadsKVInventory 双模式的联动: KV 会话的命令跑完必须刷新侧栏
+// 键清单(SET/RENAME/DEL 会改键空间),SQL 会话则不动(DML 不改表清单)。
+func TestFinishRunReloadsKVInventory(t *testing.T) {
+	a := test.NewApp()
+	w := a.NewWindow("kv")
+	fired := false
+	qp := newQueryPane(w, Connection{Driver: "redis"}, &kvFakeSession{}, nil)
+	qp.CreateRenderer() // builds runBtn etc. that finishRun touches
+	qp.onKeysChanged = func() { fired = true }
+	qp.finishRun()
+	if !fired {
+		t.Fatal("a KV run must refresh the sidebar key inventory")
+	}
+
+	fired = false
+	qp2 := newQueryPane(w, Connection{Driver: "mysql"}, &fakeSession{}, nil)
+	qp2.CreateRenderer()
+	qp2.onKeysChanged = func() { fired = true }
+	qp2.finishRun()
+	if fired {
+		t.Fatal("a SQL run must not reload the key inventory")
 	}
 }
