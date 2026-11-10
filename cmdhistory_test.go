@@ -10,7 +10,11 @@ import (
 
 func TestCommandHistoryRoundTrip(t *testing.T) {
 	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
-	entries := []string{"SELECT 1", "SET k v", "SELECT 'a;b'"}
+	entries := []historyRec{
+		{Stmt: "SELECT 1", Conn: "dev"},
+		{Stmt: "SET k v", Conn: "dev"},
+		{Stmt: "SELECT 'a;b'"},
+	}
 	if err := saveCommandHistory(commandHistoryPath(), entries); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -20,7 +24,7 @@ func TestCommandHistoryRoundTrip(t *testing.T) {
 	}
 	for i := range entries {
 		if got[i] != entries[i] {
-			t.Fatalf("entry %d = %q, want %q", i, got[i], entries[i])
+			t.Fatalf("entry %d = %+v, want %+v", i, got[i], entries[i])
 		}
 	}
 }
@@ -51,16 +55,16 @@ func TestCommandHistoryCap(t *testing.T) {
 	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
 	s := newSidebar(nil, nil)
 	for i := 0; i < maxCommandHistory+50; i++ {
-		s.appendHistory("SELECT " + itoa(i))
+		s.appendHistory("SELECT "+itoa(i), "")
 	}
 	if len(s.history) != maxCommandHistory {
 		t.Fatalf("history must be capped at %d, got %d", maxCommandHistory, len(s.history))
 	}
 	// 最老的 50 条被丢弃: 首条应是第 50 次执行的语句。
-	if s.history[0] != "SELECT 50" {
+	if s.history[0].Stmt != "SELECT 50" {
 		t.Fatalf("oldest entries must be dropped, got %q", s.history[0])
 	}
-	if s.history[len(s.history)-1] != "SELECT "+itoa(maxCommandHistory+49) {
+	if s.history[len(s.history)-1].Stmt != "SELECT "+itoa(maxCommandHistory+49) {
 		t.Fatalf("newest entry wrong, got %q", s.history[len(s.history)-1])
 	}
 }
@@ -68,9 +72,9 @@ func TestCommandHistoryCap(t *testing.T) {
 // 侧栏构造时载入持久化的历史: 重启后 Ctrl+Up 仍能翻回上次的语句。
 func TestCommandHistorySidebarLoads(t *testing.T) {
 	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
-	saveCommandHistory(commandHistoryPath(), []string{"SELECT 1", "SELECT 2"})
+	saveCommandHistory(commandHistoryPath(), []historyRec{{Stmt: "SELECT 1", Conn: ""}, {Stmt: "SELECT 2", Conn: ""}})
 	s := newSidebar(nil, nil)
-	if len(s.history) != 2 || s.history[0] != "SELECT 1" || s.history[1] != "SELECT 2" {
+	if len(s.history) != 2 || s.history[0].Stmt != "SELECT 1" || s.history[1].Stmt != "SELECT 2" {
 		t.Fatalf("sidebar must load persisted history, got %v", s.history)
 	}
 }

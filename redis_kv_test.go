@@ -166,26 +166,26 @@ func TestTTLParseSeconds(t *testing.T) {
 func TestHistoryFuzzySearch(t *testing.T) {
 	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
 	s := newSidebar(nil, nil)
-	s.appendHistory("SELECT * FROM users")
-	s.appendHistory("HGETALL myhash")
-	s.appendHistory("SELECT * FROM orders")
+	s.appendHistory("SELECT * FROM users", "")
+	s.appendHistory("HGETALL myhash", "")
+	s.appendHistory("SELECT * FROM orders", "")
 	body := s.body
 	body.historySearch = widget.NewEntry()
 
 	all := body.filteredHistory()
-	if len(all) != 3 || all[0] != "SELECT * FROM orders" || all[2] != "SELECT * FROM users" {
+	if len(all) != 3 || all[0].Stmt != "SELECT * FROM orders" || all[2].Stmt != "SELECT * FROM users" {
 		t.Fatalf("empty term must return all newest-first, got %v", all)
 	}
 
 	body.historySearch.SetText("sel")
 	got := body.filteredHistory()
-	if len(got) != 2 || got[0] != "SELECT * FROM orders" || got[1] != "SELECT * FROM users" {
+	if len(got) != 2 || got[0].Stmt != "SELECT * FROM orders" || got[1].Stmt != "SELECT * FROM users" {
 		t.Fatalf("fuzzy 'sel' = %v, want the two SELECTs newest-first", got)
 	}
 
 	body.historySearch.SetText("hget")
 	got = body.filteredHistory()
-	if len(got) != 1 || got[0] != "HGETALL myhash" {
+	if len(got) != 1 || got[0].Stmt != "HGETALL myhash" {
 		t.Fatalf("fuzzy 'hget' = %v, want only HGETALL", got)
 	}
 
@@ -295,5 +295,38 @@ func TestSidebarKVFuzzySearch(t *testing.T) {
 	s.applyFilter()
 	if len(s.filtered) != 0 {
 		t.Fatalf("no-match = %v, want empty", s.filtered)
+	}
+}
+
+// TestHistoryConnAttribution 连接归属: 历史条目记录执行它的连接,详情列表显示
+// [conn] 前缀,模糊搜索可按连接名命中(跨连接全局历史的可用性核心)。
+func TestHistoryConnAttribution(t *testing.T) {
+	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
+	s := newSidebar(nil, nil)
+	s.appendHistory("SELECT 1", "dev")
+	s.appendHistory("HGETALL k", "cache")
+	body := s.body
+	body.historySearch = widget.NewEntry()
+
+	recs := body.filteredHistory()
+	if len(recs) != 2 || recs[0].Conn != "cache" || recs[1].Conn != "dev" {
+		t.Fatalf("recs = %+v, want cache newest-first then dev", recs)
+	}
+
+	// 按连接名模糊命中(跨连接筛选)。
+	body.historySearch.SetText("cache")
+	got := body.filteredHistory()
+	if len(got) != 1 || got[0].Conn != "cache" {
+		t.Fatalf("fuzzy on conn = %v, want only cache", got)
+	}
+
+	// 持久化往返保留连接归属。
+	path := commandHistoryPath()
+	if err := saveCommandHistory(path, s.history); err != nil {
+		t.Fatal(err)
+	}
+	loaded := loadCommandHistory()
+	if len(loaded) != 2 || loaded[0].Conn != "cache" || loaded[1].Conn != "dev" {
+		t.Fatalf("persisted conns = %+v", loaded)
 	}
 }

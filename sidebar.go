@@ -60,7 +60,7 @@ type sidebar struct {
 	filtered    []TableInfo       // after search filter
 	database    string
 	selID       string // currently selected tree node id (drives white-on-blue rows)
-	history     []string
+	history     []historyRec
 	// histW serializes command-history disk writes (see cmdhistory.go).
 	histW       historyWriter
 	loaded      bool
@@ -196,8 +196,8 @@ func (s *sidebar) setInventory(objs []TableInfo, database string) {
 }
 
 // appendHistory records one executed statement for the History pane.
-func (s *sidebar) appendHistory(sqlText string) {
-	s.history = append(s.history, sqlText)
+func (s *sidebar) appendHistory(sqlText, conn string) {
+	s.history = append(s.history, historyRec{Stmt: sqlText, Conn: conn})
 	if len(s.history) > maxCommandHistory {
 		// 有界: 最老的先丢弃,文件与内存都不会无限膨胀。
 		s.history = s.history[len(s.history)-maxCommandHistory:]
@@ -219,7 +219,7 @@ func (s *sidebar) persistHistory() {
 	s.histW.gen++
 	gen := s.histW.gen
 	s.histW.mu.Unlock()
-	entries := append([]string(nil), s.history...)
+	entries := append([]historyRec(nil), s.history...)
 	safeGo("cmdhistory", func() {
 		s.writeHistory(gen, path, entries)
 	})
@@ -227,7 +227,7 @@ func (s *sidebar) persistHistory() {
 
 // writeHistory 执行磁盘写入。调用方持有 histW.mu;代数已非最新则放弃(更新的
 // 快照在队列里,会代为落盘)。
-func (s *sidebar) writeHistory(gen uint64, path string, entries []string) {
+func (s *sidebar) writeHistory(gen uint64, path string, entries []historyRec) {
 	s.histW.mu.Lock()
 	defer s.histW.mu.Unlock()
 	if gen != s.histW.gen {
@@ -243,7 +243,9 @@ func (s *sidebar) writeHistory(gen uint64, path string, entries []string) {
 // quick-open palette.
 func (s *sidebar) historyItems() []string {
 	out := make([]string, len(s.history))
-	copy(out, s.history)
+	for i, r := range s.history {
+		out[i] = r.Stmt
+	}
 	return out
 }
 
@@ -735,7 +737,13 @@ func (b *sidebarBody) CreateRenderer() fyne.WidgetRenderer {
 				return
 			}
 			lbl.Truncation = fyne.TextTruncateEllipsis
-			lbl.SetText(strings.ReplaceAll(items[i], "\n", " ⏎ "))
+			rec := items[i]
+			stmtText := strings.ReplaceAll(rec.Stmt, "\n", " ⏎ ")
+			if rec.Conn != "" {
+				lbl.SetText("[" + rec.Conn + "] " + stmtText)
+			} else {
+				lbl.SetText(stmtText)
+			}
 		},
 	)
 	historyList.OnSelected = func(id widget.ListItemID) {
@@ -745,7 +753,7 @@ func (b *sidebarBody) CreateRenderer() fyne.WidgetRenderer {
 		}
 		historyList.UnselectAll()
 		if b.s.onHistoryPick != nil {
-			b.s.onHistoryPick(items[id])
+			b.s.onHistoryPick(items[id].Stmt)
 		}
 	}
 	history := container.NewBorder(historySearch, nil, nil, nil, historyList)
@@ -775,22 +783,25 @@ func (b *sidebarBody) CreateRenderer() fyne.WidgetRenderer {
 // everything). Uses dbcore/fuzzy's orbit-aware folding so "sel" finds
 // "SELECT" and "hgetall" matches case-insensitively, like the quick-open
 // palette.
-func (b *sidebarBody) filteredHistory() []string {
+func (b *sidebarBody) filteredHistory() []historyRec {
 	all := b.s.history
 	term := ""
 	if b.historySearch != nil {
 		term = strings.TrimSpace(b.historySearch.Text)
 	}
 	needle := fuzzy.FoldString(term)
-	out := make([]string, 0, len(all))
+	out := make([]historyRec, 0, len(all))
 	for i := len(all) - 1; i >= 0; i-- {
-		e := all[i]
+		r := all[i]
 		if needle == "" {
-			out = append(out, e)
+			out = append(out, r)
 			continue
 		}
-		if _, ok := fuzzyScore(needle, fuzzy.FoldString(e)); ok {
-			out = append(out, e)
+		// Match across the connection label AND the statement, so the global
+		// history can be narrowed to one connection or to a command fragment.
+		text := fuzzy.FoldString(r.Conn) + " " + fuzzy.FoldString(r.Stmt)
+		if _, ok := fuzzyScore(needle, text); ok {
+			out = append(out, r)
 		}
 	}
 	return out

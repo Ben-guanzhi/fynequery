@@ -34,9 +34,9 @@ func TestFuzzyScore(t *testing.T) {
 // pattern matching no candidate.
 func TestQuickOpenSearch(t *testing.T) {
 	ws := &workspace{side: newSidebar(func(string) {}, func() {})}
-	ws.side.appendHistory("SELECT * FROM users")
-	ws.side.appendHistory("SELECT name FROM customers")
-	ws.side.appendHistory("UPDATE users SET active = 1")
+	ws.side.appendHistory("SELECT * FROM users", "")
+	ws.side.appendHistory("SELECT name FROM customers", "")
+	ws.side.appendHistory("UPDATE users SET active = 1", "")
 
 	got := ws.quickOpenSearch("users")
 	if len(got) == 0 {
@@ -72,7 +72,7 @@ func TestQuickOpenSearch(t *testing.T) {
 // case: a term in a different case still finds the candidate.
 func TestQuickOpenCandidatesCaseInsensitive(t *testing.T) {
 	ws := &workspace{side: newSidebar(func(string) {}, func() {})}
-	ws.side.appendHistory("SELECT * FROM Users")
+	ws.side.appendHistory("SELECT * FROM Users", "")
 	got := ws.quickOpenSearch("USERS")
 	if len(got) != 1 {
 		t.Fatalf("case-insensitive search returned %d hits, want 1", len(got))

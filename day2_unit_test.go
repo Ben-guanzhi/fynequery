@@ -305,7 +305,7 @@ func TestAnchoredScore(t *testing.T) {
 
 func TestQuickOpenAnchoredSyntax(t *testing.T) {
 	ws := &workspace{side: newSidebar(func(string) {}, func() {})}
-	ws.side.appendHistory("SELECT * FROM users")
+	ws.side.appendHistory("SELECT * FROM users", "")
 
 	// Exact anchored history SQL.
 	got := ws.quickOpenSearch("^select * from users$")
@@ -320,7 +320,7 @@ func TestQuickOpenAnchoredSyntax(t *testing.T) {
 
 func TestQuickOpenActionsOnEmptyPattern(t *testing.T) {
 	ws := &workspace{side: newSidebar(func(string) {}, func() {})}
-	ws.side.appendHistory("SELECT 1")
+	ws.side.appendHistory("SELECT 1", "")
 	actions := 0
 	for _, m := range ws.quickOpenSearch("") {
 		if m.Kind == "action" {

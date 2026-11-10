@@ -104,7 +104,7 @@ func historyTestPane(t *testing.T, entries ...string) *queryPane {
 	qp := newTestQueryPane()
 	qp.side = newSidebar(nil, nil)
 	for _, e := range entries {
-		qp.side.appendHistory(e)
+		qp.side.appendHistory(e, "")
 	}
 	return qp
 }

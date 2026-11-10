@@ -872,7 +872,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 			qp.status.setQueryInfo(statusLine)
 			tab.setMeta(timerText, statusLine)
 			if qp.side != nil {
-				qp.side.appendHistory(stmt)
+				qp.side.appendHistory(stmt, qp.conn.Name)
 			}
 			if i+1 < len(all) {
 				qp.runChainAt(all, i+1)
@@ -1133,7 +1133,7 @@ func (qp *queryPane) finishStream(state *streamState, res proto.QueryResult, err
 	qp.status.setQueryInfo(statusLine)
 	state.tab.setMeta(timerText, statusLine)
 	if qp.side != nil {
-		qp.side.appendHistory(stmt)
+		qp.side.appendHistory(stmt, qp.conn.Name)
 	}
 	if i+1 < len(all) {
 		qp.runChainAt(all, i+1)
