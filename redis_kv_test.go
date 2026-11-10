@@ -10,6 +10,8 @@ import (
 	"fyne.io/fyne/v2/test"
 	"time"
 
+	"fyne.io/fyne/v2/widget"
+
 	"fynequery/db"
 )
 
@@ -156,6 +158,40 @@ func TestTTLParseSeconds(t *testing.T) {
 		if _, err := ttlParseSeconds(in); err == nil {
 			t.Errorf("ttlParseSeconds(%q) = nil error, want failure", in)
 		}
+	}
+}
+
+// TestHistoryFuzzySearch 历史面板的模糊搜索: 空词返回全部(newest first),
+// 关键词走 dbcore/fuzzy 折叠子序列匹配(sel 命中两条 SELECT、hget 命中 HGETALL)。
+func TestHistoryFuzzySearch(t *testing.T) {
+	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
+	s := newSidebar(nil, nil)
+	s.appendHistory("SELECT * FROM users")
+	s.appendHistory("HGETALL myhash")
+	s.appendHistory("SELECT * FROM orders")
+	body := s.body
+	body.historySearch = widget.NewEntry()
+
+	all := body.filteredHistory()
+	if len(all) != 3 || all[0] != "SELECT * FROM orders" || all[2] != "SELECT * FROM users" {
+		t.Fatalf("empty term must return all newest-first, got %v", all)
+	}
+
+	body.historySearch.SetText("sel")
+	got := body.filteredHistory()
+	if len(got) != 2 || got[0] != "SELECT * FROM orders" || got[1] != "SELECT * FROM users" {
+		t.Fatalf("fuzzy 'sel' = %v, want the two SELECTs newest-first", got)
+	}
+
+	body.historySearch.SetText("hget")
+	got = body.filteredHistory()
+	if len(got) != 1 || got[0] != "HGETALL myhash" {
+		t.Fatalf("fuzzy 'hget' = %v, want only HGETALL", got)
+	}
+
+	body.historySearch.SetText("zzz-no-match")
+	if got := body.filteredHistory(); len(got) != 0 {
+		t.Fatalf("no-match term = %v, want empty", got)
 	}
 }
 

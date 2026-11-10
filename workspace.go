@@ -947,6 +947,7 @@ func (ws *workspace) build() fyne.CanvasObject {
 	ws.side.onNewDB = func() { ws.newDatabase() }
 	ws.side.onItemMenu = func(name string, pos fyne.Position) { ws.showItemMenu(name, pos) }
 	ws.side.onMoreKeys = ws.loadMoreKeys
+	ws.side.onHistoryPick = func(stmt string) { ws.loadHistoryIntoEditor(stmt) }
 	ws.side.onSearch = ws.onSidebarSearch
 	ws.side.onQueryRun = func(q SavedQuery) { ws.openSavedQuery(q, true) }
 	ws.side.onQueryOpen = func(q SavedQuery) { ws.openSavedQuery(q, false) }
@@ -1877,6 +1878,17 @@ func (ws *workspace) newQueryTabPane() *queryPane {
 	qp.onKeysChanged = ws.loadInventory
 	qp.Hide()
 	return qp
+}
+
+// loadHistoryIntoEditor puts a picked history statement into the active query
+// editor (opening a query tab first if none is showing), ready to run or edit.
+func (ws *workspace) loadHistoryIntoEditor(stmt string) {
+	if doc := ws.docAt(ws.tabs.current); doc == nil || doc.kind != docQuery {
+		ws.addQueryTab()
+	}
+	if qp := ws.activeQueryPane(); qp != nil {
+		qp.setEditorTextAtEnd(stmt)
+	}
 }
 
 // activeQueryPane returns the query pane for the current tab, or the last one

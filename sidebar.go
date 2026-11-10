@@ -16,6 +16,8 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"github.com/dbcore/dbcore/fuzzy"
 )
 
 type sidebarMode int
@@ -28,14 +30,15 @@ const (
 
 type sidebar struct {
 	widget.BaseWidget
-	mode       sidebarMode
-	onSelect   func(string) // table/view picked
-	onNewQuery func()
-	onSearch   func(string)                // search text changed (KV: server-side filter)
-	onDBPick   func(string)                // database chosen in the bottom selector
-	onNewDB    func()                      // "+" next to the bottom selector
-	onItemMenu func(string, fyne.Position) // right-click on an item
-	onMoreKeys func()                      // "load more keys" row (KV, paged inventory)
+	mode          sidebarMode
+	onSelect      func(string) // table/view picked
+	onNewQuery    func()
+	onSearch      func(string)                // search text changed (KV: server-side filter)
+	onDBPick      func(string)                // database chosen in the bottom selector
+	onNewDB       func()                      // "+" next to the bottom selector
+	onItemMenu    func(string, fyne.Position) // right-click on an item
+	onMoreKeys    func()                      // "load more keys" row (KV, paged inventory)
+	onHistoryPick func(string)                // a history entry was picked: load into the query editor
 	// saved-query panel (查询 tab)
 	onQueryRun  func(q SavedQuery) // open + run a saved query
 	onQueryOpen func(q SavedQuery) // open a saved query in the editor
@@ -661,11 +664,50 @@ type sidebarBody struct {
 	queries,
 	history,
 	noDB fyne.CanvasObject
+	// History pane (fuzzy-searchable): the search box filters the executed-
+	// statement history and the list shows the hits newest-first, each
+	// tappable to load into the active query editor.
+	historySearch *widget.Entry
+	historyList   *widget.List
 }
 
 func (b *sidebarBody) CreateRenderer() fyne.WidgetRenderer {
-	history := widget.NewLabelWithStyle("-- 暂无查询", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
-	history.Wrapping = fyne.TextWrapWord
+	// History pane: a fuzzy search box over the executed-statement history
+	// plus the filtered hits (newest first), each tappable to load into the
+	// active query editor. Replaces the old plain text dump, which could only
+	// be scrolled, never searched.
+	historySearch := widget.NewEntry()
+	historySearch.SetPlaceHolder("搜索历史…（模糊）")
+	historySearch.OnChanged = func(string) { b.refreshHistoryList() }
+	historyList := widget.NewList(
+		func() int { return len(b.filteredHistory()) },
+		func() fyne.CanvasObject { return widget.NewLabel("") },
+		func(i int, o fyne.CanvasObject) {
+			items := b.filteredHistory()
+			if i < 0 || i >= len(items) {
+				return
+			}
+			lbl, ok := o.(*widget.Label)
+			if !ok {
+				return
+			}
+			lbl.Truncation = fyne.TextTruncateEllipsis
+			lbl.SetText(strings.ReplaceAll(items[i], "\n", " ⏎ "))
+		},
+	)
+	historyList.OnSelected = func(id widget.ListItemID) {
+		items := b.filteredHistory()
+		if id < 0 || id >= len(items) {
+			return
+		}
+		historyList.UnselectAll()
+		if b.s.onHistoryPick != nil {
+			b.s.onHistoryPick(items[id])
+		}
+	}
+	history := container.NewBorder(historySearch, nil, nil, nil, historyList)
+	b.historySearch = historySearch
+	b.historyList = historyList
 	noDB := widget.NewLabelWithStyle("未选择数据库，请按Ctrl K选择数据库",
 		fyne.TextAlignCenter, fyne.TextStyle{})
 	noDB.Wrapping = fyne.TextWrapWord
@@ -685,6 +727,40 @@ func (b *sidebarBody) CreateRenderer() fyne.WidgetRenderer {
 
 // applyPane shows only the pane for the current mode (or the no-database
 // prompt), hiding the rest of the stack.
+// filteredHistory returns the executed-statement history, newest first,
+// fuzzy-filtered by the History pane's search term (an empty term returns
+// everything). Uses dbcore/fuzzy's orbit-aware folding so "sel" finds
+// "SELECT" and "hgetall" matches case-insensitively, like the quick-open
+// palette.
+func (b *sidebarBody) filteredHistory() []string {
+	all := b.s.history
+	term := ""
+	if b.historySearch != nil {
+		term = strings.TrimSpace(b.historySearch.Text)
+	}
+	needle := fuzzy.FoldString(term)
+	out := make([]string, 0, len(all))
+	for i := len(all) - 1; i >= 0; i-- {
+		e := all[i]
+		if needle == "" {
+			out = append(out, e)
+			continue
+		}
+		if _, ok := fuzzyScore(needle, fuzzy.FoldString(e)); ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// refreshHistoryList re-runs the history list's length/update callbacks so it
+// reflects the current history and search term.
+func (b *sidebarBody) refreshHistoryList() {
+	if b.historyList != nil {
+		b.historyList.Refresh()
+	}
+}
+
 func (b *sidebarBody) applyPane() {
 	if b.stack == nil {
 		return
@@ -722,22 +798,7 @@ func (b *sidebarBody) Refresh() {
 		return
 	}
 	// keep history text current
-	if hl, ok := b.history.(*widget.Label); ok {
-		if len(b.s.history) == 0 {
-			hl.SetText("-- 暂无查询")
-		} else {
-			start := 0
-			if n := len(b.s.history); n > 10 {
-				start = n - 10
-			}
-			var out strings.Builder
-			for i := start; i < len(b.s.history); i++ {
-				out.WriteString(b.s.history[i])
-				out.WriteString(";\n\n")
-			}
-			hl.SetText(out.String())
-		}
-	}
+	b.refreshHistoryList()
 	b.applyPane()
 	b.stack.Refresh()
 	b.BaseWidget.Refresh()
