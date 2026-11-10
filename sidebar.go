@@ -58,6 +58,8 @@ type sidebar struct {
 	database    string
 	selID       string // currently selected tree node id (drives white-on-blue rows)
 	history     []string
+	// histW serializes command-history disk writes (see cmdhistory.go).
+	histW       historyWriter
 	loaded      bool
 	loadErr     string            // last inventory load error ("" = none)
 	noDB        bool              // true until a database is selected (shows the prompt)
@@ -71,6 +73,9 @@ type sidebar struct {
 
 func newSidebar(onSelect func(string), onNewQuery func()) *sidebar {
 	s := &sidebar{onSelect: onSelect, onNewQuery: onNewQuery}
+	// 历史记录持久化到磁盘: 启动即载入上次会话执行过的语句,重启后 Ctrl+Up
+	// 仍能翻回它们(此前只在内存侧栏,重启即失)。
+	s.history = loadCommandHistory()
 	s.queriesPane = container.NewStack()
 	s.body = &sidebarBody{s: s}
 	// Without ExtendBaseWidget the body's super() stays nil, so BaseWidget.Resize
@@ -190,7 +195,45 @@ func (s *sidebar) setInventory(objs []TableInfo, database string) {
 // appendHistory records one executed statement for the History pane.
 func (s *sidebar) appendHistory(sqlText string) {
 	s.history = append(s.history, sqlText)
+	if len(s.history) > maxCommandHistory {
+		// 有界: 最老的先丢弃,文件与内存都不会无限膨胀。
+		s.history = s.history[len(s.history)-maxCommandHistory:]
+	}
+	s.persistHistory()
 	s.Refresh()
+}
+
+// persistHistory 把当前历史交给后台写盘。写盘移出 UI 线程(一条长 SQL 也好、
+// 千条历史也好,都不该卡一次回车),代际守卫保证只有最新快照落盘——旧任务
+// 永远不会晚于新任务完成并覆盖它。
+func (s *sidebar) persistHistory() {
+	// Resolve the target path HERE, on the UI thread: the write runs on a
+	// background goroutine that must not re-read configDir() (an env override
+	// — FYNEQUERY_CONFIG_DIR in tests — may already have been restored by the
+	// time it lands, sending the file somewhere else entirely).
+	path := commandHistoryPath()
+	s.histW.mu.Lock()
+	s.histW.gen++
+	gen := s.histW.gen
+	s.histW.mu.Unlock()
+	entries := append([]string(nil), s.history...)
+	safeGo("cmdhistory", func() {
+		s.writeHistory(gen, path, entries)
+	})
+}
+
+// writeHistory 执行磁盘写入。调用方持有 histW.mu;代数已非最新则放弃(更新的
+// 快照在队列里,会代为落盘)。
+func (s *sidebar) writeHistory(gen uint64, path string, entries []string) {
+	s.histW.mu.Lock()
+	defer s.histW.mu.Unlock()
+	if gen != s.histW.gen {
+		return
+	}
+	if err := saveCommandHistory(path, entries); err != nil {
+		// 写失败不值得弹窗打断用户: 历史是便利功能,下次执行会再试。
+		return
+	}
 }
 
 // historyItems returns a copy of the executed-statement history, used by the

@@ -98,6 +98,9 @@ func TestTruncationNote(t *testing.T) {
 
 func historyTestPane(t *testing.T, entries ...string) *queryPane {
 	t.Helper()
+	// 隔离 config 目录: newSidebar 会从磁盘载入持久化历史,不隔离的话真实
+	// (或其他测试异步写入的)历史会混进本测试的导航断言。
+	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
 	qp := newTestQueryPane()
 	qp.side = newSidebar(nil, nil)
 	for _, e := range entries {
