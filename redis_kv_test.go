@@ -17,7 +17,7 @@ import (
 
 func TestKVDetailsFields(t *testing.T) {
 	// 永不过期: HasTTL=false
-	fs := kvDetailsFields("myhash", &db.KeyMeta{Kind: "hash"}, 128, nil, nil)
+	fs := kvDetailsFields("myhash", &db.KeyMeta{Kind: "hash"}, 128, nil, nil, nil)
 	if got := fieldText(t, fs, "类型"); got != "hash" {
 		t.Fatalf("类型 = %q, want hash", got)
 	}
@@ -32,19 +32,19 @@ func TestKVDetailsFields(t *testing.T) {
 	}
 
 	// 有 TTL: 剩余时长可读
-	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 90 * time.Second}, 1, nil, nil)
+	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 90 * time.Second}, 1, nil, nil, nil)
 	if got := fieldText(t, fs, "TTL"); got != "剩余 1m30s" {
 		t.Fatalf("TTL = %q, want 剩余 1m30s", got)
 	}
 
 	// HasTTL 且剩余 0: 已过期
-	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 0}, 0, nil, nil)
+	fs = kvDetailsFields("k", &db.KeyMeta{Kind: "string", HasTTL: true, TTL: 0}, 0, nil, nil, nil)
 	if got := fieldText(t, fs, "TTL"); got != "已过期" {
 		t.Fatalf("TTL = %q, want 已过期", got)
 	}
 
 	// 元数据未取到: 类型未知但界面不留空
-	fs = kvDetailsFields("k", nil, 0, nil, nil)
+	fs = kvDetailsFields("k", nil, 0, nil, nil, nil)
 	if got := fieldText(t, fs, "类型"); got != "未知" {
 		t.Fatalf("类型 = %q, want 未知", got)
 	}

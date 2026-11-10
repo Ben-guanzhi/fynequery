@@ -89,6 +89,10 @@ type detailsField struct {
 	// value so a key-level property (a Redis key's TTL) can be edited in
 	// place — it has no grid column to route through.
 	Edit func(current string)
+	// Tap, when set, makes the card a pure action (no input dialog) — e.g. a
+	// KV key's delete, which needs a confirm rather than an input. It wins
+	// over Edit when both are set.
+	Tap func()
 }
 
 // staticBox is the read-only twin of valueButton (no tap, no chevron).
@@ -302,6 +306,14 @@ func (d *detailsPane) fieldCard(f detailsField) fyne.CanvasObject {
 
 	if f.ReadOnly {
 		return container.NewVBox(head, staticBox(f.Value))
+	}
+	if f.Tap != nil {
+		// Pure action (no input): e.g. a KV key's delete. Same tap
+		// affordance as an editable cell, but tapping runs the action.
+		vb := newValueButton(f.Value)
+		vb.onEdit = f.Tap
+		vb.onView = f.Tap
+		return container.NewVBox(head, vb)
 	}
 	if f.Edit != nil {
 		// Key-level editable property (TTL): same tap affordance as a cell,

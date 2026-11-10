@@ -451,6 +451,7 @@ func (ws *workspace) refreshRowDetails() {
 			// is editable in place when the session can administer keys.
 			if t := ws.activeData; t != nil {
 				var onRename, onTTL func(string)
+				var onDelete func()
 				if _, ok := db.AsKeyAdmin(ws.sess); ok {
 					key := t.name
 					onRename = func(string) {
@@ -463,8 +464,13 @@ func (ws *workspace) refreshRowDetails() {
 							ws.editKeyTTL(key, cur, ka)
 						}
 					}
+					onDelete = func() {
+						if ka2, ok2 := db.AsKeyAdmin(ws.sess); ok2 {
+							ws.deleteKey(key, ka2)
+						}
+					}
 				}
-				ws.details.setRow(kvDetailsFields(t.name, t.kvMeta, t.gridRowCount(), onRename, onTTL))
+				ws.details.setRow(kvDetailsFields(t.name, t.kvMeta, t.gridRowCount(), onRename, onTTL, onDelete))
 			} else {
 				ws.details.setRowPrompt()
 			}

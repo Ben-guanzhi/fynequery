@@ -106,7 +106,7 @@ func (ws *workspace) deleteActiveKey() {
 // truthfully knows — a SCAN/MATCH key list never counted the key's members).
 // onTTL, when non-nil, makes the TTL card editable in place (it receives the
 // rendered TTL text and shows the edit dialog); nil leaves it read-only.
-func kvDetailsFields(key string, meta *db.KeyMeta, elements int, onRename, onTTL func(current string)) []detailsField {
+func kvDetailsFields(key string, meta *db.KeyMeta, elements int, onRename, onTTL func(current string), onDelete func()) []detailsField {
 	ttl := "永不过期"
 	if meta != nil && meta.HasTTL {
 		if meta.TTL > 0 {
@@ -120,7 +120,7 @@ func kvDetailsFields(key string, meta *db.KeyMeta, elements int, onRename, onTTL
 		kind = meta.Kind
 	}
 	n := strconv.Itoa(elements)
-	return []detailsField{
+	fields := []detailsField{
 		// Tapping the key name renames it in place (renameKey refuses to
 		// overwrite an existing key, so a typo cannot destroy another key).
 		{Name: "键", Value: &key, Edit: onRename},
@@ -128,6 +128,13 @@ func kvDetailsFields(key string, meta *db.KeyMeta, elements int, onRename, onTTL
 		{Name: "TTL", Value: &ttl, Edit: onTTL},
 		{Name: "元素数(本窗口)", Value: &n, ReadOnly: true},
 	}
+	if onDelete != nil {
+		// 删除键 as a click-to-act card, alongside rename/TTL — the whole key
+		// management surface in one place (deleteKey confirms + gates).
+		hint := "点击删除此键（不可撤销）"
+		fields = append(fields, detailsField{Name: "删除键", Value: &hint, Tap: onDelete})
+	}
+	return fields
 }
 
 // ttlParseSeconds parses a TTL input as seconds (0 = never expire / PERSIST).
