@@ -346,12 +346,28 @@ func (s *sidebar) togglePin(name string) {
 	s.tree.Refresh()
 }
 
+// hasGlobMeta reports whether s contains a Redis MATCH glob metacharacter
+// (* ? [) — such a term is a server-side pattern, not a fuzzy needle.
+func hasGlobMeta(s string) bool {
+	return strings.ContainsAny(s, "*?[")
+}
+
 func (s *sidebar) applyFilter() {
 	q := ""
-	// A KV session filters keys on the server (the search text may be a glob),
-	// so re-applying substring matching here would drop valid hits.
-	if s.search != nil && !s.kv {
-		q = strings.ToLower(strings.TrimSpace(s.search.Text))
+	kvFuzzy := false
+	if s.search != nil {
+		q = strings.TrimSpace(s.search.Text)
+	}
+	if s.kv {
+		// A KV PLAIN term fuzzy-filters the loaded keys locally (subsequence
+		// match — "usr" finds "user:1"), which a server substring pre-filter
+		// would defeat. A term with glob metacharacters is a server MATCH
+		// pattern and must survive verbatim: no local filter is applied (the
+		// glob is not a substring of the returned keys, so filtering locally
+		// would blank the tree).
+		kvFuzzy = q != "" && !hasGlobMeta(q)
+	} else {
+		q = strings.ToLower(q)
 	}
 	s.filtered = s.filtered[:0]
 	for i, o := range s.objects {
@@ -361,7 +377,16 @@ func (s *sidebar) applyFilter() {
 		if i < len(s.lowerNames) {
 			lc = s.lowerNames[i]
 		}
-		if q == "" || strings.Contains(lc, q) {
+		keep := false
+		switch {
+		case s.kv && kvFuzzy:
+			_, keep = fuzzyScore(fuzzy.FoldString(q), fuzzy.FoldString(lc))
+		case s.kv:
+			keep = true // glob text: the server's hits survive verbatim
+		case q == "" || strings.Contains(lc, q):
+			keep = true
+		}
+		if keep {
 			s.filtered = append(s.filtered, o)
 		}
 	}
@@ -478,17 +503,35 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 				s.searchClear.Hide()
 			}
 		}
+		if s.kv {
+			// KV: plain text fuzzy-filters the loaded keys locally; only a glob
+			// pattern (or empty = clear) goes to the server, which cannot do
+			// subsequence matching. Suppressing the server reload for plain
+			// text is what makes the local fuzzy meaningful.
+			if hasGlobMeta(text) || strings.TrimSpace(text) == "" {
+				if s.onSearch != nil {
+					s.onSearch(text)
+				}
+			}
+			if s.loaded {
+				s.applyFilter()
+				s.tree.Refresh()
+			} else {
+				s.Refresh() // KV: the server-side filter redraws via the pane refresh
+			}
+			return
+		}
 		if s.onSearch != nil {
 			s.onSearch(text)
 		}
-		if s.loaded && !s.kv {
+		if s.loaded {
 			// SQL search is a local filter: only the tree changes. Refreshing
 			// the whole sidebar per keystroke rebuilt every pane (including
 			// the history label) for nothing.
 			s.applyFilter()
 			s.tree.Refresh()
 		} else {
-			s.Refresh() // KV: the server-side filter redraws via the pane refresh
+			s.Refresh()
 		}
 	}
 	searchRow := container.NewBorder(nil, nil, widget.NewIcon(icons.Search), s.searchClear, s.search)

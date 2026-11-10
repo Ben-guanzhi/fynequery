@@ -262,3 +262,38 @@ func TestFinishRunReloadsKVInventory(t *testing.T) {
 		t.Fatal("a SQL run must not reload the key inventory")
 	}
 }
+
+// TestSidebarKVFuzzySearch 键清单模糊搜索: 纯文本本地子序列匹配(usr 命中
+// user:1/2),含 glob 元字符的词走服务端 MATCH 且命中原样保留(不被本地过滤清空)。
+func TestSidebarKVFuzzySearch(t *testing.T) {
+	test.NewApp()
+	s := newSidebar(nil, nil)
+	s.kv = true
+	s.setInventory([]TableInfo{
+		{Name: "user:1", Kind: "table"},
+		{Name: "user:2", Kind: "table"},
+		{Name: "myhash", Kind: "hash"},
+	}, "0")
+	test.WidgetRenderer(s)
+
+	// 纯文本: 本地模糊(子序列)过滤已加载的键。
+	s.search.SetText("usr")
+	s.applyFilter()
+	if len(s.filtered) != 2 {
+		t.Fatalf("fuzzy 'usr' = %v, want user:1 + user:2", s.filtered)
+	}
+
+	// glob: 服务端 MATCH,命中原样保留(本地不过滤,否则被清空)。
+	s.search.SetText("user:*")
+	s.applyFilter()
+	if len(s.filtered) != 3 {
+		t.Fatalf("glob must survive verbatim, got %v", s.filtered)
+	}
+
+	// 无匹配: 空列表。
+	s.search.SetText("zzz")
+	s.applyFilter()
+	if len(s.filtered) != 0 {
+		t.Fatalf("no-match = %v, want empty", s.filtered)
+	}
+}
