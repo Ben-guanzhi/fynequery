@@ -350,6 +350,12 @@ func (ws *workspace) prepGrid(g *dataTable) {
 	} else {
 		g.kvEdit = nil
 	}
+	// 删除元素: a KV session with ValueDeleter gets a right-click 删除元素
+	// item on the value grid (same path as the − Row button), instead of
+	// having to select a row and reach for the toolbar.
+	if _, ok := db.AsValueDeleter(ws.sess); ok {
+		g.onKVDelete = func() { ws.deleteKVRow() }
+	}
 	ws.applyHidden(g)
 	// KV grids never enter SQL edit mode (writes are immediate, see editKVValue),
 	// even while a previous table left the mode on.

@@ -57,10 +57,13 @@ type dataTable struct {
 	pkCols      []int
 	// kvEdit handles a double-click on a key/value grid and reports whether it
 	// opened the element editor; nil for SQL sessions (see edit.go).
-	kvEdit   func(row, col int) bool
-	dirty    map[int]map[int]*string // row -> col -> new value (nil = NULL)
-	deleted  map[int]bool            // rows marked for deletion
-	inserted map[int]bool            // rows staged for insert (pending new rows)
+	kvEdit func(row, col int) bool
+	// onKVDelete, when set, adds a 删除元素 item to the row context menu
+	// (KV sessions with ValueDeleter); nil for SQL sessions.
+	onKVDelete func()
+	dirty      map[int]map[int]*string // row -> col -> new value (nil = NULL)
+	deleted    map[int]bool            // rows marked for deletion
+	inserted   map[int]bool            // rows staged for insert (pending new rows)
 
 	// column sort state (TablePlus HeaderSort / HeaderSortDirection)
 	sortCol int

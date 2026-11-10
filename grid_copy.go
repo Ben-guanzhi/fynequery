@@ -55,6 +55,13 @@ func (t *dataTable) copyMenu(row, col int, pos fyne.Position) {
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Export All Rows to File…", func() { t.exportRows(t.window) }),
 	)
+	if t.onKVDelete != nil {
+		// 删除元素: a KV session can delete the right-clicked element in
+		// place (HDEL/SREM/ZREM), same path as the − Row button but without
+		// having to select the row first.
+		items = append(items, fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("删除元素…", func() { t.onKVDelete() }))
+	}
 	if t.onPin != nil {
 		items = append(items, fyne.NewMenuItemSeparator(),
 			fyne.NewMenuItem("Pin this result", func() { t.onPin() }))

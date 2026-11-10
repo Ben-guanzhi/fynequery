@@ -195,6 +195,41 @@ func TestHistoryFuzzySearch(t *testing.T) {
 	}
 }
 
+// kvDelFakeSession 在 fakeSession 之上补 ValueDeleter 能力,并记录删除调用。
+type kvDelFakeSession struct {
+	fakeSession
+	deleted []db.ValueEdit
+}
+
+func (k *kvDelFakeSession) DeleteValue(e db.ValueEdit) error {
+	k.deleted = append(k.deleted, e)
+	return nil
+}
+
+// TestPrepGridWiresKVDelete 值网格右键"删除元素"的接线: 具备 ValueDeleter 的
+// KV 会话接通 onKVDelete,SQL 会话保持 nil(右键菜单不出现该项)。
+func TestPrepGridWiresKVDelete(t *testing.T) {
+	ws := newTabHarness()
+	ws.conn.Driver = "redis"
+	del := &kvDelFakeSession{}
+	ws.sess = del
+	g := newDataTable(emptyTableData(), ws.status)
+	ws.prepGrid(g)
+	if g.onKVDelete == nil {
+		t.Fatal("a KV session with ValueDeleter must wire onKVDelete")
+	}
+
+	// SQL 会话(fakeSession 无 ValueDeleter): 不接 onKVDelete。
+	ws2 := newTabHarness()
+	ws2.conn.Driver = "mysql"
+	ws2.sess = &fakeSession{}
+	g2 := newDataTable(emptyTableData(), ws2.status)
+	ws2.prepGrid(g2)
+	if g2.onKVDelete != nil {
+		t.Fatal("a SQL session must not wire onKVDelete")
+	}
+}
+
 // kvFakeSession 在 fakeSession 之上补 KeyPager 能力,让 finishRun 的键清单
 // 刷新路径无需真实 Redis 即可被测。
 type kvFakeSession struct {
