@@ -311,6 +311,13 @@ func (s *sidebar) treeStatusText() (string, bool) {
 		q = strings.TrimSpace(s.search.Text)
 	}
 	if q != "" && len(s.filtered) == 0 {
+		// KV: a fuzzy search with 0 hits in the loaded page does not mean the
+		// keyspace has no match — more keys may be loadable. Keep the tree
+		// (with the 加载更多键 row) visible so the user can load more and
+		// continue searching, instead of a dead-end "无匹配" notice.
+		if s.kv && s.moreKeys {
+			return "", false
+		}
 		return "无匹配「" + q + "」", true
 	}
 	if len(s.objects) == 0 {

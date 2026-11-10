@@ -330,3 +330,27 @@ func TestHistoryConnAttribution(t *testing.T) {
 		t.Fatalf("persisted conns = %+v", loaded)
 	}
 }
+
+// TestSidebarKVFuzzyZeroMatchKeepsLoadMore 大键空间的关键联动: 模糊搜索在已加载页
+// 0 命中时,只要还有可加载的键页,树(含"加载更多键…"行)必须保持可见——否则
+// "无匹配"文本会替换整棵树,用户无法加载更多键来继续搜索。键空间耗尽后才显示
+// "无匹配"死胡同。
+func TestSidebarKVFuzzyZeroMatchKeepsLoadMore(t *testing.T) {
+	test.NewApp()
+	s := newSidebar(nil, nil)
+	s.kv = true
+	s.moreKeys = true
+	s.setInventory([]TableInfo{{Name: "a", Kind: "table"}}, "0")
+	test.WidgetRenderer(s)
+
+	s.search.SetText("zzz") // 已加载页 0 命中
+	if txt, show := s.treeStatusText(); show {
+		t.Fatalf("0-match KV search with more keys must keep the tree visible, got %q", txt)
+	}
+
+	// 键空间耗尽(无更多键页): "无匹配"死胡同是正确的。
+	s.moreKeys = false
+	if _, show := s.treeStatusText(); !show {
+		t.Fatal("0-match KV search with no more keys should show 无匹配")
+	}
+}
