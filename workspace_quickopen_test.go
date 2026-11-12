@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"strings"
@@ -71,6 +71,9 @@ func TestQuickOpenSearch(t *testing.T) {
 // TestQuickOpenCandidatesCaseInsensitive pins that table/search matches ignore
 // case: a term in a different case still finds the candidate.
 func TestQuickOpenCandidatesCaseInsensitive(t *testing.T) {
+	// Same isolation as TestQuickOpenAnchoredSyntax: a sidebar loads the persisted
+	// history, and a developer's own history would satisfy the search by accident.
+	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
 	ws := &workspace{side: newSidebar(func(string) {}, func() {})}
 	ws.side.appendHistory("SELECT * FROM Users", "")
 	got := ws.quickOpenSearch("USERS")

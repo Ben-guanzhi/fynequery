@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 // KV 键视图(建议⑥): Redis 会话的数据页退出"表形伪装"——结构/索引 segment、
 // Filter/Columns/≡ 按钮、列结构详情全部退场,换上键元数据与键专用占位符。
@@ -326,7 +326,11 @@ func TestHistoryConnAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded := loadCommandHistory()
-	if len(loaded) != 2 || loaded[0].Conn != "cache" || loaded[1].Conn != "dev" {
+	// Storage order mirrors the in-memory slice (oldest appended last), and only the
+	// DISPLAY reverses it — filteredHistory walks backwards. Asserting newest-first
+	// here would demand a load-time reversal that nothing else needs, and would then
+	// disagree with s.history after a restart.
+	if len(loaded) != 2 || loaded[0].Conn != "dev" || loaded[1].Conn != "cache" {
 		t.Fatalf("persisted conns = %+v", loaded)
 	}
 }

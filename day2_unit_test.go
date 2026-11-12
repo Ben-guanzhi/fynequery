@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 // Unit tests for the day-2 feature cluster: Query Magics parsing,
 // copy/IN-clause builders, commit preview SQL, query parameters and
@@ -304,6 +304,10 @@ func TestAnchoredScore(t *testing.T) {
 }
 
 func TestQuickOpenAnchoredSyntax(t *testing.T) {
+	// History is persisted to the user's config dir, so without this the test reads
+	// the DEVELOPER's real history: the assertion then counts whatever they ran last
+	// week. Every test that builds a sidebar needs the same isolation.
+	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
 	ws := &workspace{side: newSidebar(func(string) {}, func() {})}
 	ws.side.appendHistory("SELECT * FROM users", "")
 
