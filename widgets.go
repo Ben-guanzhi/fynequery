@@ -1028,6 +1028,7 @@ func (r *segmentedRenderer) Refresh() {
 type serverRibbon struct {
 	widget.BaseWidget
 	env        string
+	mode       string // 常驻模式段：TX · SAFE:n（persistent-mode-signal）
 	server     string
 	tls        string
 	host       string
@@ -1061,7 +1062,7 @@ func newServerRibbon() *serverRibbon {
 // label joins the non-empty segments: "ENV | a : b : c".
 func (r *serverRibbon) label() string {
 	var rest []string
-	for _, s := range []string{r.server, r.tls, r.host, r.db, r.table} {
+	for _, s := range []string{r.mode, r.server, r.tls, r.host, r.db, r.table} {
 		if s != "" {
 			rest = append(rest, s)
 		}
@@ -1079,8 +1080,8 @@ func (r *serverRibbon) label() string {
 
 // update swaps the segment values and re-renders. The bar is laid out by its
 // parent (it stretches to fill the toolbar's centre), so no manual Resize.
-func (r *serverRibbon) update(env, server, tls, host, db, table string) {
-	r.env, r.server, r.tls, r.host, r.db, r.table = env, server, tls, host, db, table
+func (r *serverRibbon) update(env, server, tls, host, db, table, mode string) {
+	r.env, r.server, r.tls, r.host, r.db, r.table, r.mode = env, server, tls, host, db, table, mode
 	r.text.Text = r.label()
 	r.Refresh()
 }

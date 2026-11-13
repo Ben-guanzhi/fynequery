@@ -487,7 +487,20 @@ func (ws *workspace) refreshRibbon() {
 		host = maskedPart(host)
 		db = maskedPart(db)
 	}
-	ws.ribbon.update(ws.ribbonEnv(), srv, ws.ribbonTLS, host, db, table)
+	// 常驻模式段（interaction-baseline persistent-mode-signal）：事务活跃与
+	// Safe Mode 级别进 ribbon——不只靠颜色（a11y 的 no-color-only-signal），
+	// 文本随会话状态实时更新。syncTxControls 在每次事务迁移后调到这里。
+	mode := ""
+	if tx, ok := ws.txSession(); ok && tx.InTransaction() {
+		mode = "TX"
+	}
+	if ws.conn.SafeMode > 0 {
+		if mode != "" {
+			mode += " · "
+		}
+		mode += "SAFE:" + safeModeNames[ws.conn.SafeMode]
+	}
+	ws.ribbon.update(ws.ribbonEnv(), srv, ws.ribbonTLS, host, db, table, mode)
 	if h := ws.conn.StatusColorHex(); h != "" {
 		ws.ribbon.SetStatusColor(hex(h))
 	} else {
@@ -879,13 +892,24 @@ func (ws *workspace) beginTransaction() {
 	}
 	safeGo("tx.begin", func() {
 		if err := tx.Begin(); err != nil {
-			safeDo(func() { dialog.ShowError(err, ws.window) })
+			ws.txError("BEGIN", err)
 			return
 		}
 		safeDo(func() {
 			ws.syncTxControls()
 			ws.logf("BEGIN — transaction started")
 		})
+	})
+}
+
+// txError 非模态地报告事务错误（interaction-baseline nonblocking-feedback）：
+// 错误进状态栏的 query 行（错误原样可读）与日志，不再弹 dialog 打断——事务失败
+// 不是"必须决策才能继续"的事，用户看完状态栏重试即可。dialog.ShowError 只留给
+// 确认类与向导。
+func (ws *workspace) txError(op string, err error) {
+	safeDo(func() {
+		ws.status.setQueryInfo("⚠ " + op + " failed: " + err.Error())
+		ws.logf("%s failed: %v", op, err)
 	})
 }
 
@@ -897,7 +921,7 @@ func (ws *workspace) commitTransaction() {
 	}
 	safeGo("tx.commit", func() {
 		if err := tx.Commit(); err != nil {
-			safeDo(func() { dialog.ShowError(err, ws.window) })
+			ws.txError("COMMIT", err)
 			return
 		}
 		safeDo(func() {
@@ -915,7 +939,7 @@ func (ws *workspace) rollbackTransaction() {
 	}
 	safeGo("tx.rollback", func() {
 		if err := tx.Rollback(); err != nil {
-			safeDo(func() { dialog.ShowError(err, ws.window) })
+			ws.txError("ROLLBACK", err)
 			return
 		}
 		safeDo(func() {
