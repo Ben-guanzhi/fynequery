@@ -261,7 +261,27 @@ func (s *mysqlSession) Columns(table string) ([]proto.ColumnInfo, error) {
 	return out, nil
 }
 
+// Query 包一层可用性记录（S-01）：成功/取消/失败三态与耗时都记在驱动层，
+// 于是所有调用方（编辑器、DDL、备份、ERD…）自动被覆盖。
 func (s *mysqlSession) Query(sqlText string, maxRows int) (proto.QueryResult, error) {
+	started := time.Now()
+	res, err := s.queryOnce(sqlText, maxRows)
+	outcome := "ok"
+	switch {
+	case errors.Is(err, ErrQueryCancelled):
+		outcome = "cancelled"
+	case err != nil:
+		outcome = "error"
+	}
+	record("query", outcome, started, map[string]string{
+		"statement_type": stmtKeyword(sqlText),
+		"rows":           strconv.Itoa(len(res.Rows)),
+		"truncated":      "false",
+	})
+	return res, err
+}
+
+func (s *mysqlSession) queryOnce(sqlText string, maxRows int) (proto.QueryResult, error) {
 	// When a manual transaction is active, run inside it so the user can see
 	// uncommitted changes; the transaction owns its own dedicated connection.
 	s.mu.Lock()
@@ -495,6 +515,17 @@ func (s *mysqlSession) expireTx(tx *sql.Tx) {
 
 // Commit commits the active transaction, if any.
 func (s *mysqlSession) Commit() error {
+	started := time.Now()
+	err := s.commitOnce()
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+	}
+	record("commit", outcome, started, nil)
+	return err
+}
+
+func (s *mysqlSession) commitOnce() error {
 	s.mu.Lock()
 	tx := s.tx
 	conn := s.txConn
@@ -523,6 +554,20 @@ func (s *mysqlSession) Commit() error {
 
 // Rollback rolls back the active transaction, if any.
 func (s *mysqlSession) Rollback() error {
+	started := time.Now()
+	err := s.rollbackOnce()
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+	} else {
+		// 成功的回滚是任务级回退：契约要求 outcome=reverted。
+		outcome = "reverted"
+	}
+	record("rollback", outcome, started, nil)
+	return err
+}
+
+func (s *mysqlSession) rollbackOnce() error {
 	s.mu.Lock()
 	tx := s.tx
 	conn := s.txConn

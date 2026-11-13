@@ -19,6 +19,8 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/dbcore/dbcore/usability"
+
 	"fynequery/db"
 )
 
@@ -251,6 +253,12 @@ func main() {
 	os.MkdirAll(configDir(), 0o755)
 	if f := setupLogging(); f != nil {
 		defer f.Close()
+	}
+	// Usability metrics (S-01): a no-op unless POLYDB_USABILITY=1. It lives next
+	// to connections.json so a user can read or delete it; never uploaded.
+	if um := usability.Open("fynequery", filepath.Join(configDir(), "usability.ndjson")); um != nil {
+		db.UseMetrics(um)
+		defer um.Close()
 	}
 	// SSH host keys live next to connections.json so the portable override
 	// (FYNEQUERY_CONFIG_DIR) keeps every stored secret in one place.
