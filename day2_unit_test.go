@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 // Unit tests for the day-2 feature cluster: Query Magics parsing,
 // copy/IN-clause builders, commit preview SQL, query parameters and
@@ -323,6 +323,12 @@ func TestQuickOpenAnchoredSyntax(t *testing.T) {
 }
 
 func TestQuickOpenActionsOnEmptyPattern(t *testing.T) {
+	// History is persisted to the user's config dir: without this the test reads
+	// the DEVELOPER's real history, and once that history fills the quick-open
+	// truncation window the application actions fall off the end of the list and
+	// the assertion fails on a machine that has used the app. (Observed exactly
+	// that: a 50-entry history pushed every action out of the 50-row limit.)
+	t.Setenv("FYNEQUERY_CONFIG_DIR", t.TempDir())
 	ws := &workspace{side: newSidebar(func(string) {}, func() {})}
 	ws.side.appendHistory("SELECT 1", "")
 	actions := 0
