@@ -198,7 +198,7 @@ func jsonValue(v interface{}) *string {
 	case string:
 		return &t
 	case float64:
-		s := strconv.FormatFloat(t, 'g', -1, 64)
+		s := strconv.FormatFloat(t, 'f', -1, 64)
 		return &s
 	case bool:
 		s := strconv.FormatBool(t)

@@ -2295,9 +2295,13 @@ func (ws *workspace) loadTableData(t *dataTableTab, offset int) {
 			// that parses Redis commands.
 			err = fmt.Errorf("Redis 键不支持筛选，请清除筛选后浏览")
 		} else {
+			// The filtered first page goes through the same dialect tail as the
+			// rest of the pager: T-SQL has no LIMIT, and Oracle spells it
+			// OFFSET/FETCH. Before this, a filtered browse on MSSQL emitted
+			// LIMIT and failed with a syntax error every time.
 			res, err = sess.Query(
-				fmt.Sprintf("SELECT * FROM %s WHERE %s LIMIT %d",
-					ws.quoteTable(name), filter, browseLimit), browseLimit)
+				fmt.Sprintf("SELECT * FROM %s WHERE %s%s",
+					ws.quoteTable(name), filter, ws.pageSuffix(browseLimit, 0)), browseLimit)
 		}
 		safeDo(func() {
 			if ws.liveSession() != sess || gen != t.gen || !ws.tabOpen(t) {

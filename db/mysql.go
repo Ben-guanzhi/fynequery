@@ -114,7 +114,22 @@ type mysqlSession struct {
 	// must go back to the pool when the tx settles.
 	tx     *sql.Tx
 	txConn *sql.Conn
+	// batchTx marks a commit batch that owns the session's write path while it
+	// runs its own transaction, so a concurrent Begin refuses instead of
+	// splitting one commit across two transactions that cannot see each other
+	// (N-03).
+	batchTx bool
+	// txTimer is the hard ceiling on one manual transaction. A forgotten BEGIN
+	// pins a connection and its pool admission slot until the session closes,
+	// so enough abandoned BEGINs exhaust the pool (N-04).
+	txTimer *time.Timer
+	// txExpired records that the ceiling rolled the transaction back, so the
+	// next Commit/Rollback can say why there is nothing left to settle.
+	txExpired bool
 }
+
+// txMaxLifetime bounds one manual transaction (N-04).
+const txMaxLifetime = 10 * time.Minute
 
 func (s *mysqlSession) Server() string { return s.server }
 
@@ -396,9 +411,12 @@ func (s *mysqlSession) Close() {
 	s.mu.Lock()
 	tx := s.tx
 	conn := s.txConn
-	s.tx = nil
-	s.txConn = nil
+	timer := s.txTimer
+	s.tx, s.txConn, s.txTimer = nil, nil, nil
 	s.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
 	if tx != nil {
 		_ = tx.Rollback()
 	}
@@ -437,6 +455,13 @@ func (s *mysqlSession) Begin() error {
 		conn.Close()
 		return fmt.Errorf("mysql: transaction already active")
 	}
+	// A commit batch runs its own transaction on the session's write path; a
+	// Begin racing it would put one write inside the manual transaction and the
+	// other on a pool connection of its own (N-03).
+	if s.batchTx {
+		conn.Close()
+		return fmt.Errorf("mysql: a commit batch is in flight; retry when it finishes")
+	}
 	tx, err := conn.BeginTx(context.Background(), nil)
 	if err != nil {
 		conn.Close()
@@ -444,7 +469,28 @@ func (s *mysqlSession) Begin() error {
 	}
 	s.tx = tx
 	s.txConn = conn
+	s.txExpired = false
+	s.txTimer = time.AfterFunc(txMaxLifetime, func() { s.expireTx(tx) })
 	return nil
+}
+
+// expireTx rolls back a manual transaction that outlived txMaxLifetime. The
+// identity check keeps a late fire from touching a transaction that was
+// committed, rolled back or replaced in the meantime.
+func (s *mysqlSession) expireTx(tx *sql.Tx) {
+	s.mu.Lock()
+	if s.tx != tx {
+		s.mu.Unlock()
+		return
+	}
+	conn := s.txConn
+	s.tx, s.txConn, s.txTimer = nil, nil, nil
+	s.txExpired = true
+	s.mu.Unlock()
+	_ = tx.Rollback()
+	if conn != nil {
+		conn.Close()
+	}
 }
 
 // Commit commits the active transaction, if any.
@@ -452,10 +498,20 @@ func (s *mysqlSession) Commit() error {
 	s.mu.Lock()
 	tx := s.tx
 	conn := s.txConn
+	timer := s.txTimer
+	expired := s.txExpired
 	s.tx = nil
 	s.txConn = nil
+	s.txTimer = nil
+	s.txExpired = false
 	s.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
 	if tx == nil {
+		if expired {
+			return fmt.Errorf("mysql: transaction expired and was rolled back")
+		}
 		return fmt.Errorf("mysql: no active transaction")
 	}
 	err := tx.Commit()
@@ -470,10 +526,20 @@ func (s *mysqlSession) Rollback() error {
 	s.mu.Lock()
 	tx := s.tx
 	conn := s.txConn
+	timer := s.txTimer
+	expired := s.txExpired
 	s.tx = nil
 	s.txConn = nil
+	s.txTimer = nil
+	s.txExpired = false
 	s.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
 	if tx == nil {
+		if expired {
+			return fmt.Errorf("mysql: transaction expired and was rolled back")
+		}
 		return fmt.Errorf("mysql: no active transaction")
 	}
 	err := tx.Rollback()
@@ -593,13 +659,26 @@ func (s *mysqlSession) InsertRow(table string, values map[string]*string) error 
 // statements are exempt from the row-count check.
 func (s *mysqlSession) ApplyChanges(table string, updates []RowEdit, deletes []map[string]*string, inserts []map[string]*string, ddl []string) error {
 	// If a manual transaction is active, apply inside it and leave the commit
-	// to the transaction's own lifecycle (no nested BEGIN).
+	// to the transaction's own lifecycle (no nested BEGIN). Otherwise claim the
+	// session's write path for the batch's own transaction, so a concurrent
+	// Begin refuses instead of racing it (N-03).
 	s.mu.Lock()
 	tx := s.tx
-	s.mu.Unlock()
 	if tx != nil {
+		s.mu.Unlock()
 		return applyWithin(tx, table, updates, deletes, inserts, ddl)
 	}
+	if s.batchTx {
+		s.mu.Unlock()
+		return fmt.Errorf("mysql: a commit batch is already in flight")
+	}
+	s.batchTx = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.batchTx = false
+		s.mu.Unlock()
+	}()
 
 	// Bound the wait for a connection, not the transaction (see Begin): the
 	// commit batch lives on a pinned connection opened without a deadline,
@@ -696,6 +775,15 @@ func buildUpdate(table string, pk, changes map[string]*string) (string, []interf
 		args = append(args, argOf(v))
 	}
 	for c, v := range pk {
+		// A NULL key value addresses the row with IS NULL: "col = NULL" is
+		// UNKNOWN in SQL and matches nothing, so the edit would report a
+		// concurrent change (ErrRowMismatch) for a row that is right there.
+		// SQLite's TEXT PRIMARY KEY admits NULL, and a synthetic snapshot
+		// column can produce one.
+		if v == nil {
+			where = append(where, quoteMySQL(c)+" IS NULL")
+			continue
+		}
 		where = append(where, quoteMySQL(c)+" = ?")
 		args = append(args, argOf(v))
 	}
@@ -710,6 +798,10 @@ func buildDelete(table string, pk map[string]*string) (string, []interface{}) {
 	var where []string
 	var args []interface{}
 	for c, v := range pk {
+		if v == nil {
+			where = append(where, quoteMySQL(c)+" IS NULL")
+			continue
+		}
 		where = append(where, quoteMySQL(c)+" = ?")
 		args = append(args, argOf(v))
 	}

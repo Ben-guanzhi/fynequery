@@ -133,6 +133,40 @@ func TestBuildDelete(t *testing.T) {
 	}
 }
 
+// A NULL primary-key value must address the row with IS NULL: "col = NULL" is
+// UNKNOWN in SQL and matches nothing, so the edit would report a concurrent
+// change (ErrRowMismatch) for a row that is right there. SQLite's TEXT PRIMARY
+// KEY admits NULL, and a synthetic snapshot column can produce one.
+func TestBuildUpdateNullPKUsesIsNull(t *testing.T) {
+	pk := map[string]*string{"id": nil, "kind": strPtr("a")}
+	q, args := buildUpdate("t", pk, map[string]*string{"note": strPtr("hi")})
+
+	body := strings.TrimPrefix(q, "UPDATE `t` SET ")
+	_, wherePart, ok := strings.Cut(body, " WHERE ")
+	if !ok {
+		t.Fatalf("malformed SQL: %s", q)
+	}
+	conds := strings.Split(wherePart, " AND ")
+	if !hasAll(conds, []string{"`id` IS NULL", "`kind` = ?"}) || len(conds) != 2 {
+		t.Fatalf("WHERE = %q", wherePart)
+	}
+	// The NULL key consumes no bind argument; only the change and the
+	// non-NULL key do.
+	if !reflect.DeepEqual(args, []interface{}{"hi", "a"}) {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestBuildDeleteNullPKUsesIsNull(t *testing.T) {
+	q, args := buildDelete("t", map[string]*string{"id": nil})
+	if q != "DELETE FROM `t` WHERE `id` IS NULL" {
+		t.Fatalf("SQL = %q", q)
+	}
+	if len(args) != 0 {
+		t.Fatalf("args = %#v, want none", args)
+	}
+}
+
 func TestBuildInsertOmitsDefaultColumns(t *testing.T) {
 	values := map[string]*string{
 		"id":      strPtr(DefaultMarker), // omit → server default
