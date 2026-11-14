@@ -49,6 +49,10 @@ type queryPane struct {
 	noResult     fyne.CanvasObject // centered run-a-query hint (shown until a result loads)
 	split        *container.Split  // editor/result splitter
 	resultActive bool              // whether a result is shown (drives the split offset)
+	// Q-05 (F4): 整页图表视图开关——true 时 resultSlot 显示 chart，false 显示网格。
+	chartOn   bool
+	chartData *TableData           // 图表数据源（与当前网格同源）
+	chartBtn  *flatButton          // 结果区右上的 图表/表格 切换
 	status       *statusBar
 	timer        *canvas.Text
 	posLabel     *widget.Label // "第 1 行, 第 1 列, 位置 0"
@@ -260,8 +264,11 @@ func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	qp.resultBar = container.NewHBox()
 	qp.resultBar.Hide()
 
-	// search bar sits just above the result grid
-	qp.searchWrap = container.NewBorder(nil, nil, nil, nil, findBox)
+	// search bar sits just above the result grid; its right end carries the
+	// chart toggle (Q-05): switches the result slot between grid and chart view.
+	qp.chartBtn = newFlatButton("图表")
+	qp.chartBtn.onTap = func() { qp.toggleChart() }
+	qp.searchWrap = container.NewBorder(nil, nil, nil, qp.chartBtn, findBox)
 	noResult := widget.NewLabelWithStyle("写点 SQL，然后点 Run Current 或按 Ctrl+Enter 执行", fyne.TextAlignCenter, fyne.TextStyle{})
 	noResult.Importance = widget.LowImportance
 	noResult.Wrapping = fyne.TextWrapWord
@@ -515,6 +522,48 @@ func (qp *queryPane) renderResultBar() {
 		qp.resultBar.Objects = append(qp.resultBar.Objects, chip, spacerW(6))
 	}
 	qp.resultBar.Refresh()
+}
+
+// toggleChart switches the result slot between the grid and the chart view
+// (Q-05, the DFDS "dynamic display" half). The chart reads the same TableData
+// the current grid shows; a rerun replaces both, keeping the toggle honest.
+func (qp *queryPane) toggleChart() {
+	if qp.chartOn {
+		qp.chartOn = false
+		qp.chartBtn.setLabel("图表")
+		qp.showCurrentGrid()
+		return
+	}
+	var data *TableData
+	if qp.activePin >= 0 && qp.activePin < len(qp.pins) {
+		data = qp.pins[qp.activePin].data
+	} else if qp.resultSel >= 0 && qp.resultSel < len(qp.resultTabs) {
+		data = qp.resultTabs[qp.resultSel].grid.data
+	} else if g := qp.resultGrid(); g != nil {
+		data = g.data
+	}
+	if data == nil || len(data.Rows) == 0 {
+		qp.status.setQueryInfo("无结果可绘制")
+		return
+	}
+	qp.chartData = data
+	qp.chartOn = true
+	qp.chartBtn.setLabel("表格")
+	qp.resultSlot.Objects = []fyne.CanvasObject{buildChartPane(data)}
+	qp.resultSlot.Refresh()
+}
+
+// showCurrentGrid restores the grid view (chart off): live tab, pin, or none.
+func (qp *queryPane) showCurrentGrid() {
+	if qp.activePin >= 0 && qp.activePin < len(qp.pins) {
+		qp.showPin(qp.activePin)
+		return
+	}
+	if qp.resultSel >= 0 && qp.resultSel < len(qp.resultTabs) {
+		qp.showResultTab(qp.resultSel)
+		return
+	}
+	qp.updateResultChrome()
 }
 
 // updateResultChrome shows the "run a query" hint (and hides the result search
