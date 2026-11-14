@@ -25,6 +25,8 @@ import (
 	"fynequery/icons"
 	"fynequery/internal/sqlscan"
 	"fynequery/proto"
+
+	"github.com/dbcore/dbcore/sqltext"
 )
 
 // colorWhite is used for text on accent backgrounds.
@@ -206,6 +208,10 @@ func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	completeBtn.onTap = func() { qp.complete() }
 	runAll := newFlatButton("Run All")
 	runAll.onTap = func() { qp.runAll() }
+	// 波 97（DataGrip/Navicat 惯例）：执行计划按钮。计划永远不执行语句
+	// （EXPLAIN DELETE 不删除），所以不进 Safe Gate；结果照常落结果页签。
+	explainBtn := newFlatButton("Explain")
+	explainBtn.onTap = func() { qp.explain() }
 	// Visible entry point for the in-result search bar (also Ctrl+F), so it is
 	// discoverable even though the bar starts hidden.
 	findBtn := newToolButton(icons.Search, func() { qp.toggleFindBar() })
@@ -216,7 +222,7 @@ func (qp *queryPane) CreateRenderer() fyne.WidgetRenderer {
 	toolbar := container.NewBorder(nil, nil,
 		qp.posLabel,
 		container.NewHBox(qp.limitSel, spacerW(10), beautify, spacerW(6), completeBtn, spacerW(6),
-			runAll, spacerW(8), findBtn, spacerW(8), contErr, spacerW(6), runBtn, spacerW(10), qp.timer),
+			runAll, spacerW(6), explainBtn, spacerW(8), findBtn, spacerW(8), contErr, spacerW(6), runBtn, spacerW(10), qp.timer),
 		layout.NewSpacer(),
 	)
 	editorArea := container.NewBorder(nil, nil, gutter, nil, container.NewPadded(qp.editor))
@@ -725,6 +731,51 @@ func (qp *queryPane) run() {
 	// v2.8 has no public SetSelection, so the cursor marks the highlight).
 	qp.moveToByte(start)
 	qp.runChain([]string{stmt})
+}
+
+// explain shows the current statement's execution plan (波 97, the
+// DataGrip/Navicat "Explain" button). The plan recipe comes from the kernel's
+// sqltext.ExplainQuery, which picks each engine's dialect (MySQL/PG prefix
+// EXPLAIN, SQLite EXPLAIN QUERY PLAN, Oracle EXPLAIN PLAN FOR + DBMS_XPLAN).
+// Nothing in a plan executes the statement, so this skips the Safe Gate and
+// the result lands in an ordinary result tab.
+func (qp *queryPane) explain() {
+	if qp.running || qp.session() == nil {
+		return
+	}
+	qp.hideAuto()
+	text := qp.editor.Text
+	var stmt string
+	if sel := strings.TrimSpace(qp.editor.SelectedText()); sel != "" {
+		stmt = sel
+	} else {
+		start, end := qp.currentStatementRange()
+		stmt = strings.TrimSpace(text[start:end])
+	}
+	if stmt == "" {
+		showInfo(qp.window, "Explain", "The cursor is not inside a statement.")
+		return
+	}
+	plan, err := sqltext.ExplainQuery(qp.conn.Driver, stmt)
+	if err != nil {
+		showInfo(qp.window, "Explain", err.Error())
+		return
+	}
+	qp.beginRun()
+	qp.resetResultTabs()
+	if plan.Prepare != "" {
+		// Session-bracketed engines (SQL Server SHOWPLAN_XML, Oracle): run the
+		// bracket on this same session, then the plan query — cleanup is best
+		// effort, the plan query's answer is the grid either way.
+		sess := qp.session()
+		if _, perr := sess.Query(plan.Prepare, 1); perr != nil {
+			qp.finishRun()
+			dialog.NewError(friendlyErr(perr), qp.window).Show()
+			return
+		}
+		defer sess.Query(plan.Cleanup, 1) //nolint:errcheck // cleanup is best effort
+	}
+	qp.sendStatement(plan.Query, []string{plan.Query}, 0)
 }
 
 // runAll executes every statement in the editor sequentially, stopping at the
