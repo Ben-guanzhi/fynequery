@@ -2170,6 +2170,17 @@ func (ws *workspace) syncChrome() {
 	if ws.body != nil {
 		ws.body.Refresh()
 	}
+	// 波 94（Navicat 惯例）：标题 = 连接 — 服务端 — 库；换库（currentDB 变化）经
+	// loadInventory → 这里同步，标题不再停留在旧库上。
+	if ws.window != nil && ws.sess != nil {
+		if srv := ws.sess.Server(); srv != "" {
+			db := ws.currentDB
+			if db == "" {
+				db = "全部库"
+			}
+			ws.window.SetTitle("TablePro — " + ws.conn.Name + " — " + srv + " — " + db)
+		}
+	}
 }
 
 // showTab switches the visible content to the document at strip index i: a
