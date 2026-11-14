@@ -13,9 +13,9 @@ func TestChartPoints(t *testing.T) {
 		Rows: [][]*string{
 			{str("北京"), str("120.5")},
 			{str("上海"), str("98")},
-			{str("广州"), nil},     // NULL → 跳过
+			{str("广州"), nil},        // NULL → 跳过
 			{str("深圳"), str("abc")}, // 非数值 → 跳过
-			{nil, str("7")},        // X 为 NULL → 标签 "?"
+			{nil, str("7")},         // X 为 NULL → 标签 "?"
 		},
 	}
 	labels, values, dropped := chartPoints(data, 0, 1)

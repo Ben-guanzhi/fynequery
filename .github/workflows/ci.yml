@@ -36,6 +36,19 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: gofmt
+        # The tree carries .gitattributes (eol=lf) so a Windows checkout stays
+        # LF and this step measures formatting, not line endings. Five files had
+        # drifted before this check existed (struct-tag alignment in chart.go /
+        # query.go, a UTF-8 BOM in two tests); gofmt fixes all three on sight.
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed for:"
+            echo "$unformatted"
+            exit 1
+          fi
       - name: vet
         # -unsafeptr=false: chrome_windows.go's Win32 message-lParam casts are
         # ABI-mandated uintptr→Pointer conversions (see check.ps1).

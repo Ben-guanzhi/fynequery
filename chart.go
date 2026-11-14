@@ -114,8 +114,8 @@ func (r *fyneChartRenderer) Layout(size fyne.Size) {
 
 func (r *fyneChartRenderer) Objects() []fyne.CanvasObject { return r.chart.allObjects() }
 func (r *fyneChartRenderer) MinSize() fyne.Size           { return fyne.NewSize(320, 200) }
-func (r *fyneChartRenderer) Refresh() { r.chart.rebuild(r.chart.Size()) }
-func (r *fyneChartRenderer) Destroy() {}
+func (r *fyneChartRenderer) Refresh()                     { r.chart.rebuild(r.chart.Size()) }
+func (r *fyneChartRenderer) Destroy()                     {}
 
 // rebuild 按 size 重新生成/定位所有图形对象（Layout 每次拖动都调）。
 func (c *fyneChart) rebuild(size fyne.Size) {

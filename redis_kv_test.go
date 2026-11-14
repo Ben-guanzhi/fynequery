@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 // KV 键视图(建议⑥): Redis 会话的数据页退出"表形伪装"——结构/索引 segment、
 // Filter/Columns/≡ 按钮、列结构详情全部退场,换上键元数据与键专用占位符。

@@ -53,18 +53,18 @@ type queryPane struct {
 	resultActive bool              // whether a result is shown (drives the split offset)
 	// Q-05 (F4): 整页图表视图开关——true 时 resultSlot 显示 chart，false 显示网格。
 	chartOn   bool
-	chartData *TableData           // 图表数据源（与当前网格同源）
-	chartBtn  *flatButton          // 结果区右上的 图表/表格 切换
-	status       *statusBar
-	timer        *canvas.Text
-	posLabel     *widget.Label // "第 1 行, 第 1 列, 位置 0"
-	limitSel     *widget.Select
-	runBtn       *accentButton
-	window       fyne.Window
-	conn         Connection
-	sess         db.Session
-	side         *sidebar
-	running      bool
+	chartData *TableData  // 图表数据源（与当前网格同源）
+	chartBtn  *flatButton // 结果区右上的 图表/表格 切换
+	status    *statusBar
+	timer     *canvas.Text
+	posLabel  *widget.Label // "第 1 行, 第 1 列, 位置 0"
+	limitSel  *widget.Select
+	runBtn    *accentButton
+	window    fyne.Window
+	conn      Connection
+	sess      db.Session
+	side      *sidebar
+	running   bool
 
 	// sessFn returns the workspace's current session. The workspace re-dials
 	// (and closes the old session) when the user picks a database, so the pane

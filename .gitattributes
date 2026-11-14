@@ -1,0 +1,20 @@
+# LF everywhere, on every platform.
+#
+# gofmt refuses CRLF and rewrites files on sight, so a Windows checkout with
+# `core.autocrlf=true` (the default, and what the windows-latest runner uses)
+# makes the whole tree look unformatted. Normalising here keeps a clone
+# byte-identical across machines.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.jpg binary
+*.gif binary
+*.db binary
+*.exe binary
+*.so binary
+*.dylib binary
+*.dll binary
+
+# PowerShell scripts keep CRLF (Windows PowerShell 5.1 continuity semantics).
+*.ps1 text eol=crlf
