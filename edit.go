@@ -137,6 +137,8 @@ func (t *dataTable) setCell(row, col int, v *string) {
 		t.dirty[row] = map[int]*string{}
 	}
 	t.dirty[row][col] = v
+	// S-02：记录最近一次改动，供 Ctrl+Z 的单步回退。
+	t.undoRow, t.undoCol, t.undoHas = row, col, true
 	t.Refresh()
 	if t.onDirty != nil {
 		t.onDirty()
@@ -159,10 +161,32 @@ func (t *dataTable) revertCell(row, col int) {
 			delete(t.dirty, row)
 		}
 	}
+	// 这一格不再是待提交改动：单步撤销的记录随之失效。
+	if t.undoHas && t.undoRow == row && t.undoCol == col {
+		t.undoHas = false
+	}
 	t.Refresh()
 	if t.onDirty != nil {
 		t.onDirty()
 	}
+}
+
+// undoLast reverts the most recent pending cell change (S-02
+// single-undo-gesture). Only one step: dirty is a map without order, so a
+// multi-step undo needs a stack — the contract's next step. Reports whether
+// something was reverted, so the caller can leave the key alone when there
+// was nothing of ours to undo (the focused editor keeps its own text undo).
+func (t *dataTable) undoLast() bool {
+	if !t.undoHas {
+		return false
+	}
+	row, col := t.undoRow, t.undoCol
+	t.undoHas = false
+	if _, dirty := t.dirty[row][col]; !dirty {
+		return false
+	}
+	t.revertCell(row, col)
+	return true
 }
 
 // markSelectedDeleted flags the selected row for deletion.

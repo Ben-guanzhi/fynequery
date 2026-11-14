@@ -64,6 +64,12 @@ type dataTable struct {
 	dirty      map[int]map[int]*string // row -> col -> new value (nil = NULL)
 	deleted    map[int]bool            // rows marked for deletion
 	inserted   map[int]bool            // rows staged for insert (pending new rows)
+	// undoLog 记最近一次待提交改动（S-02 single-undo-gesture）：Ctrl+Z 回退它。
+	// dirty 是 map 无顺序，撤销需要知道"最后动的是哪一格"；只留一步（再按一次
+	// 停留在原状），多步 undo 需要栈，是契约的下一步。
+	undoRow int
+	undoCol int
+	undoHas bool
 
 	// column sort state (TablePlus HeaderSort / HeaderSortDirection)
 	sortCol int

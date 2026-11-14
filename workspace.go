@@ -338,6 +338,7 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 		}
 	})
 	w.SetContent(newPanelBackground(ws.build(), func() color.Color { return pal().bg }))
+
 	ws.updateBanner()
 	ws.loadInventory()
 	ws.loadDatabases()
@@ -395,6 +396,17 @@ func openWorkspace(app fyne.App, conn Connection, sess db.Session, dark bool, on
 		func(fyne.Shortcut) {
 			if qp := ws.activeQueryPane(); qp != nil {
 				qp.toggleFindBar()
+			}
+		})
+	// S-02 single-undo-gesture: Ctrl/Cmd+Z reverts the most recent pending cell
+	// change. Fyne routes the focused widget's shortcuts first (the SQL
+	// editor's TypedShortcut chain consumes its own text undo), and AddShortcut
+	// on the canvas only fires when nothing focused took it — same dispatch as
+	// sqlgpui's ctrl-z. No-op without an editable grid or a pending edit.
+	w.Canvas().AddShortcut(&desktop.CustomShortcut{KeyName: fyne.KeyZ, Modifier: fyne.KeyModifierControl},
+		func(fyne.Shortcut) {
+			if t := ws.activeData; t != nil && t.grid != nil && t.grid.undoLast() {
+				ws.logf("UNDO — reverted last pending cell edit")
 			}
 		})
 	w.Show()
