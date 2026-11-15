@@ -48,13 +48,6 @@ func (p *welcomePage) build() fyne.CanvasObject {
 	welcome2.TextSize = 30
 	welcome2.TextStyle.Bold = true
 
-	themeBtn := widget.NewButton("Toggle Dark Theme", func() {
-		darkMode = !darkMode
-		applyTheme(p.window)
-	})
-	exportTheme := widget.NewButton("Export Theme", func() { exportThemeJSON(p.window) })
-	importTheme := widget.NewButton("Import Theme", func() { importThemeJSON(p.window) })
-
 	left := container.NewVBox(
 		layout.NewSpacer(),
 		container.NewHBox(layout.NewSpacer(), logo, layout.NewSpacer()),
@@ -62,9 +55,6 @@ func (p *welcomePage) build() fyne.CanvasObject {
 		spacerH(6),
 		container.NewHBox(layout.NewSpacer(), welcome2, layout.NewSpacer()),
 		widget.NewLabel(""),
-		container.NewHBox(layout.NewSpacer(), themeBtn, layout.NewSpacer()),
-		container.NewHBox(layout.NewSpacer(),
-			container.NewHBox(exportTheme, importTheme), layout.NewSpacer()),
 		widget.NewLabel("Version 1.0.0 · A native tool for relational databases"),
 		layout.NewSpacer(),
 		container.NewHBox(
@@ -130,8 +120,24 @@ func (p *welcomePage) build() fyne.CanvasObject {
 		func() color.Color { return pal().contentBG },
 		func() color.Color { return pal().crumbBorder }, 12, 0)
 
+	// Appearance lives in a menu, not on the welcome page: these are settings,
+	// and the page's job is to get you connected.
+	p.window.SetMainMenu(fyne.NewMainMenu(
+		fyne.NewMenu("View",
+			fyne.NewMenuItem("Toggle Dark Theme", func() {
+				darkMode = !darkMode
+				applyTheme(p.window)
+			}),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Export Theme…", func() { exportThemeJSON(p.window) }),
+			fyne.NewMenuItem("Import Theme…", func() { importThemeJSON(p.window) }),
+		),
+	))
+
 	split := container.NewHSplit(leftBg, rightCard)
-	split.SetOffset(0.36)
+	// 26%: enough for the logo and the product name, and the connection list —
+	// the thing the page is for — gets the rest.
+	split.SetOffset(0.26)
 	return split
 }
 
