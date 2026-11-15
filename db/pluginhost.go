@@ -989,7 +989,11 @@ func (s *remoteSession) ApplyChanges(table string, updates []RowEdit, deletes []
 	}
 	req := dbcore.BatchRequest{Table: table, DDL: ddl}
 	for _, u := range updates {
-		req.Updates = append(req.Updates, dbcore.RowChange{PK: valuesOf(u.PK), Changes: valuesOf(u.Changes)})
+		req.Updates = append(req.Updates, dbcore.RowChange{
+			PK:      valuesOf(u.PK),
+			Changes: valuesOf(u.Changes),
+			Expect:  valuesOf(u.Expect),
+		})
 	}
 	for _, d := range deletes {
 		req.Deletes = append(req.Deletes, valuesOf(d))

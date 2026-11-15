@@ -223,6 +223,11 @@ func (t *dataTable) pkOf(row int) map[string]*string {
 type rowUpdate struct {
 	pk      map[string]*string
 	changes map[string]*string
+	// expect is what the row held when the page was read, for exactly the
+	// columns `changes` writes. The kernel puts it into the UPDATE's WHERE, so a
+	// row another writer edited after this page was loaded stops matching
+	// instead of being silently overwritten.
+	expect map[string]*string
 }
 
 // pending snapshots the unsaved edits and deletions for commit (UI thread).
@@ -236,12 +241,20 @@ func (t *dataTable) pending() (updates []rowUpdate, deletes, inserts []map[strin
 			continue
 		}
 		changes := map[string]*string{}
+		expect := map[string]*string{}
 		for col, v := range m {
-			if col < len(t.data.Cols) {
-				changes[t.data.Cols[col].Name] = v
+			if col >= len(t.data.Cols) {
+				continue
+			}
+			name := t.data.Cols[col].Name
+			changes[name] = v
+			// The loaded row, not the edited one: a guard built from the new
+			// value would always match and detect nothing.
+			if col < len(t.data.Rows[row]) {
+				expect[name] = t.data.Rows[row][col]
 			}
 		}
-		updates = append(updates, rowUpdate{pk: pk, changes: changes})
+		updates = append(updates, rowUpdate{pk: pk, changes: changes, expect: expect})
 	}
 	for row := range t.deleted {
 		if row >= len(t.data.Rows) {
@@ -906,7 +919,7 @@ func (ws *workspace) commitGated(up db.Updater, ok bool, table string, carryTab 
 			// commit.
 			rowEdits := make([]db.RowEdit, 0, len(updates))
 			for _, u := range updates {
-				rowEdits = append(rowEdits, db.RowEdit{PK: u.pk, Changes: u.changes})
+				rowEdits = append(rowEdits, db.RowEdit{PK: u.pk, Changes: u.changes, Expect: u.expect})
 			}
 			ferr = batcher.ApplyChanges(table, rowEdits, deletes, inserts, ddl)
 		} else {

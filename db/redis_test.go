@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/Ben-guanzhi/dbcore"
+	"github.com/alicebob/miniredis/v2"
 
 	"fynequery/proto"
 )

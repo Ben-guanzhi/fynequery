@@ -63,6 +63,10 @@ type Updater interface {
 type RowEdit struct {
 	PK      map[string]*string
 	Changes map[string]*string
+	// Expect is what the row held when it was read, for the columns Changes
+	// writes. A session backed by the kernel turns it into the UPDATE's
+	// optimistic predicate; a session that ignores it keeps the old behaviour.
+	Expect map[string]*string
 }
 
 // BatchUpdater is optionally implemented by Updater sessions that can apply a
