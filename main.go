@@ -265,6 +265,8 @@ func main() {
 	db.SetKnownHostsPath(filepath.Join(configDir(), "ssh-known-hosts.json"))
 
 	a := app.NewWithID("com.tablepro.fynequery")
+	// The window/taskbar icon: one artwork, drawn by tools/iconfamily.
+	a.SetIcon(appIcon)
 	a.Settings().SetTheme(&tablePlusTheme{base: theme.DefaultTheme()})
 	a.Lifecycle().SetOnStopped(db.Shutdown)
 
