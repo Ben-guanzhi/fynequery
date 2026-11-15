@@ -1,5 +1,8 @@
 # fynequery — TablePro 风格的 Fyne 数据库客户端
 
+<img src="assets/icon.png" width="96" alt="FyneQuery">
+
+
 基于 **TablePlus** 官方界面截图（见 `design-ref/`）设计的数据库客户端，
 使用 Go + Fyne（v2.8）构建。UI 结构与 TablePlus 一一对应。
 
