@@ -27,6 +27,10 @@ type welcomePage struct {
 	onPick  func(Connection, db.Session)
 	conns   []Connection
 	listBox *fyne.Container
+	// newConnAction is the "New Connection" row reload() puts at the top of the
+	// list: the primary action lives with the list it acts on, because the card
+	// header slot never painted in this Fyne build.
+	newConnAction fyne.CanvasObject
 }
 
 func newWelcomePage(w fyne.Window, onPick func(Connection, db.Session)) *welcomePage {
@@ -40,7 +44,7 @@ func (p *welcomePage) build() fyne.CanvasObject {
 
 	welcome1 := canvas.NewText("Welcome to", pal().welcomeFG)
 	welcome1.TextSize = 22
-	welcome2 := canvas.NewText("TablePro", pal().foreground)
+	welcome2 := canvas.NewText("FyneQuery", pal().foreground)
 	welcome2.TextSize = 30
 	welcome2.TextStyle.Bold = true
 
@@ -88,8 +92,7 @@ func (p *welcomePage) build() fyne.CanvasObject {
 	p.listBox = container.NewVBox()
 	p.reload()
 
-	newLink := widget.NewHyperlink("Create a new connection...", nil)
-	newLink.OnTapped = func() {
+	newConn := func() {
 		showNewConnectionDialog(p.window, func(c Connection, s db.Session) {
 			p.reload()
 			if p.onPick != nil {
@@ -107,9 +110,17 @@ func (p *welcomePage) build() fyne.CanvasObject {
 		})
 	}
 
+	// The primary action rides the list (see reload); the header keeps the title.
+	action := widget.NewButtonWithIcon("New Connection", theme.ContentAddIcon(), newConn)
+	action.Importance = widget.MediumImportance
+	p.newConnAction = action
+	// reload() ran before the action existed; run it again so the row appears.
+	p.reload()
+	header := container.NewPadded(widget.NewLabelWithStyle(
+		"Connections", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
 	right := container.NewBorder(
-		container.NewPadded(widget.NewLabelWithStyle("Connections", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})),
-		container.NewPadded(container.NewHBox(newLink, widget.NewLabel("  "), importLink)),
+		header,
+		container.NewPadded(container.NewHBox(importLink)),
 		nil, nil,
 		container.NewScroll(container.NewPadded(p.listBox)),
 	)
@@ -133,8 +144,16 @@ func (p *welcomePage) reload() {
 	p.conns = conns
 
 	p.listBox.Objects = nil
+	// The primary action rides the list, not the card header: this VBox is what
+	// actually paints, and "add" belongs at the top of the list it adds to.
+	if p.newConnAction != nil {
+		// Left-aligned at its natural width: a primary action on a list is a
+		// button, not a full-width banner (and never the danger colour).
+		row := container.NewHBox(p.newConnAction, layout.NewSpacer())
+		p.listBox.Objects = append(p.listBox.Objects, container.NewPadded(row))
+	}
 	if len(conns) == 0 {
-		hint := canvas.NewText("No connections yet.\nClick \"Create a new connection...\" below.", pal().welcomeFG)
+		hint := canvas.NewText("No connections yet — add the first one above.", pal().welcomeFG)
 		hint.TextSize = 13
 		p.listBox.Objects = append(p.listBox.Objects, container.NewPadded(hint))
 		p.listBox.Refresh()

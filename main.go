@@ -281,7 +281,7 @@ func main() {
 	// when a workspace window closes (TablePlus returns to the welcome page).
 	var showWelcome func()
 	showWelcome = func() {
-		ww := a.NewWindow("TablePro")
+		ww := a.NewWindow("FyneQuery")
 		ww.Resize(fyne.NewSize(1020, 680))
 		wp := newWelcomePage(ww, func(c Connection, sess db.Session) {
 			// Double-click / pick a connection: open the workspace and close
