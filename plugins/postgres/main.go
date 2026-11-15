@@ -12,8 +12,8 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver
 
-	"github.com/dbcore/dbcore/postgres"
-	"github.com/dbcore/dbcore/sqltext"
+	"github.com/Ben-guanzhi/dbcore/postgres"
+	"github.com/Ben-guanzhi/dbcore/sqltext"
 
 	"fynequery/plugins/internal/pluginkit"
 	"fynequery/proto"

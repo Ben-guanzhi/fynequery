@@ -18,8 +18,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/dbcore/dbcore"
-	dbcoreredis "github.com/dbcore/dbcore/redis"
+	"github.com/Ben-guanzhi/dbcore"
+	dbcoreredis "github.com/Ben-guanzhi/dbcore/redis"
 
 	"fynequery/proto"
 )

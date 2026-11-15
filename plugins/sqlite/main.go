@@ -12,7 +12,7 @@ import (
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 
-	"github.com/dbcore/dbcore/sqltext"
+	"github.com/Ben-guanzhi/dbcore/sqltext"
 
 	"fynequery/plugins/internal/pluginkit"
 	"fynequery/proto"

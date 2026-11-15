@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/dbcore/dbcore/usability"
+	"github.com/Ben-guanzhi/dbcore/usability"
 )
 
 var (

@@ -17,7 +17,7 @@ import (
 
 	"fynequery/db"
 
-	"github.com/dbcore/dbcore/sqltext"
+	"github.com/Ben-guanzhi/dbcore/sqltext"
 )
 
 // sqlLiteral renders one pending cell value as a SQL literal: NULL for nil,

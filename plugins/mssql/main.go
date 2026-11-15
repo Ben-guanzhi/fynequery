@@ -12,8 +12,8 @@ import (
 
 	_ "github.com/microsoft/go-mssqldb" // registers the "sqlserver" driver
 
-	"github.com/dbcore/dbcore/mssql"
-	"github.com/dbcore/dbcore/sqltext"
+	"github.com/Ben-guanzhi/dbcore/mssql"
+	"github.com/Ben-guanzhi/dbcore/sqltext"
 
 	"fynequery/plugins/internal/pluginkit"
 	"fynequery/proto"

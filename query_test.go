@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dbcore/dbcore/sqltext"
+	"github.com/Ben-guanzhi/dbcore/sqltext"
 
 	"fynequery/db"
 )

@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dbcore/dbcore"
-	dbcoremysql "github.com/dbcore/dbcore/mysql"
-	"github.com/dbcore/dbcore/sqltext"
+	"github.com/Ben-guanzhi/dbcore"
+	dbcoremysql "github.com/Ben-guanzhi/dbcore/mysql"
+	"github.com/Ben-guanzhi/dbcore/sqltext"
 
 	"fynequery/internal/sqlkit"
 	"fynequery/proto"

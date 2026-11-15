@@ -19,6 +19,7 @@ require (
 	github.com/fyne-io/oksvg v0.2.1-0.20260918172519-a9af55fa95d9 // indirect
 	github.com/go-gl/gl v0.0.0-20260331235117-4566fea9a276 // indirect
 	github.com/go-gl/glfw/v3.4/glfw v0.1.0-pre.2 // indirect
+	github.com/go-sql-driver/mysql v1.10.1 // indirect
 	github.com/go-text/render v0.2.1 // indirect
 	github.com/go-text/typesetting v0.3.5 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
@@ -49,7 +50,6 @@ require (
 	golang.org/x/image v0.24.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
 	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
@@ -57,16 +57,14 @@ require (
 
 require (
 	fyne.io/fyne/v2 v2.8.2
+	github.com/Ben-guanzhi/dbcore v0.2.0
 	github.com/alicebob/miniredis/v2 v2.40.0
-	github.com/dbcore/dbcore v0.1.0
-	github.com/go-sql-driver/mysql v1.10.1
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/microsoft/go-mssqldb v1.11.2
 	github.com/redis/go-redis/v9 v9.17.3
 	github.com/sijms/go-ora/v2 v2.9.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/sys v0.48.0
+	golang.org/x/text v0.41.0
 	modernc.org/sqlite v1.60.1
 )
-
-replace github.com/dbcore/dbcore => ../dbcore

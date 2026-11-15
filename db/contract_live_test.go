@@ -6,9 +6,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/dbcore/dbcore"
-	"github.com/dbcore/dbcore/drivertest"
-	dbcoremysql "github.com/dbcore/dbcore/mysql"
+	"github.com/Ben-guanzhi/dbcore"
+	"github.com/Ben-guanzhi/dbcore/drivertest"
+	dbcoremysql "github.com/Ben-guanzhi/dbcore/mysql"
 
 	"fynequery/proto"
 )

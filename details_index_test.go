@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/dbcore/dbcore"
+	"github.com/Ben-guanzhi/dbcore"
 )
 
 // indexTableData turns kernel metadata into the Indexes page grid: one row per

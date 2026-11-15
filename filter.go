@@ -15,7 +15,7 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
-	sqltext "github.com/dbcore/dbcore/sqltext"
+	sqltext "github.com/Ben-guanzhi/dbcore/sqltext"
 )
 
 var filterOperators = []string{

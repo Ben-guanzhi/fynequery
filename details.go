@@ -22,7 +22,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/dbcore/dbcore"
+	"github.com/Ben-guanzhi/dbcore"
 
 	"fynequery/db"
 	"fynequery/icons"

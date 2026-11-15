@@ -17,7 +17,7 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
-	fuzzy "github.com/dbcore/dbcore/fuzzy"
+	fuzzy "github.com/Ben-guanzhi/dbcore/fuzzy"
 )
 
 // objectMatch is one quick-open candidate.

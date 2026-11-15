@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dbcore/dbcore"
+	"github.com/Ben-guanzhi/dbcore"
 
 	"fynequery/proto"
 )

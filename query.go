@@ -26,7 +26,7 @@ import (
 	"fynequery/internal/sqlscan"
 	"fynequery/proto"
 
-	"github.com/dbcore/dbcore/sqltext"
+	"github.com/Ben-guanzhi/dbcore/sqltext"
 )
 
 // colorWhite is used for text on accent backgrounds.

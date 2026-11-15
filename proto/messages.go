@@ -1,7 +1,7 @@
 // Package proto defines the wire protocol between fynequery and its
 // database plugin processes.
 //
-// The protocol itself now lives in the kernel (github.com/dbcore/dbcore/
+// The protocol itself now lives in the kernel (github.com/Ben-guanzhi/dbcore/
 // plugindriver), so a plugin written for one client works with the other; this
 // package is the fynequery-facing view of it: the method names, the payloads,
 // and the conversions between tagged cells and the nullable strings the Fyne UI

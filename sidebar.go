@@ -17,7 +17,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/dbcore/dbcore/fuzzy"
+	"github.com/Ben-guanzhi/dbcore/fuzzy"
 )
 
 type sidebarMode int

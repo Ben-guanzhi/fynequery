@@ -7,7 +7,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/dbcore/dbcore/dberror"
+	"github.com/Ben-guanzhi/dbcore/dberror"
 )
 
 func friendlyErr(err error) error {

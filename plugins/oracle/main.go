@@ -12,8 +12,8 @@ import (
 
 	goora "github.com/sijms/go-ora/v2"
 
-	"github.com/dbcore/dbcore/oracle"
-	"github.com/dbcore/dbcore/sqltext"
+	"github.com/Ben-guanzhi/dbcore/oracle"
+	"github.com/Ben-guanzhi/dbcore/sqltext"
 
 	"fynequery/plugins/internal/pluginkit"
 	"fynequery/proto"

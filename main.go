@@ -19,7 +19,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/dbcore/dbcore/usability"
+	"github.com/Ben-guanzhi/dbcore/usability"
 
 	"fynequery/db"
 )

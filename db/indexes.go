@@ -1,6 +1,6 @@
 package db
 
-import "github.com/dbcore/dbcore"
+import "github.com/Ben-guanzhi/dbcore"
 
 // IndexLister is optionally implemented by Session types whose engine is served
 // by a dbcore.SQLDriver. The Indexes pane then renders structured kernel

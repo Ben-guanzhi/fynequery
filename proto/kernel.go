@@ -1,6 +1,6 @@
 package proto
 
-// The wire format is the kernel's (github.com/dbcore/dbcore/plugindriver), so a
+// The wire format is the kernel's (github.com/Ben-guanzhi/dbcore/plugindriver), so a
 // plugin written for one client works with the other.
 //
 // What was fynequery's own protocol and what is now the kernel's:
@@ -24,7 +24,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/dbcore/dbcore/plugindriver"
+	"github.com/Ben-guanzhi/dbcore/plugindriver"
 )
 
 // The protocol name and version this package speaks. ProtocolName stays

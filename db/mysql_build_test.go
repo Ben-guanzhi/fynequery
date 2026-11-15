@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dbcore/dbcore/sqltext"
+	"github.com/Ben-guanzhi/dbcore/sqltext"
 )
 
 func strPtr(s string) *string { return &s }
