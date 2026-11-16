@@ -61,6 +61,10 @@ type sidebar struct {
 	database    string
 	selID       string // currently selected tree node id (drives white-on-blue rows)
 	history     []historyRec
+	// histFavOnly 是「只看收藏」过滤；histFavBtn 是切换它的按钮（label 随状态）。
+	histFavOnly bool
+	histFavBtn  *widget.Button
+	histSel     widget.ListItemID // 最近选中的历史项（收藏动作的目标）
 	// histW serializes command-history disk writes (see cmdhistory.go).
 	histW       historyWriter
 	loaded      bool
@@ -746,10 +750,14 @@ func (b *sidebarBody) CreateRenderer() fyne.WidgetRenderer {
 			lbl.Truncation = fyne.TextTruncateEllipsis
 			rec := items[i]
 			stmtText := strings.ReplaceAll(rec.Stmt, "\n", " ⏎ ")
+			mark := ""
+			if rec.Fav {
+				mark = "★ "
+			}
 			if rec.Conn != "" {
-				lbl.SetText("[" + rec.Conn + "] " + stmtText)
+				lbl.SetText(mark + "[" + rec.Conn + "] " + stmtText)
 			} else {
-				lbl.SetText(stmtText)
+				lbl.SetText(mark + stmtText)
 			}
 		},
 	)
@@ -758,12 +766,25 @@ func (b *sidebarBody) CreateRenderer() fyne.WidgetRenderer {
 		if id < 0 || id >= len(items) {
 			return
 		}
+		b.s.histSel = id
 		historyList.UnselectAll()
 		if b.s.onHistoryPick != nil {
 			b.s.onHistoryPick(items[id].Stmt)
 		}
 	}
-	history := container.NewBorder(historySearch, nil, nil, nil, historyList)
+	// 收藏：历史记下所有，收藏是标出来要反复用的。
+	b.s.histFavBtn = widget.NewButton("★ 只看收藏", func() {
+		b.s.histFavOnly = !b.s.histFavOnly
+		if b.s.histFavOnly {
+			b.s.histFavBtn.SetText("☆ 全部")
+		} else {
+			b.s.histFavBtn.SetText("★ 只看收藏")
+		}
+		b.refreshHistoryList()
+	})
+	markBtn := widget.NewButton("☆ 收藏选中", b.markSelectedFavorite)
+	searchRow := container.NewBorder(nil, nil, nil, container.NewHBox(markBtn, b.s.histFavBtn), historySearch)
+	history := container.NewBorder(searchRow, nil, nil, nil, historyList)
 	b.historySearch = historySearch
 	b.historyList = historyList
 	noDB := widget.NewLabelWithStyle("未选择数据库，请按Ctrl K选择数据库",
@@ -800,6 +821,10 @@ func (b *sidebarBody) filteredHistory() []historyRec {
 	out := make([]historyRec, 0, len(all))
 	for i := len(all) - 1; i >= 0; i-- {
 		r := all[i]
+		// 「只看收藏」过滤：收藏是标出来要反复用的那几条。
+		if b.s.histFavOnly && !r.Fav {
+			continue
+		}
 		if needle == "" {
 			out = append(out, r)
 			continue
@@ -812,6 +837,43 @@ func (b *sidebarBody) filteredHistory() []historyRec {
 		}
 	}
 	return out
+}
+
+// markSelectedFavorite 切换最近选中项的收藏标记并持久化。
+//
+// 过滤后的下标不是原始下标（「只看收藏」+ 搜索都过滤），所以复现一次过滤、
+// 数到第 id 项，拿到它在 s.history 里的真身再改。
+func (b *sidebarBody) markSelectedFavorite() {
+	items := b.filteredHistory()
+	id := b.s.histSel
+	if id < 0 || id >= len(items) {
+		return
+	}
+	term := ""
+	if b.historySearch != nil {
+		term = strings.TrimSpace(b.historySearch.Text)
+	}
+	needle := fuzzy.FoldString(term)
+	pos := 0
+	for i := len(b.s.history) - 1; i >= 0; i-- {
+		r := b.s.history[i]
+		if b.s.histFavOnly && !r.Fav {
+			continue
+		}
+		if needle != "" {
+			text := fuzzy.FoldString(r.Conn) + " " + fuzzy.FoldString(r.Stmt)
+			if _, ok := fuzzyScore(needle, text); !ok {
+				continue
+			}
+		}
+		if pos == int(id) {
+			b.s.history[i].Fav = !r.Fav
+			b.s.persistHistory()
+			b.refreshHistoryList()
+			return
+		}
+		pos++
+	}
 }
 
 // refreshHistoryList re-runs the history list's length/update callbacks so it

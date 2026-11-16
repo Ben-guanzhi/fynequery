@@ -31,9 +31,13 @@ func commandHistoryPath() string {
 }
 
 // historyRec is one executed statement plus the connection it ran on.
+//
+// Fav 是「收藏」标记：历史记下**所有**跑过的，收藏是标出来要反复用的（与
+// dbstudio 的 Favorites 同一语义）。旧文件没有这个字段，读出来是 false。
 type historyRec struct {
 	Stmt string `json:"stmt"`
 	Conn string `json:"conn,omitempty"`
+	Fav  bool   `json:"fav,omitempty"`
 }
 
 // commandHistoryFile is the on-disk shape: one JSON list of records, oldest
