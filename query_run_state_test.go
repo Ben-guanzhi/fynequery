@@ -23,7 +23,7 @@ import (
 func TestBeginRunFinishRunStateTransition(t *testing.T) {
 	qp := &queryPane{runBtn: newAccentButton("Run Current")}
 
-	if qp.running {
+	if qp.isRunning() {
 		t.Fatal("初始状态 running 应为 false")
 	}
 	if qp.runBtn.label != "Run Current" {
@@ -31,7 +31,7 @@ func TestBeginRunFinishRunStateTransition(t *testing.T) {
 	}
 
 	qp.beginRun()
-	if !qp.running {
+	if !qp.isRunning() {
 		t.Error("beginRun 后 running 应为 true")
 	}
 	if qp.runBtn.label != "Cancel" {
@@ -39,7 +39,7 @@ func TestBeginRunFinishRunStateTransition(t *testing.T) {
 	}
 
 	qp.finishRun()
-	if qp.running {
+	if qp.isRunning() {
 		t.Error("finishRun 后 running 应为 false")
 	}
 	if qp.runBtn.label != "Run Current" {
@@ -55,7 +55,7 @@ func TestBeginRunAfterFinishRestoresState(t *testing.T) {
 	qp.finishRun()
 	qp.beginRun() // 模拟超时重试
 
-	if !qp.running {
+	if !qp.isRunning() {
 		t.Error("finishRun→beginRun 后 running 应恢复为 true")
 	}
 	if qp.runBtn.label != "Cancel" {

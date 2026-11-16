@@ -64,7 +64,10 @@ type queryPane struct {
 	conn      Connection
 	sess      db.Session
 	side      *sidebar
-	running   bool
+	// running 经 runMu 读写：runAll 的链式回调与测试/渲染并发（-race 抓到过）。
+	// isRunning / setRunning 是访问口。
+	runMu   sync.Mutex
+	running bool
 
 	// sessFn returns the workspace's current session. The workspace re-dials
 	// (and closes the old session) when the user picks a database, so the pane
@@ -140,6 +143,20 @@ func newQueryPane(w fyne.Window, c Connection, sess db.Session, side *sidebar) *
 // session returns the current live session. The workspace re-dials and closes
 // the previous session when the user switches databases; preferring sessFn
 // avoids using that stale connection (which the plugin reports as "closed").
+// isRunning 是 running 的带锁读。
+func (qp *queryPane) isRunning() bool {
+	qp.runMu.Lock()
+	defer qp.runMu.Unlock()
+	return qp.running
+}
+
+// setRunning 是 running 的带锁写。
+func (qp *queryPane) setRunning(v bool) {
+	qp.runMu.Lock()
+	defer qp.runMu.Unlock()
+	qp.running = v
+}
+
 func (qp *queryPane) session() db.Session {
 	if qp.sessFn != nil {
 		return qp.sessFn()
@@ -708,7 +725,7 @@ func (qp *queryPane) rowLimit() int {
 // exactly what will execute. While a run is in flight the button cancels
 // instead of starting.
 func (qp *queryPane) run() {
-	if qp.running {
+	if qp.isRunning() {
 		qp.cancelRun()
 		return
 	}
@@ -740,7 +757,7 @@ func (qp *queryPane) run() {
 // Nothing in a plan executes the statement, so this skips the Safe Gate and
 // the result lands in an ordinary result tab.
 func (qp *queryPane) explain() {
-	if qp.running || qp.session() == nil {
+	if qp.isRunning() || qp.session() == nil {
 		return
 	}
 	qp.hideAuto()
@@ -782,7 +799,7 @@ func (qp *queryPane) explain() {
 // first error (TablePlus "Run All" with Return-on-Error off → we stop, since
 // re-running a half-applied batch is user-hostile).
 func (qp *queryPane) runAll() {
-	if qp.running || qp.session() == nil {
+	if qp.isRunning() || qp.session() == nil {
 		return
 	}
 	qp.hideAuto()
@@ -997,7 +1014,7 @@ func (qp *queryPane) finishRun() {
 	// Reset history navigation: the statement just run is now the newest
 	// history entry, so the next Ctrl+Up starts fresh from the live editor.
 	qp.hist, qp.histDraft, qp.histPos = nil, "", 0
-	qp.running = false
+	qp.setRunning(false)
 	qp.runBtn.setLabel("Run Current")
 }
 
@@ -1072,7 +1089,7 @@ func (qp *queryPane) beginRun() {
 		qp.logQuery("插件进程已重建：连接已重新打开，此前的事务/临时表/会话变量已丢失")
 		qp.status.setQueryInfo("⚠ 插件进程已重建——服务器端会话状态已丢失")
 	}
-	qp.running = true
+	qp.setRunning(true)
 	qp.runBtn.setLabel("Cancel")
 }
 

@@ -104,10 +104,10 @@ func TestRunAllKeepsEveryStatementResult(t *testing.T) {
 	qp.runAll()
 
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && qp.running {
+	for time.Now().Before(deadline) && qp.isRunning() {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if qp.running {
+	if qp.isRunning() {
 		t.Fatal("runAll did not finish in time")
 	}
 	if len(qp.resultTabs) != 2 {
