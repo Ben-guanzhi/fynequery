@@ -451,42 +451,6 @@ func (p *pluginProc) callUngated(ctx context.Context, method string, params, res
 	return conn.Call(ctx, method, params, result)
 }
 
-// callStream performs a streaming exchange through the kernel host, handing
-// each frame to the caller in fynequery's shape.
-func (p *pluginProc) callStream(ctx context.Context, method string, params interface{}, onFrame func(proto.StreamFrame) (bool, error), final interface{}) error {
-	conn, err := p.ensure()
-	if err != nil {
-		return err
-	}
-	select {
-	case p.callGate <- struct{}{}:
-		defer func() { <-p.callGate }()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	return conn.CallStream(ctx, method, params, func(f plugindriver.StreamFrame) (bool, error) {
-		return onFrame(streamFrameOf(f))
-	}, final)
-}
-
-// streamFrameOf maps the kernel's frame onto the fynequery shape: the columns
-// carry the "PK" key marker the grid expects instead of the kernel's boolean.
-func streamFrameOf(f plugindriver.StreamFrame) proto.StreamFrame {
-	out := proto.StreamFrame{
-		Rows:         f.Rows,
-		RowsAffected: f.RowsAffected,
-		DurationMS:   f.DurationMS,
-	}
-	for _, col := range f.Columns {
-		c := proto.ColumnInfo{Name: col.Name, Type: col.Type, Nullable: col.Nullable}
-		if col.IsPrimaryKey {
-			c.Key = "PK"
-		}
-		out.Columns = append(out.Columns, c)
-	}
-	return out
-}
-
 func (p *pluginProc) Connect(cfg proto.ConnectParams) (Session, error) {
 	// FQ-01: reference the process BEFORE dialing (the broker rule §6.2).
 	// Dialing can take seconds, and a concurrent last-session Close inside

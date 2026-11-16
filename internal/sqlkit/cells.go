@@ -113,22 +113,3 @@ func formatDisplayTime(t time.Time) string {
 	}
 	return local.Format("2006-01-02 15:04:05.999999999")
 }
-
-// CellToString renders a cell as the nullable string the UI works with. The
-// conversion happens at the edge of the UI, so the wire keeps its kinds.
-func CellToString(cell plugindriver.CellPayload) *string {
-	if cell.Kind == "null" || cell.Kind == "" {
-		return nil
-	}
-	text := cellText(cell)
-	return &text
-}
-
-// StringToCell is the inverse: a UI cell becomes a tagged cell. An empty string
-// is an empty string, not a NULL — only a nil pointer is a NULL.
-func StringToCell(value *string) plugindriver.CellPayload {
-	if value == nil {
-		return plugindriver.CellPayload{Kind: "null"}
-	}
-	return plugindriver.CellPayload{Kind: "text", Text: *value}
-}

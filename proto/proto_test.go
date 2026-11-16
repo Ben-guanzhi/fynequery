@@ -96,8 +96,6 @@ func (testHandler) Metrics(p MetricsParams) (MetricsResult, error) {
 	return MetricsResult{Metrics: []Metric{{Label: "Uptime", Value: "1h"}}}, nil
 }
 
-func ptr(s string) *string { return &s }
-
 // client is the host side of the pipe pair.
 type client struct {
 	w   io.Writer

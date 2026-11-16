@@ -351,20 +351,6 @@ func typeBadge(t DBType, size float32) fyne.CanvasObject {
 	return container.NewStack(rect, container.NewPadded(label))
 }
 
-// dbPill is the toolbar breadcrumb badge (slightly pill-shaped).
-func dbPill(t DBType) fyne.CanvasObject {
-	rect := canvas.NewRectangle(hex(t.Color))
-	rect.CornerRadius = 7
-	fg := color.RGBA{R: 255, G: 255, B: 255, A: 255}
-	if t.Light {
-		fg = color.RGBA{R: 0x2B, G: 0x2B, B: 0x2B, A: 255}
-	}
-	label := canvas.NewText(t.Code, fg)
-	label.TextSize = 12
-	label.TextStyle.Bold = true
-	return container.NewStack(rect, label)
-}
-
 // tagChip renders a small outlined chip like "loc" / "tes".
 func tagChip(tg Tag) fyne.CanvasObject {
 	c := hex(tg.Color)
@@ -676,11 +662,6 @@ func (t *tabLabel) setActive(a bool) {
 		t.active = a
 		t.Refresh()
 	}
-}
-
-func (t *tabLabel) setTitle(s string) {
-	t.title = s
-	t.Refresh()
 }
 
 func (t *tabLabel) Tapped(_ *fyne.PointEvent) {

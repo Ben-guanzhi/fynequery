@@ -163,33 +163,6 @@ func (t *dataTable) visibleCount() int {
 	return n
 }
 
-func (t *dataTable) setData(d *TableData) {
-	t.data = d
-	t.selRow = -1
-	t.selCol = -1
-	t.sortCol = -1
-	t.sortAsc = true
-	t.findTerm = ""
-	t.findHits = nil
-	t.findHitSet = nil
-	t.findCur = 0
-	if t.findTimer != nil {
-		t.findTimer.Stop()
-		t.findTimer = nil
-	}
-	t.frozen = false
-	t.colWidths = nil
-	t.widthsGen++
-	t.colMeta = nil
-	if t.rows != nil {
-		t.rows.rebuildRows()
-	}
-	t.Refresh()
-	if t.status != nil {
-		t.status.setRows(d.Fetched, d.Total, d.Approx)
-	}
-}
-
 // sortData sorts the displayed rows by the tapped column. NULLs always sort
 // last regardless of direction; tapping the sorted column again flips
 // ascending/descending; numbers compare numerically only when the column's

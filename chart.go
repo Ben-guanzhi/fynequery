@@ -122,9 +122,6 @@ func (c *fyneChart) rebuild(size fyne.Size) {
 	fg := theme.Color(theme.ColorNameForeground)
 	accent := theme.Color(theme.ColorNamePrimary)
 	grid := theme.Color(theme.ColorNameSeparator)
-	if grid == nil {
-		grid = fg
-	}
 	// 边距：标题/注释占上 36px，X 轴标签占下 26px，左 48px 给 Y 刻度。
 	left, bottom, top := float32(48), float32(26), float32(36)
 	w := size.Width - left - 8
