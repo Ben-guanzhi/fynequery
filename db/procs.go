@@ -28,3 +28,23 @@ func ProcListerFor(s Session) dbcore.ProcessLister {
 	}
 	return nil
 }
+
+// VarReader 是服务器变量查看的可选能力接口（dbcore v0.6.0 的
+// ServerVariablesReader）：session 实现它，UI 断言后使用。
+type VarReader interface {
+	// VarReader 返回内核能力（nil = 当前引擎不支持变量查看）。
+	VarReader() dbcore.ServerVariablesReader
+}
+
+// VarReader 实现（mysqlSession）：与 ProcLister 同一个现场构造的驱动。
+func (s *mysqlSession) VarReader() dbcore.ServerVariablesReader {
+	return dbcoremysql.NewFromDB(s.db)
+}
+
+// VarReaderFor 断言 helper：session 支持则返回能力，否则 nil。
+func VarReaderFor(s Session) dbcore.ServerVariablesReader {
+	if vr, ok := s.(VarReader); ok {
+		return vr.VarReader()
+	}
+	return nil
+}

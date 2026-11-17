@@ -574,6 +574,7 @@ func (ws *workspace) openMoreMenu() {
 		fyne.NewMenuItem("ER Diagram", func() { ws.openERDiagram() }),
 		fyne.NewMenuItem("Server Metrics", func() { ws.openServerMetrics() }),
 		fyne.NewMenuItem("Server Sessions…", func() { ws.openServerSessions() }),
+		fyne.NewMenuItem("Server Variables…", func() { ws.openServerVars() }),
 		fyne.NewMenuItem("Import Data…", func() { ws.importData() }),
 		fyne.NewMenuItem("User Management", func() { ws.openUserManagement() }),
 		fyne.NewMenuItemSeparator(),
