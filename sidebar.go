@@ -26,6 +26,7 @@ const (
 	sidebarItems sidebarMode = iota
 	sidebarQueries
 	sidebarHistory
+	sidebarSnippets // 片段库：跨连接复用的命名 SQL 块
 )
 
 type sidebar struct {
@@ -39,6 +40,11 @@ type sidebar struct {
 	onItemMenu    func(string, fyne.Position) // right-click on an item
 	onMoreKeys    func()                      // "load more keys" row (KV, paged inventory)
 	onHistoryPick func(string)                // a history entry was picked: load into the query editor
+	// 片段库（片段 tab）：跨连接复用的命名 SQL 块。
+	onSnippetPick    func(string)   // a snippet was picked: load its SQL into the editor
+	snippetStore     *snippetStore  // 数据层（main 里初始化并 load）
+	snippetSel       string         // 当前选中的片段名
+	currentEditorText func() string // 取当前编辑器内容（main 接线）
 	// saved-query panel (查询 tab)
 	onQueryRun  func(q SavedQuery) // open + run a saved query
 	onQueryOpen func(q SavedQuery) // open a saved query in the editor
@@ -489,12 +495,13 @@ func (s *sidebar) CreateRenderer() fyne.WidgetRenderer {
 		}
 	})
 	historyBtn := newSideModeButton("历史记录", func() { s.setMode(sidebarHistory) })
-	s.modeBtns = []*sideModeButton{itemsBtn, queriesBtn, historyBtn}
+	snippetBtn := newSideModeButton("片段", func() { s.setMode(sidebarSnippets) })
+	s.modeBtns = []*sideModeButton{itemsBtn, queriesBtn, historyBtn, snippetBtn}
 	for i, b := range s.modeBtns {
 		b.setActive(i == int(s.mode))
 	}
 	modeRow := container.NewBorder(nil, nil, spacerW(16), nil,
-		container.NewHBox(itemsBtn, spacerW(4), queriesBtn, spacerW(4), historyBtn))
+		container.NewHBox(itemsBtn, spacerW(4), queriesBtn, spacerW(4), historyBtn, spacerW(4), snippetBtn))
 
 	s.search = widget.NewEntry()
 	s.search.PlaceHolder = "搜索表..."
@@ -716,9 +723,13 @@ type sidebarBody struct {
 	s      *sidebar
 	stack  *fyne.Container
 	status *widget.Label
+	// 片段面板：列表对象存这里，保存/删除后 Refresh（widget.NewList 的长度
+	// 回调会重读 filteredSnippets）。
+	snippetList *widget.List
 	treeWrap,
 	queries,
 	history,
+	snippets,
 	noDB fyne.CanvasObject
 	// History pane (fuzzy-searchable): the search box filters the executed-
 	// statement history and the list shows the hits newest-first, each
@@ -799,7 +810,8 @@ func (b *sidebarBody) CreateRenderer() fyne.WidgetRenderer {
 	b.noDB = noDB
 	b.status = status
 	b.treeWrap = container.NewPadded(b.s.tree)
-	b.stack = container.NewStack(b.treeWrap, b.queries, b.history, container.NewCenter(noDB), container.NewCenter(status))
+	b.snippets = b.buildSnippetPane()
+	b.stack = container.NewStack(b.treeWrap, b.queries, b.history, b.snippets, container.NewCenter(noDB), container.NewCenter(status))
 	b.applyPane() // establish the initially visible pane
 	return widget.NewSimpleRenderer(b.stack)
 }
@@ -894,9 +906,11 @@ func (b *sidebarBody) applyPane() {
 		idx = 1
 	case sidebarHistory:
 		idx = 2
+	case sidebarSnippets:
+		idx = 3
 	}
 	if b.s.noDB {
-		idx = 3 // "未选择数据库" prompt
+		idx = 4 // "未选择数据库" prompt
 	} else if idx == 0 {
 		// Items (tree) mode: surface loading / error / empty / no-match states
 		// instead of a bare, ambiguous empty group list.

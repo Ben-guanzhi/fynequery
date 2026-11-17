@@ -991,6 +991,16 @@ func (ws *workspace) build() fyne.CanvasObject {
 	ws.side.onItemMenu = func(name string, pos fyne.Position) { ws.showItemMenu(name, pos) }
 	ws.side.onMoreKeys = ws.loadMoreKeys
 	ws.side.onHistoryPick = func(stmt string) { ws.loadHistoryIntoEditor(stmt) }
+	// 片段库：数据层挂侧栏，选中即把 SQL 放进编辑器（跨连接复用）。
+	ws.side.snippetStore = newSnippetStore(configDir())
+	ws.side.snippetStore.load()
+	ws.side.onSnippetPick = func(sql string) { ws.loadHistoryIntoEditor(sql) }
+	ws.side.currentEditorText = func() string {
+		if qp := ws.activeQueryPane(); qp != nil && qp.editor != nil {
+			return qp.editor.Text
+		}
+		return ""
+	}
 	ws.side.onSearch = ws.onSidebarSearch
 	ws.side.onQueryRun = func(q SavedQuery) { ws.openSavedQuery(q, true) }
 	ws.side.onQueryOpen = func(q SavedQuery) { ws.openSavedQuery(q, false) }
