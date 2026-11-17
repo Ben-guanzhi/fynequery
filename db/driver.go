@@ -243,10 +243,20 @@ var (
 
 // Register adds (or replaces) a driver. Called at startup for the built-in
 // MySQL driver and for every discovered plugin.
-func Register(d Dialer) {
+//
+// **内置驱动不可被插件遮蔽**：已注册的非插件（Plugin=false）驱动是编译进
+// 二进制的实现，一个恰同名（fq-plugin-mysql.exe → code "mysql"）的插件进程
+// 覆盖它 = 用户实际用的驱动悄悄换成了外部进程——不受信任、无审计、行为可能
+// 不同。拒绝并保留内置；同名插件之间仍是先到先得（pluginhost 的 seen 去重）。
+func Register(d Dialer) bool {
 	regMu.Lock()
 	defer regMu.Unlock()
-	drivers[d.Info().Code] = d
+	code := d.Info().Code
+	if old, ok := drivers[code]; ok && !old.Info().Plugin {
+		return false
+	}
+	drivers[code] = d
+	return true
 }
 
 // Unregister removes a driver by its code. It is the inverse of Register and

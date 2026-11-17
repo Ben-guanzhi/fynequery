@@ -1,4 +1,4 @@
-package db
+﻿package db
 
 // Plugin host: discovers plugin executables next to the app and exposes each
 // one as a Dialer. The process plumbing — spawn, banner handshake, request
@@ -72,8 +72,11 @@ func DiscoverPlugins(dir string) {
 			procsMu.Lock()
 			procs = append(procs, proc)
 			procsMu.Unlock()
-			Register(proc)
-			logf("pluginhost: registered %s (lazy) from %s", code, e.Name())
+			if Register(proc) {
+				logf("pluginhost: registered %s (lazy) from %s", code, e.Name())
+			} else {
+				logf("pluginhost: plugin %s refused — builtin driver for %s stays", e.Name(), code)
+			}
 		}
 	}
 }
