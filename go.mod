@@ -57,7 +57,7 @@ require (
 
 require (
 	fyne.io/fyne/v2 v2.8.2
-	github.com/Ben-guanzhi/dbcore v0.8.0
+	github.com/Ben-guanzhi/dbcore v0.9.0
 	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/microsoft/go-mssqldb v1.11.2
