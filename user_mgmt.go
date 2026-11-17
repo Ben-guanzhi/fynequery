@@ -6,6 +6,9 @@ package main
 // connection's Safe Mode before execution.
 
 import (
+	"context"
+	"errors"
+	"time"
 	"fmt"
 	"strings"
 
@@ -13,6 +16,8 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
+
+	dbcore "github.com/Ben-guanzhi/dbcore"
 
 	"fynequery/db"
 )
@@ -29,14 +34,15 @@ func (ws *workspace) openUserManagement() {
 	if ws.sess == nil {
 		return
 	}
-	switch ws.conn.Driver {
-	case "mysql", "mariadb", "postgres", "postgresql":
-	default:
+	sess := ws.sess
+	// 内核能力断言（dbcore v0.7.0 的 UserAdmin）——支持的引擎由内核说了算，
+	// 客户端不再维护引擎白名单。
+	ua := db.UserAdminFor(sess)
+	if ua == nil {
 		showInfo(ws.window, "User Management",
-			"User management is supported on MySQL/MariaDB and PostgreSQL.")
+			"User management is supported on MySQL/PostgreSQL/SQL Server.")
 		return
 	}
-	sess := ws.sess
 	// Snapshot: the worker must not read ws.conn (commitGated rule).
 	driver := ws.conn.Driver
 	gen := ws.nextGen()
@@ -50,54 +56,32 @@ func (ws *workspace) openUserManagement() {
 				showInfo(ws.window, "User Management", "Could not list users:\n"+err.Error())
 				return
 			}
-			ws.showUserDialog(rows)
+			ws.showUserDialog(ua, rows)
 		})
 	})
 }
 
-// fetchUserRows returns the login users for the connection's driver.
+// fetchUserRows 通过内核 UserAdmin 列出可登录用户（方言 SQL 在内核）。
 func (ws *workspace) fetchUserRows(sess db.Session, driver string) ([]userRow, error) {
-	var q string
-	one := func(row []*string) userRow {
-		if len(row) > 0 && row[0] != nil {
-			return userRow{user: *row[0]}
-		}
-		return userRow{}
+	ua := db.UserAdminFor(sess)
+	if ua == nil {
+		return nil, errors.New("当前引擎不支持用户管理")
 	}
-	two := func(row []*string) userRow {
-		if len(row) > 1 && row[0] != nil {
-			h := ""
-			if row[1] != nil {
-				h = *row[1]
-			}
-			return userRow{user: *row[0], host: h}
-		}
-		return userRow{}
-	}
-	var pick func([]*string) userRow
-	switch driver {
-	case "mysql", "mariadb":
-		q = "SELECT user, host FROM mysql.user ORDER BY user, host"
-		pick = two
-	default: // postgres
-		q = "SELECT rolname FROM pg_roles WHERE rolcanlogin ORDER BY rolname"
-		pick = one
-	}
-	res, err := sess.Query(q, 500)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	list, err := ua.ListUsers(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var out []userRow
-	for _, r := range res.StringRows() {
-		if u := pick(r); u.user != "" {
-			out = append(out, u)
-		}
+	out := make([]userRow, 0, len(list))
+	for _, u := range list {
+		out = append(out, userRow{user: u.Name, host: u.Host})
 	}
 	return out, nil
 }
 
 // showUserDialog is the main user-management panel: list + actions.
-func (ws *workspace) showUserDialog(users []userRow) {
+func (ws *workspace) showUserDialog(ua dbcore.UserAdmin, users []userRow) {
 	isMySQL := ws.conn.Driver == "mysql" || ws.conn.Driver == "mariadb"
 
 	names := make([]string, len(users))
@@ -140,18 +124,7 @@ func (ws *workspace) showUserDialog(users []userRow) {
 			if host == "" {
 				host = "%"
 			}
-			if isMySQL {
-				runUserDDL("New user",
-					fmt.Sprintf("CREATE USER '%s'@'%s' IDENTIFIED BY '%s'",
-						strings.ReplaceAll(p.user, "'", "''"),
-						strings.ReplaceAll(host, "'", "''"),
-						strings.ReplaceAll(p.password, "'", "''")))
-			} else {
-				runUserDDL("New user",
-					fmt.Sprintf(`CREATE USER "%s" WITH PASSWORD '%s'`,
-						strings.ReplaceAll(p.user, `"`, `""`),
-						strings.ReplaceAll(p.password, "'", "''")))
-			}
+				runUserDDL("New user", ua.CreateUserDDL(p.user, host, p.password))
 		})
 	})
 
@@ -165,14 +138,10 @@ func (ws *workspace) showUserDialog(users []userRow) {
 		if host == "" {
 			host = "%"
 		}
-		var stmt, label string
-		if isMySQL {
-			stmt = fmt.Sprintf("DROP USER '%s'@'%s'",
-				strings.ReplaceAll(u.user, "'", "''"), strings.ReplaceAll(host, "'", "''"))
-			label = u.user + "@" + host
-		} else {
-			stmt = fmt.Sprintf(`DROP USER "%s"`, strings.ReplaceAll(u.user, `"`, `""`))
-			label = u.user
+		stmt := ua.DropUserDDL(u.user, u.host)
+		label := u.user
+		if u.host != "" {
+			label = u.user + "@" + u.host
 		}
 		dialog.NewConfirm("Delete user",
 			fmt.Sprintf("Drop database user %q?\n\nThis revokes all of the user's access and cannot be undone.", label),
@@ -197,15 +166,7 @@ func (ws *workspace) showUserDialog(users []userRow) {
 		if host == "" {
 			host = "%"
 		}
-		if isMySQL {
-			runUserDDL("Grant", fmt.Sprintf("GRANT ALL PRIVILEGES ON %s.* TO '%s'@'%s'",
-				ws.quoteTable(ws.currentDB),
-				strings.ReplaceAll(u.user, "'", "''"),
-				strings.ReplaceAll(host, "'", "''")))
-		} else {
-			runUserDDL("Grant", fmt.Sprintf(`GRANT ALL ON DATABASE %s TO "%s"`,
-				ws.quoteTable(ws.currentDB), strings.ReplaceAll(u.user, `"`, `""`)))
-		}
+			runUserDDL("Grant", ua.GrantDatabaseDDL(u.user, u.host, ws.currentDB))
 	})
 
 	body := container.NewBorder(

@@ -48,3 +48,23 @@ func VarReaderFor(s Session) dbcore.ServerVariablesReader {
 	}
 	return nil
 }
+
+// UserAdminer 是用户管理的可选能力接口（dbcore v0.7.0 的 UserAdmin）：
+// session 实现它，UI 断言后使用。
+type UserAdminer interface {
+	// UserAdmin 返回内核能力（nil = 当前引擎不支持用户管理）。
+	UserAdmin() dbcore.UserAdmin
+}
+
+// UserAdmin 实现（mysqlSession）：与 ProcLister 同一个现场构造的驱动。
+func (s *mysqlSession) UserAdmin() dbcore.UserAdmin {
+	return dbcoremysql.NewFromDB(s.db)
+}
+
+// UserAdminFor 断言 helper：session 支持则返回能力，否则 nil。
+func UserAdminFor(s Session) dbcore.UserAdmin {
+	if u, ok := s.(UserAdminer); ok {
+		return u.UserAdmin()
+	}
+	return nil
+}
