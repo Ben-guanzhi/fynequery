@@ -96,9 +96,26 @@ func cellPlain(row []*string, col int) string {
 	return *row[col]
 }
 
+// formulaGuard 防 CSV 公式注入（OWASP CSV Injection）：以 = + - @ 或制表/回车
+// 开头的单元格在 Excel / LibreOffice 里会被当公式执行。前缀单引号使其按文本
+// 显示；纯数字字面量豁免（-5、+3 不动），否则破坏用户的数值计算。
+func formulaGuard(s string) string {
+	if s == "" {
+		return s
+	}
+	if _, err := strconv.ParseFloat(s, 64); err == nil {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	}
+	return s
+}
+
 // csvField quotes a value for a CSV file (double-quotes, doubled inner quotes).
 func csvField(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	return `"` + strings.ReplaceAll(formulaGuard(s), `"`, `""`) + `"`
 }
 
 // rowCSV renders one row as a single CSV line (withHeader adds the header row
