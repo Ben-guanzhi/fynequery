@@ -199,7 +199,14 @@ func saveConnections(conns []Connection) error {
 		// cannot be restored anyway, and copying it verbatim is exactly the
 		// plaintext-leak path this avoids.
 	}
-	return os.WriteFile(connectionsPath(), raw, 0o600)
+	// tmp + rename 原子写：connections.json 是最关键的状态文件（丢它 = 全部
+	// 连接丢失），崩溃/断电时直接 WriteFile 会留下半个文件。同仓的 history /
+	// editjournal / ssh 都用这一纪律，这里是最后一个漏网的。
+	tmp := connectionsPath() + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, connectionsPath())
 }
 
 // redactPasswords returns the connection file with every secret field cleared,
