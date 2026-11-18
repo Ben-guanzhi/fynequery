@@ -255,8 +255,8 @@ func (ws *workspace) quickOpenText(m objectMatch) string {
 		return m.Table
 	case "query":
 		s := m.SQL
-		if len(s) > 60 {
-			s = s[:60] + "…"
+		if r := []rune(s); len(r) > 60 {
+			s = string(r[:60]) + "…"
 		}
 		return "历史 · " + s
 	case "action":

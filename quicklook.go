@@ -332,8 +332,8 @@ func buildJSONTreeModel(v any) *jsonTreeModel {
 		default:
 			preview = fmt.Sprint(vv)
 		}
-		if len(preview) > 48 {
-			preview = preview[:48] + "…"
+		if r := []rune(preview); len(r) > 48 {
+			preview = string(r[:48]) + "…"
 		}
 		return name + ": " + preview
 	}
