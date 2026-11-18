@@ -575,6 +575,7 @@ func (ws *workspace) openMoreMenu() {
 		fyne.NewMenuItem("Server Metrics", func() { ws.openServerMetrics() }),
 		fyne.NewMenuItem("Server Sessions…", func() { ws.openServerSessions() }),
 		fyne.NewMenuItem("Server Variables…", func() { ws.openServerVars() }),
+		fyne.NewMenuItem("数据字典导出…", func() { ws.exportDictionary() }),
 		fyne.NewMenuItem("Import Data…", func() { ws.importData() }),
 		fyne.NewMenuItem("User Management", func() { ws.openUserManagement() }),
 		fyne.NewMenuItemSeparator(),
