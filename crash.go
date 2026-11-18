@@ -20,8 +20,15 @@ func writeCrash(where string, r interface{}) {
 	n := runtime.Stack(buf, true)
 	msg := fmt.Sprintf("=== %s panic: %v\n%s\n", where, r, buf[:n])
 	os.Stderr.WriteString(msg)
+	// crash.log 也带上限：崩溃路径没有轮转器，无上限的 append 会占满磁盘。
+	// 超限时截断后写（保留最后一次崩溃的全栈——最近的现场最有诊断价值）。
+	const maxCrashLogSize = 1 << 20 // 1 MB
+	crashFlag := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if info, err := os.Stat(filepath.Join(configDir(), "crash.log")); err == nil && info.Size() > maxCrashLogSize {
+		crashFlag = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	}
 	if f, err := os.OpenFile(filepath.Join(configDir(), "crash.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		crashFlag, 0o600); err == nil {
 		f.WriteString(msg)
 		f.Close()
 	}

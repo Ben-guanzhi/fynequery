@@ -219,8 +219,15 @@ func appLogf(format string, args ...interface{}) {
 
 // setupLogging routes plugin diagnostics into a log file next to the config.
 func setupLogging() *os.File {
+	// 启动时截断超大日志（sqltui 的同一纪律）：日志可能记录查询语句与
+	// 错误（含数据片段）——0600 而非 0644；无上限的 append 会占满磁盘。
+	const maxLogSize = 1 << 20 // 1 MB
+	flag := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if info, err := os.Stat(filepath.Join(configDir(), "fynequery.log")); err == nil && info.Size() > maxLogSize {
+		flag = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	}
 	f, err := os.OpenFile(filepath.Join(configDir(), "fynequery.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		flag, 0o600)
 	if err != nil {
 		return nil
 	}
