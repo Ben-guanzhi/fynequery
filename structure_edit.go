@@ -16,6 +16,8 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/Ben-guanzhi/dbcore"
+	"fynequery/db"
 	dbcoreddl "github.com/Ben-guanzhi/dbcore/ddl"
 
 	"fynequery/proto"
@@ -59,14 +61,18 @@ func (ws *workspace) editStructure(name string) {
 				showInfo(ws.window, "Edit structure "+name, "Could not read the columns:\n"+err.Error())
 				return
 			}
-			ws.showStructureDialog(name, cols)
+			idxs, ierr := listIndexesFor(sess, name)
+			if ierr != nil {
+				idxs = nil // 索引面读不到不阻塞列编辑（引擎不支持时为空）
+			}
+			ws.showStructureDialog(name, cols, idxs)
 		})
 	})
 }
 
 // showStructureDialog builds the dialog and, on Apply, queues the ALTER
 // statements into ws.pendingDDL (visible in the transaction strip).
-func (ws *workspace) showStructureDialog(name string, cols []proto.ColumnInfo) {
+func (ws *workspace) showStructureDialog(name string, cols []proto.ColumnInfo, idxs []dbcore.IndexInfo) {
 	driver := ws.conn.Driver
 	quote := func(s string) string { return quoteCol(s, driver) }
 
@@ -96,6 +102,7 @@ func (ws *workspace) showStructureDialog(name string, cols []proto.ColumnInfo) {
 	newEdit := &colEdit{isNew: true, nameEntry: newName, typeEntry: newType, nullChk: newNull}
 	rows.Objects = append(rows.Objects, spacerH(8),
 		container.NewHBox(fixedLabel("new col"), newName, newType, spacerW(6), newNull))
+	idxDrops, idxName, idxCols, idxUnique := showIndexSection(rows, idxs)
 
 	var dlg dialog.Dialog
 	apply := widget.NewButton("Queue DDL", func() {
@@ -108,6 +115,7 @@ func (ws *workspace) showStructureDialog(name string, cols []proto.ColumnInfo) {
 			}
 		}
 		stmts := buildAlterDDL(ws.conn.Driver, name, quote, edits, newEdit)
+		stmts = append(stmts, buildIndexDDL(ws.conn.Driver, name, idxDrops, idxName, idxCols, idxUnique)...)
 		if len(stmts) == 0 {
 			showInfo(ws.window, "Edit structure "+name, "No structural changes detected.")
 			return
@@ -245,4 +253,72 @@ func fixedLabel(text string) fyne.CanvasObject {
 	l := widget.NewLabel(text)
 	l.Truncation = fyne.TextTruncateEllipsis
 	return container.NewGridWrap(fyne.NewSize(120, 0), l)
+}
+
+// listIndexesFor 通过 IndexLister 取一张表的索引（引擎不支持返回空）。
+func listIndexesFor(sess db.Session, table string) ([]dbcore.IndexInfo, error) {
+	lister, ok := sess.(db.IndexLister)
+	if !ok {
+		return nil, nil
+	}
+	return lister.ListIndexes("", table)
+}
+
+// indexDropRow 是结构对话框里一个可勾选删除的现有索引。
+type indexDropRow struct {
+	info dbcore.IndexInfo
+	chk  *widget.Check
+}
+
+// showIndexSection 把索引区（现有索引勾选 Drop + 新增行）画进 rows，
+// 返回收集器供 Apply 时生成语句。
+func showIndexSection(rows *fyne.Container, idxs []dbcore.IndexInfo) (drops []*indexDropRow, newName, newCols *widget.Entry, newUnique *widget.Check) {
+	if len(idxs) == 0 {
+		return nil, nil, nil, nil
+	}
+	rows.Objects = append(rows.Objects, spacerH(8), widget.NewLabel("Indexes"))
+	for _, ix := range idxs {
+		if ix.Primary {
+			continue // 主键不是索引（AddPrimaryKey 的领域，删除走 DropPrimaryKey）
+		}
+		row := &indexDropRow{info: ix, chk: widget.NewCheck("", nil)}
+		cols := strings.Join(ix.Columns, ", ")
+		rows.Objects = append(rows.Objects, container.NewHBox(
+			row.chk, widget.NewLabel(ix.Name), widget.NewLabel("("+cols+")")))
+		drops = append(drops, row)
+	}
+	newName = widget.NewEntry()
+	newName.SetPlaceHolder("new index")
+	newCols = widget.NewEntry()
+	newCols.SetPlaceHolder("columns, comma separated")
+	newUnique = widget.NewCheck("UNIQUE", nil)
+	rows.Objects = append(rows.Objects, container.NewHBox(
+		widget.NewLabel("new"), newName, newCols, newUnique))
+	return drops, newName, newCols, newUnique
+}
+
+// buildIndexDDL 把索引区的勾选/新增变成内核渲染的 CREATE/DROP INDEX 语句。
+func buildIndexDDL(driver, table string, drops []*indexDropRow, newName, newCols *widget.Entry, newUnique *widget.Check) []string {
+	var out []string
+	for _, d := range drops {
+		if d.chk != nil && d.chk.Checked {
+			out = append(out, dbcoreddl.DropIndex(driver, "", table, d.info.Name))
+		}
+	}
+	name := strings.TrimSpace(newName.Text)
+	cols := strings.TrimSpace(newCols.Text)
+	if name != "" && cols != "" {
+		var collist []string
+		for _, c := range strings.Split(cols, ",") {
+			if cc := strings.TrimSpace(c); cc != "" {
+				collist = append(collist, cc)
+			}
+		}
+		if len(collist) > 0 {
+			out = append(out, dbcoreddl.CreateIndex(driver, "", table, dbcoreddl.Index{
+				Name: name, Unique: newUnique.Checked, Columns: collist,
+			}))
+		}
+	}
+	return out
 }
