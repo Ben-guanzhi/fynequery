@@ -16,6 +16,8 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
+	dbcoreddl "github.com/Ben-guanzhi/dbcore/ddl"
+
 	"fynequery/proto"
 )
 
@@ -23,6 +25,10 @@ import (
 // a brand-new column being added.
 type colEdit struct {
 	name      string
+	// oldName is the column's name when the dialog opened; a non-empty
+	// oldName that differs from nameEntry's text is a RENAME (the kernel's
+	// RenameColumn keeps the data, unlike a drop+add which loses it).
+	oldName   string
 	oldType   string
 	nullable  bool
 	isNew     bool
@@ -67,14 +73,16 @@ func (ws *workspace) showStructureDialog(name string, cols []proto.ColumnInfo) {
 	rows := container.NewVBox()
 	var edits []*colEdit
 	for _, c := range cols {
-		e := &colEdit{name: c.Name, oldType: c.Type, nullable: c.Nullable}
+		e := &colEdit{name: c.Name, oldName: c.Name, oldType: c.Type, nullable: c.Nullable}
+		e.nameEntry = widget.NewEntry()
+		e.nameEntry.SetText(c.Name)
 		e.typeEntry = widget.NewEntry()
 		e.typeEntry.SetText(c.Type)
 		e.nullChk = widget.NewCheck("NULL", nil)
 		e.nullChk.SetChecked(c.Nullable)
 		e.dropChk = widget.NewCheck("Drop", nil)
 		rows.Objects = append(rows.Objects, container.NewHBox(
-			fixedLabel(c.Name), e.typeEntry, spacerW(6), e.nullChk, spacerW(6), e.dropChk))
+			e.nameEntry, e.typeEntry, spacerW(6), e.nullChk, spacerW(6), e.dropChk))
 		edits = append(edits, e)
 	}
 
@@ -134,6 +142,27 @@ func buildAlterDDL(driver, table string, quote func(string) string, edits []*col
 		}
 		if e.dropChk != nil && e.dropChk.Checked {
 			out = append(out, fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", quote(table), quote(e.name)))
+			continue
+		}
+		// A rename: the row opened with oldName and its name entry now says
+		// something else. Route through the kernel's RenameColumn (dbcore
+		// v0.14.0) — it keeps the data, refuses engines that cannot express
+		// it (MySQL 5.x needs CHANGE with a full definition), and keeps the
+		// dialect spelling in one place.
+		// nameEntry may be nil on callers that build a colEdit without one
+		// (tests, programmatic use) — only a dialog row can rename.
+		var newName string
+		if e.nameEntry != nil {
+			newName = strings.TrimSpace(e.nameEntry.Text)
+		}
+		if e.oldName != "" && newName != "" && !strings.EqualFold(newName, e.oldName) {
+			stmt, err := dbcoreddl.RenameColumn(driver, "", table, e.oldName, newName)
+			if err != nil {
+				// 名字冲突等失败由 Preview 暴露——与其它排队语句同路。
+				out = append(out, "-- "+err.Error())
+				continue
+			}
+			out = append(out, stmt)
 			continue
 		}
 		newType := strings.TrimSpace(e.typeEntry.Text)
