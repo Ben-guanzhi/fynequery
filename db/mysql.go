@@ -263,6 +263,13 @@ func (s *mysqlSession) Columns(table string) ([]proto.ColumnInfo, error) {
 
 // Query 包一层可用性记录（S-01）：成功/取消/失败三态与耗时都记在驱动层，
 // 于是所有调用方（编辑器、DDL、备份、ERD…）自动被覆盖。
+// QueryMulti reads every result set of one statement via the kernel's
+// RunMulti traversal. A statement that answers one set returns one grid, so
+// callers can use this path uniformly when the capability is advertised.
+func (s *mysqlSession) QueryMulti(sqlText string, maxRows int) ([]proto.QueryResult, error) {
+	return sqlkit.RunMultiCtx(s.db, context.Background(), sqlText, maxRows)
+}
+
 func (s *mysqlSession) Query(sqlText string, maxRows int) (proto.QueryResult, error) {
 	started := time.Now()
 	res, err := s.queryOnce(sqlText, maxRows)

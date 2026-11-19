@@ -44,6 +44,15 @@ type Session interface {
 	Close()
 }
 
+// MultiQuerySession is optionally implemented by sessions whose driver can
+// answer one statement with several result sets (SQL Server batches and
+// stored procedures, MySQL CALL). The host asks for the extra grids only when
+// the session advertises the capability; engines that carry one set per
+// statement keep the ordinary Query path — that single grid is the truth.
+type MultiQuerySession interface {
+	QueryMulti(sqlText string, maxRows int) ([]proto.QueryResult, error)
+}
+
 // Updater is optionally implemented by Session types that support row-level
 // DML, enabling the editable data grid. Values are passed as *string (nil =
 // SQL NULL); pk carries the primary-key columns that identify the target row

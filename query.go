@@ -865,6 +865,15 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 	qp.timer.Color = pal().statusFG
 	qp.timer.Refresh()
 
+	// Multi-result path: a session whose driver can answer one statement with
+	// several grids gets one result tab per set. Single-result sessions keep
+	// the streaming path below untouched — one grid is the truth where the
+	// engine carries one set.
+	if mq, ok := sess.(db.MultiQuerySession); ok {
+		qp.sendGatedMulti(mq, stmt, label, all, i)
+		return
+	}
+
 	// Streaming path: fetch the result incrementally (bounded memory, paints
 	// progressively). Sessions without the capability fall back to the
 	// materialise-then-draw path below.
@@ -988,6 +997,77 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 			qp.logQuery("完成：%d %s · %d ms", affected, noun, res.DurationMS)
 			qp.status.setQueryInfo(statusLine)
 			tab.setMeta(timerText, statusLine)
+			if qp.side != nil {
+				qp.side.appendHistory(stmt, qp.conn.Name)
+			}
+			if i+1 < len(all) {
+				qp.runChainAt(all, i+1)
+			} else {
+				qp.finishRun()
+			}
+		})
+	})
+}
+
+// sendGatedMulti materialises every result set of one statement and gives
+// each its own result tab (reusing the existing multi-tab chrome). Multi-result
+// statements are typically stored procedures with small sets; the streaming
+// path stays the single-set default.
+// applyMultiSets creates one result tab per set. Synchronous — it runs on
+// the UI thread (from safeDo, or directly in tests).
+func (qp *queryPane) applyMultiSets(sets []proto.QueryResult, label, stmt string, i int) {
+	qp.activePin = -1
+	for si, res := range sets {
+		cols := make([]ColumnInfo, 0, len(res.Columns))
+		for _, c := range res.Columns {
+			cols = append(cols, ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable, Key: c.Key})
+		}
+		g := newDataTable(&TableData{Cols: cols, Fetched: len(res.Rows), Total: len(res.Rows)}, qp.status)
+		g.window = qp.window
+		g.tableName = ""
+		g.onPin = qp.pinResult
+		g.data.Rows = res.StringRows()
+		g.onRowSelect = func(idx int) {
+			if qp.onRowSelect != nil {
+				qp.onRowSelect(g.data, idx)
+			}
+		}
+		setLabel := label
+		if len(sets) > 1 {
+			setLabel = fmt.Sprintf("%s · 结果集 %d/%d", label, si+1, len(sets))
+		}
+		qp.resultSlot.Objects = []fyne.CanvasObject{g}
+		qp.resultSlot.Refresh()
+		qp.bindFind(g)
+		qp.updateResultChrome()
+		tab := qp.recordResultTab(i+si, setLabel, stmt, g)
+		tab.setMeta(fmt.Sprintf("%d ms · %d rows", res.DurationMS, len(res.Rows)),
+			qp.resultStatusLine(setLabel, len(cols), "完成"))
+	}
+}
+
+func (qp *queryPane) sendGatedMulti(mq db.MultiQuerySession, stmt, label string, all []string, i int) {
+	safeGo("query.run.multi", func() {
+		sets, err := mq.QueryMulti(stmt, qp.rowLimit())
+		safeDo(func() {
+			if err != nil {
+				qp.timer.Color = hex("#E53935")
+				qp.timer.Text = "error"
+				qp.timer.Refresh()
+				qp.logQuery("执行失败：%v", err)
+				qp.finishRun()
+				dialog.NewError(friendlyErr(err), qp.window).Show()
+				return
+			}
+			if len(sets) == 0 {
+				qp.finishRun()
+				return
+			}
+			qp.applyMultiSets(sets, label, stmt, i)
+			qp.timer.Color = pal().statusFG
+			qp.timer.Text = fmt.Sprintf("%d sets", len(sets))
+			qp.status.setQueryInfo(fmt.Sprintf("%s · %d 个结果集", label, len(sets)))
+			qp.logQuery("完成：%d 个结果集", len(sets))
 			if qp.side != nil {
 				qp.side.appendHistory(stmt, qp.conn.Name)
 			}
