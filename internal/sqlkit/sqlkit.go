@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"fynequery/proto"
+
+	"github.com/Ben-guanzhi/dbcore"
 )
 
 // Timeout caps any single statement (queries run in background goroutines in
@@ -77,6 +79,73 @@ func RunCtx(q Querier, ctx context.Context, sqlText string, maxRows int) (proto.
 	}
 	defer rows.Close()
 	return ReadRows(rows, maxRows, start)
+}
+
+// RunMultiCtx executes one statement and returns EVERY result set it answered
+// with, via the kernel's RunMulti (the single place that walks
+// Rows.NextResultSet). Row-returning sets become columns+rows; a DML batch's
+// empty set is skipped by the kernel, so what comes back is the sets a user
+// would actually want to see. Callers that only want the first grid can use
+// the ordinary Run — this is the opt-in capability behind the UI's
+// "results set 1/N" switcher.
+func RunMultiCtx(q Querier, ctx context.Context, sqlText string, maxRows int) ([]proto.QueryResult, error) {
+	if maxRows <= 0 {
+		maxRows = 1000
+	}
+	start := time.Now()
+	sets, err := dbcore.RunMulti(ctx, q, sqlText, nil, maxRows)
+	if err != nil && len(sets) == 0 {
+		return nil, err
+	}
+	out := make([]proto.QueryResult, len(sets))
+	for i, r := range sets {
+		res := proto.QueryResult{RowsAffected: r.AffectedRows, DurationMS: msSince(start), Truncated: r.Truncated}
+		res.Columns = make([]proto.ColumnInfo, len(r.Columns))
+		for ci, c := range r.Columns {
+			res.Columns[ci] = proto.ColumnInfo{
+				Name: c.Name, Type: strings.ToLower(c.Type), Nullable: c.Nullable,
+			}
+		}
+		for _, row := range r.Rows {
+			cells := make([]proto.CellPayload, len(row))
+			for ci, v := range row {
+				cells[ci] = FormatCell(nativeOf(v))
+			}
+			res.Rows = append(res.Rows, cells)
+		}
+		out[i] = res
+	}
+	// A mid-walk failure keeps the sets already read (the kernel's contract):
+	// surface it on the last set rather than hiding the grids before it.
+	if err != nil && len(out) > 0 {
+		last := &out[len(out)-1]
+		last.Rows = append(last.Rows, []proto.CellPayload{
+			{Text: "error: " + err.Error()},
+		})
+	}
+	return out, nil
+}
+
+// nativeOf unwraps a kernel Value into the Go type FormatCell expects (the
+// same shapes database/sql Scan produces on the ordinary Run path).
+func nativeOf(v dbcore.Value) interface{} {
+	switch v.Kind {
+	case dbcore.ValNull:
+		return nil
+	case dbcore.ValInt:
+		return v.I
+	case dbcore.ValFloat:
+		return v.F
+	case dbcore.ValText, dbcore.ValDecimal:
+		return v.S
+	case dbcore.ValBool:
+		return v.Bool
+	case dbcore.ValBlob:
+		return v.B
+	case dbcore.ValTime:
+		return v.T
+	}
+	return v.String()
 }
 
 // Querier is the subset of *sql.DB / *sql.Conn used by Run.
