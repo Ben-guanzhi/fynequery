@@ -74,6 +74,7 @@ func (ws *workspace) showItemMenu(name string, pos fyne.Position) {
 		fyne.NewMenuItem("复制为 DROP", func() { ws.copyText(dropSQL(ws.conn.Driver, kind, quote)) }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("克隆...", func() { ws.cloneTable(name, quote) }),
+		fyne.NewMenuItem("生成测试数据…", func() { ws.generateTestData(name) }),
 		fyne.NewMenuItem("清空...", func() { ws.confirmTruncate(name, quote) }),
 		fyne.NewMenuItem("删除...", func() { ws.confirmDrop(name, quote) }),
 	)
