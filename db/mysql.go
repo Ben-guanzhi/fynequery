@@ -766,7 +766,13 @@ func applyWithin(x execer, table string, updates []RowEdit, deletes []map[string
 		if len(u.PK) == 0 {
 			return fmt.Errorf("update %s: no primary key", table)
 		}
-		q, args := buildUpdate(table, u.PK, u.Changes)
+		// Expect turns the UPDATE into an optimistic predicate: the read-time
+		// values ride in WHERE alongside the PK, so a row another writer
+		// changed between read and write matches zero rows and fails the
+		// batch — instead of the keyed-by-PK-only update silently overwriting
+		// their change (a lost update). The UI already sends Expect; the
+		// builtin session was dropping it.
+		q, args := buildUpdateExpect(table, u.PK, u.Changes, u.Expect)
 		res, err := x.Exec(q, args...)
 		if err != nil {
 			return err
@@ -812,6 +818,50 @@ func applyWithin(x execer, table string, updates []RowEdit, deletes []map[string
 // ErrRowMismatch is returned when a DML statement did not affect exactly one
 // row, indicating the target row was concurrently changed or no longer exists.
 var ErrRowMismatch = errors.New("row mismatch: expected to affect exactly 1 row")
+
+// buildUpdateExpect is buildUpdate with the optimistic predicate: Expect's
+// read-time values join the PK in WHERE. Columns whose Expect value is nil
+// get "IS NULL" (same reasoning as the PK branch). No Expect → identical to
+// buildUpdate (a session that never receives one keeps its old behaviour).
+func buildUpdateExpect(table string, pk, changes, expect map[string]*string) (string, []interface{}) {
+	if len(expect) == 0 {
+		return buildUpdate(table, pk, changes)
+	}
+	var sets, where []string
+	var args []interface{}
+	for c, v := range changes {
+		if isDefault(v) {
+			sets = append(sets, quoteMySQL(c)+" = DEFAULT")
+			continue
+		}
+		sets = append(sets, quoteMySQL(c)+" = ?")
+		args = append(args, argOf(v))
+	}
+	for c, v := range pk {
+		if v == nil {
+			where = append(where, quoteMySQL(c)+" IS NULL")
+			continue
+		}
+		where = append(where, quoteMySQL(c)+" = ?")
+		args = append(args, argOf(v))
+	}
+	// Expect 条件只对 Changes 里写的列生效（读时的值）；其余列不参与——
+	// 一次改两列、另一写者改了第三列，不算这次编辑的冲突。
+	for c, v := range expect {
+		if _, writing := changes[c]; !writing {
+			continue
+		}
+		if v == nil {
+			where = append(where, quoteMySQL(c)+" IS NULL")
+			continue
+		}
+		where = append(where, quoteMySQL(c)+" = ?")
+		args = append(args, argOf(v))
+	}
+	q := "UPDATE " + quoteMySQL(table) + " SET " + strings.Join(sets, ", ") +
+		" WHERE " + strings.Join(where, " AND ")
+	return q, args
+}
 
 // buildUpdate renders the UPDATE statement and args shared by UpdateRow and
 // ApplyChanges.
