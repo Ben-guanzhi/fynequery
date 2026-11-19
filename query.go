@@ -670,7 +670,7 @@ func (qp *queryPane) toggleComment() {
 	if row < 0 || row >= len(lines) {
 		return
 	}
-	lines[row] = toggleLineComment(lines[row])
+	lines[row] = sqltext.ToggleLineComment(lines[row])
 	qp.editor.SetText(strings.Join(lines, "\n"))
 	qp.editor.CursorRow = row
 	qp.editor.CursorColumn = len([]rune(lines[row]))
@@ -678,19 +678,10 @@ func (qp *queryPane) toggleComment() {
 	qp.refreshPos()
 }
 
-// toggleLineComment adds or removes a leading "-- " on one line, keeping any
-// indentation intact.
+// toggleLineComment 委托内核 sqltext（行内语义一处维护——§346）；
+// 本地签名保留给既有测试与调用者。
 func toggleLineComment(line string) string {
-	trimmed := strings.TrimLeft(line, " \t")
-	indent := line[:len(line)-len(trimmed)]
-	switch {
-	case strings.HasPrefix(trimmed, "-- "):
-		return indent + trimmed[3:]
-	case strings.HasPrefix(trimmed, "--"):
-		return indent + strings.TrimPrefix(trimmed[2:], " ")
-	default:
-		return indent + "-- " + trimmed
-	}
+	return sqltext.ToggleLineComment(line)
 }
 
 func (qp *queryPane) refreshPos() {
