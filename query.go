@@ -26,6 +26,7 @@ import (
 	"fynequery/internal/sqlscan"
 	"fynequery/proto"
 
+	"github.com/Ben-guanzhi/dbcore/sqlrisk"
 	"github.com/Ben-guanzhi/dbcore/sqltext"
 )
 
@@ -947,7 +948,7 @@ func (qp *queryPane) sendGated(stmt string, all []string, i int) {
 			qp.resultSlot.Refresh()
 			qp.bindFind(g)
 			qp.updateResultChrome()
-			qp.status.setQueryInfo(qp.resultStatusLine(label, len(cols), "执行中…"))
+			qp.status.setQueryInfo(qp.resultStatusLine(riskPrefix(stmt)+label, len(cols), "执行中…"))
 			tab = qp.recordResultTab(i, label, stmt, g)
 		})
 		if err != nil {
@@ -1459,6 +1460,29 @@ func (qp *queryPane) showTimeoutDialog(stmt string, all []string, i int) {
 	d = dialog.NewCustom("查询超时", "", body, qp.window)
 	d.Resize(fyne.NewSize(420, 160))
 	d.Show()
+}
+
+// riskPrefix 前置内核 sqlrisk 的分级摘要（DataGrip 的语句风险检测在
+// fynequery 的形态）：destructive 语句在状态栏亮出档位与首条原因，
+// 让用户在"执行中…"之前看到这条语句的影响半径。读语句不加前缀。
+func riskPrefix(stmt string) string {
+	r := sqlrisk.Assess(stmt)
+	switch r.Level {
+	case sqlrisk.LevelDestructive:
+		first := ""
+		if len(r.Reasons) > 0 {
+			first = r.Reasons[0]
+		}
+		return "[高风险] " + r.Summary + (func() string {
+			if first != "" {
+				return " · " + first
+			}
+			return ""
+		})() + " · "
+	case sqlrisk.LevelWrite:
+		return "[" + r.Summary + "] "
+	}
+	return ""
 }
 
 // resultStatusLine is the bottom "● …" line of a query result (TablePlus:
