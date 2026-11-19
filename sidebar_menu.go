@@ -16,6 +16,8 @@ import (
 	"github.com/Ben-guanzhi/dbcore/sqltext"
 
 	"fynequery/db"
+	dbcoreddl "github.com/Ben-guanzhi/dbcore/ddl"
+
 	"fynequery/proto"
 )
 
@@ -69,7 +71,7 @@ func (ws *workspace) showItemMenu(name string, pos fyne.Position) {
 			ws.copyText("SELECT * FROM " + quote + " LIMIT 100;")
 		}),
 		fyne.NewMenuItem("复制为 TRUNCATE", func() { ws.copyText(ws.truncateSQL(name, quote)) }),
-		fyne.NewMenuItem("复制为 DROP", func() { ws.copyText(dropSQL(kind, quote)) }),
+		fyne.NewMenuItem("复制为 DROP", func() { ws.copyText(dropSQL(ws.conn.Driver, kind, quote)) }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("克隆...", func() { ws.cloneTable(name, quote) }),
 		fyne.NewMenuItem("清空...", func() { ws.confirmTruncate(name, quote) }),
@@ -319,17 +321,19 @@ func (ws *workspace) confirmDrop(name, quote string) {
 		fmt.Sprintf("Drop %s %s? This cannot be undone.", kind, name),
 		func(ok bool) {
 			if ok {
-				ws.runObjectSQL("Delete "+name, dropSQL(kind, quote))
+				ws.runObjectSQL("Delete "+name, dropSQL(ws.conn.Driver, kind, quote))
 			}
 		}, ws.window).Show()
 }
 
 // dropSQL renders the DROP statement for an object of a given kind. Views and
 // routines are not tables: "DROP TABLE view" is a syntax error on every engine.
-func dropSQL(kind, quote string) string {
+func dropSQL(driver, kind, quote string) string {
 	switch kind {
 	case "view":
-		return "DROP VIEW " + quote + ";"
+		// 内核渲染方言拼写（MSSQL 的 IF OBJECT_ID 守卫 vs 其它
+		// DROP VIEW IF EXISTS）——此前手写版没有 MSSQL 分支。
+		return dbcoreddl.DropView(driver, quote) + ";"
 	case "function", "procedure":
 		return "DROP " + strings.ToUpper(kind) + " " + quote + ";"
 	default:
