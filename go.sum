@@ -16,8 +16,8 @@ github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0 h1:nCYfg
 github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0/go.mod h1:ucUjca2JtSZboY8IoUqyQyuuXvwbMBVwFOm0vdQPNhA=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.8.0 h1:Nljr4q1GRA/5vCrMONS+g4u4LRHNgOXVSh3O43J2CnI=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.8.0/go.mod h1:Y33QHnf0FfdVewFFISOGe20mkZbxX4H839o955/PoeI=
-github.com/Ben-guanzhi/dbcore v0.18.0 h1:wqw5yHzfq5zBkorvLmfSIeYxnUhzqYdvsao2dAwVNwk=
-github.com/Ben-guanzhi/dbcore v0.18.0/go.mod h1:maIZ2bRSshI6phLBCfmgnMYkEK+OiVn8YYQIINAUBA0=
+github.com/Ben-guanzhi/dbcore v0.18.1 h1:6gb2zALGS2k8SUBp4rS38tkxnvSP8c8CWfVv0ls/dTk=
+github.com/Ben-guanzhi/dbcore v0.18.1/go.mod h1:maIZ2bRSshI6phLBCfmgnMYkEK+OiVn8YYQIINAUBA0=
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/FyshOS/fancyfs v0.0.1 h1:kgvm7VvwOMLkYTqSflplp62SlMVWQ2uAoHw9CXwXHYg=
