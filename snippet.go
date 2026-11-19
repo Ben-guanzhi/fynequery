@@ -13,6 +13,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,6 +37,8 @@ type snippetStore struct {
 	mu    sync.Mutex
 	path  string
 	items []snippet
+	// loadFailed 记录加载失败：坏文件在留档前不可被 saveLocked 覆盖。
+	loadFailed bool
 }
 
 func newSnippetStore(dir string) *snippetStore {
@@ -48,6 +51,9 @@ func (s *snippetStore) load() {
 	defer s.mu.Unlock()
 	raw, err := os.ReadFile(s.path)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			s.loadFailed = true // 文件在但读不了：后续保存必须先留档
+		}
 		s.items = nil
 		return
 	}
@@ -55,6 +61,7 @@ func (s *snippetStore) load() {
 		Snippets []snippet `json:"snippets"`
 	}
 	if err := json.Unmarshal(raw, &v); err != nil {
+		s.loadFailed = true
 		s.items = nil
 		return
 	}
@@ -105,6 +112,15 @@ func (s *snippetStore) del(name string) error {
 
 // saveLocked 原子落盘（tmp + rename）。调用方必须持锁。
 func (s *snippetStore) saveLocked() error {
+	// 解析失败的片段库不可覆盖：内存里的 items 不含旧片段，直接写 =
+	// 用户积累的片段全部丢失（§339 同款闸门）。留档后放行重建。
+	if s.loadFailed {
+		if raw, err := os.ReadFile(s.path); err == nil {
+			_ = os.WriteFile(s.path+".corrupt", raw, 0o600)
+		}
+		s.loadFailed = false
+		return fmt.Errorf("snippets.json 解析失败，副本已存为 .corrupt——请手工修复后重启，或重建片段")
+	}
 	raw, err := json.MarshalIndent(struct {
 		Snippets []snippet `json:"snippets"`
 	}{s.items}, "", "  ")
