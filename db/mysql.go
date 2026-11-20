@@ -263,6 +263,17 @@ func (s *mysqlSession) Columns(table string) ([]proto.ColumnInfo, error) {
 
 // Query 包一层可用性记录（S-01）：成功/取消/失败三态与耗时都记在驱动层，
 // 于是所有调用方（编辑器、DDL、备份、ERD…）自动被覆盖。
+// TransferDriver hands the kernel a SQLDriver view for TransferTable.
+// NewFromDB is stateless over the pool handle, matching the ListIndexes
+// pattern above.
+func (s *mysqlSession) TransferDriver() (dbcore.SQLDriver, error) {
+	drv, ok := dbcoremysql.NewFromDB(s.db).AsSQL()
+	if !ok {
+		return nil, dbcore.ErrNotSupported
+	}
+	return drv, nil
+}
+
 // QueryMulti reads every result set of one statement via the kernel's
 // RunMulti traversal. A statement that answers one set returns one grid, so
 // callers can use this path uniformly when the capability is advertised.

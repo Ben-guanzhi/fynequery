@@ -6,6 +6,7 @@ package db
 
 import (
 	"errors"
+	"github.com/Ben-guanzhi/dbcore"
 	"sort"
 	"sync"
 	"time"
@@ -42,6 +43,15 @@ type Session interface {
 	// Browse returns the first rows of a table (dialect-specific paging).
 	Browse(table string, limit int) (proto.QueryResult, error)
 	Close()
+}
+
+// TransferSession is optionally implemented by sessions that can hand the
+// kernel a SQLDriver view for TransferTable (data transfer between two
+// connections). Both the built-in MySQL session and the plugin remote
+// session (via the wide Conn) can serve one; sessions that cannot simply
+// do not advertise it and the transfer dialog never offers them.
+type TransferSession interface {
+	TransferDriver() (dbcore.SQLDriver, error)
 }
 
 // MultiQuerySession is optionally implemented by sessions whose driver can

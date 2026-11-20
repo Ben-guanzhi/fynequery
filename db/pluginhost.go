@@ -1,4 +1,4 @@
-﻿package db
+package db
 
 // Plugin host: discovers plugin executables next to the app and exposes each
 // one as a Dialer. The process plumbing — spawn, banner handshake, request
@@ -969,6 +969,19 @@ func (s *remoteSession) ApplyChanges(table string, updates []RowEdit, deletes []
 		req.Inserts = append(req.Inserts, valuesOf(i))
 	}
 	return s.wide.ApplyBatch(ctx, req)
+}
+
+// TransferDriver hands the kernel the wide Conn as a SQLDriver view —
+// the plugin process serves BrowseRows/BatchWrite through the console
+// protocol, which is all TransferTable needs on both ends.
+func (s *remoteSession) TransferDriver() (dbcore.SQLDriver, error) {
+	if err := s.live(context.Background()); err != nil {
+		return nil, err
+	}
+	if s.wide == nil {
+		return nil, dbcore.ErrNotSupported
+	}
+	return s.wide, nil
 }
 
 // CreateDatabase forwards the request to the plugin process, reusing the already
